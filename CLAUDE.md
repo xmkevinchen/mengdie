@@ -86,6 +86,12 @@ Key conventions:
 - DB connection shared via `Arc<Mutex<Connection>>`
 - Embedding model (~90MB) downloaded on first run, cached at `~/.cache/fastembed/`
 
+## Review Rules
+
+- All review findings without immediate action go to `docs/backlog/` — never silently dropped
+- "Defer", "Note", "OK with caveat" = backlog item with a revisit trigger
+- Backlog items have an explicit trigger condition ("revisit when X happens")
+
 ## Project Status
 
 Phase 1 MVP — plan reviewed, ready for implementation.
