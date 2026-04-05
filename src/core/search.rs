@@ -117,8 +117,9 @@ impl Db {
         for (id, score) in &top_ids {
             if let Some(entry) = self.get_memory(id)? {
                 // Normalize score to 0-1 for avg_relevance tracking
-                let norm_score = score.min(1.0).max(0.0);
-                let _ = self.record_recall(id, norm_score);
+                if let Err(e) = self.record_recall(id, *score) {
+                    tracing::warn!(id = %id, error = %e, "failed to record recall");
+                }
                 results.push(SearchResult {
                     entry,
                     score: *score,
@@ -151,15 +152,9 @@ fn rrf_merge(
     let mut merged: Vec<(String, f64)> = scores.into_iter().collect();
     merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Normalize scores to 0-1 range (max score = best)
-    if let Some(max_score) = merged.first().map(|(_, s)| *s) {
-        if max_score > 0.0 {
-            for item in &mut merged {
-                item.1 /= max_score;
-            }
-        }
-    }
-
+    // Raw RRF scores (not normalized). These are small (~0.01-0.03) but comparable
+    // across queries — normalizing by max would make top result always 1.0, corrupting
+    // avg_relevance tracking in Dreaming.
     merged
 }
 
@@ -253,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rrf_merge_scores_normalized() {
+    fn test_rrf_merge_raw_scores() {
         let fts = vec![
             FtsResult { id: "a".to_string(), bm25_score: -5.0 },
         ];
@@ -262,9 +257,10 @@ mod tests {
         ];
 
         let merged = rrf_merge(&fts, &vec, 60.0);
-        // Only one item, should be normalized to 1.0
+        // "a" in both rankers at rank 1 → score = 2 * 1/(60+1) ≈ 0.0328
         assert_eq!(merged.len(), 1);
-        assert!((merged[0].1 - 1.0).abs() < 0.001);
+        let expected = 2.0 / 61.0;
+        assert!((merged[0].1 - expected).abs() < 0.001);
     }
 
     #[test]

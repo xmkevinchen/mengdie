@@ -14,7 +14,7 @@ pub struct SecondBrainServer {
     tool_router: ToolRouter<Self>,
     db: Db,
     embedder: Arc<Mutex<Embedder>>,
-    project_id: String,
+    default_project_id: String,
 }
 
 // -- Tool parameter types --
@@ -25,6 +25,8 @@ pub struct SearchParams {
     pub query: String,
     /// Search scope: omit for current project, "global" for all projects.
     pub scope: Option<String>,
+    /// Override project_id (default: inferred from cwd at server startup).
+    pub project_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -41,6 +43,8 @@ pub struct IngestParams {
     pub knowledge_type: String,
     /// Comma-separated entity tags.
     pub entities: String,
+    /// Override project_id (default: inferred from cwd at server startup).
+    pub project_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -58,6 +62,9 @@ pub struct InvalidateParams {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SearchOutput {
     pub results: Vec<SearchResultItem>,
+    /// Non-empty if search ran in degraded mode (e.g., embedding failed, FTS-only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -76,6 +83,9 @@ pub struct SearchResultItem {
 pub struct IngestOutput {
     pub entry_id: String,
     pub conflicts: Vec<ConflictItem>,
+    /// Non-empty if ingestion failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -100,9 +110,13 @@ impl SecondBrainServer {
         description = "Search Second Brain memories. Returns relevant memories with provenance."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
+        let pid = params
+            .project_id
+            .as_deref()
+            .unwrap_or(&self.default_project_id);
         let project_id = match params.scope.as_deref() {
             Some("global") => None,
-            _ => Some(self.project_id.as_str()),
+            _ => Some(pid),
         };
 
         // Generate query embedding (blocking → thread pool)
@@ -115,42 +129,59 @@ impl SecondBrainServer {
         .await
         .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn: {e}")));
 
-        let results = match query_embedding {
+        let (results, degraded) = match query_embedding {
             Ok(embedding) => {
                 match self
                     .db
                     .memory_search(&params.query, &embedding, project_id, 10)
                 {
-                    Ok(results) => results
-                        .into_iter()
-                        .map(|r| {
-                            let snippet =
-                                r.entry.content.chars().take(200).collect::<String>();
-                            SearchResultItem {
-                                id: r.entry.id,
-                                title: r.entry.title,
-                                source_file: r.entry.source_file,
-                                knowledge_type: r.entry.knowledge_type,
-                                entities: r.entry.entities,
-                                score: r.score,
-                                valid_from: r.entry.valid_from,
-                                snippet,
-                            }
-                        })
-                        .collect(),
+                    Ok(results) => (results, None),
                     Err(e) => {
                         tracing::error!(error = %e, "memory_search failed");
-                        vec![]
+                        (vec![], Some(format!("search error: {e}")))
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(error = %e, "embedding failed, returning empty results");
-                vec![]
+                tracing::warn!(error = %e, "embedding failed, falling back to FTS-only");
+                // FTS-only fallback
+                match self.db.search_fts(&params.query, project_id, 10) {
+                    Ok(fts_results) => {
+                        let mut results = Vec::new();
+                        for fts in &fts_results {
+                            if let Ok(Some(entry)) = self.db.get_memory(&fts.id) {
+                                let snippet = entry.content.chars().take(200).collect::<String>();
+                                results.push(super::search::SearchResult {
+                                    entry,
+                                    score: fts.bm25_score.abs(),
+                                });
+                            }
+                        }
+                        (results, Some("degraded: embedding unavailable, FTS-only".into()))
+                    }
+                    Err(e2) => (vec![], Some(format!("search failed: {e}, FTS fallback also failed: {e2}")))
+                }
             }
         };
 
-        Json(SearchOutput { results })
+        let items = results
+            .into_iter()
+            .map(|r| {
+                let snippet = r.entry.content.chars().take(200).collect::<String>();
+                SearchResultItem {
+                    id: r.entry.id,
+                    title: r.entry.title,
+                    source_file: r.entry.source_file,
+                    knowledge_type: r.entry.knowledge_type,
+                    entities: r.entry.entities,
+                    score: r.score,
+                    valid_from: r.entry.valid_from,
+                    snippet,
+                }
+            })
+            .collect();
+
+        Json(SearchOutput { results: items, degraded })
     }
 
     #[tool(
@@ -158,11 +189,15 @@ impl SecondBrainServer {
         description = "Ingest a new memory into Second Brain. Returns entry ID and any detected conflicts."
     )]
     async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
+        let pid = params
+            .project_id
+            .clone()
+            .unwrap_or_else(|| self.default_project_id.clone());
         let embedder = self.embedder.clone();
         let ctx = super::embeddings::EmbeddingContext {
             knowledge_type: params.knowledge_type.clone(),
             entities: params.entities.clone(),
-            project_id: self.project_id.clone(),
+            project_id: pid.clone(),
             title: params.title.clone(),
         };
         let content = params.content.clone();
@@ -185,7 +220,7 @@ impl SecondBrainServer {
         };
 
         let mem = super::db::NewMemory {
-            project_id: self.project_id.clone(),
+            project_id: pid,
             source_file: params.source_file,
             source_type: params.source_type,
             knowledge_type: params.knowledge_type,
@@ -202,6 +237,7 @@ impl SecondBrainServer {
                 Json(IngestOutput {
                     entry_id,
                     conflicts: vec![],
+                    error: None,
                 })
             }
             Err(e) => {
@@ -209,6 +245,7 @@ impl SecondBrainServer {
                 Json(IngestOutput {
                     entry_id: String::new(),
                     conflicts: vec![],
+                    error: Some(format!("ingestion failed: {e}")),
                 })
             }
         }
@@ -242,12 +279,12 @@ impl SecondBrainServer {
 }
 
 impl SecondBrainServer {
-    pub fn new(db: Db, embedder: Embedder, project_id: String) -> Self {
+    pub fn new(db: Db, embedder: Embedder, default_project_id: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
             db,
             embedder: Arc::new(Mutex::new(embedder)),
-            project_id,
+            default_project_id,
         }
     }
 }
