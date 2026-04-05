@@ -32,6 +32,18 @@ tags: [review, deferred, performance, architecture]
 
 ## From Steps 3+4 Review
 
+### BL-002-8: Dreaming thresholds hardcoded
+- **Source**: Doodlestein (Step 6 review)
+- **Issue**: recall_count (3), avg_relevance (0.65), window (14 days) are compile-time constants. No way to tune without rebuilding.
+- **Fix**: Add CLI flags (`--min-recall`, `--min-relevance`, `--window-days`) or read from config file.
+- **Trigger**: When real usage data shows thresholds are too aggressive or too lenient.
+
+### BL-002-9: Stats shows 0s on cold start
+- **Source**: Code-reviewer (Step 6 review)
+- **Issue**: `second-brain stats` queries metrics table that Step 7 populates. On cold start, all metrics show 0.
+- **Fix**: Either seed metrics on schema creation, or display "no data" instead of 0.
+- **Trigger**: After Step 7 implements metric tracking.
+
 ### BL-002-7: Contradiction full table scan at scale
 - **Source**: Code-reviewer (Step 5b review)
 - **Issue**: `check_contradictions` scans all valid memories per project with no index on entity overlap. O(n) per ingest.

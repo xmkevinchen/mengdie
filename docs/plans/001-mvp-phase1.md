@@ -100,14 +100,10 @@ Expected files: `src/core/contradiction.rs`
 
 ### Step 6: Dreaming + CLI (AC12, AC13)
 
-- [ ] Simplified Dreaming: query memories where `recall_count >= 3 AND avg_relevance >= 0.65` and `last_recalled` within 14-day window → set `is_longterm = true` (boosted weight in search)
-- [ ] CLI entry point (`src/bin/cli.rs`) with clap subcommands:
-  - `second-brain dream` — run Dreaming pass, print promoted/unchanged counts
-  - `second-brain import --dir <path>` — batch import (scan for conclusion.md + review.md, parse, embed, store with `recall_count = 0`)
-  - `second-brain search <query>` — run memory_search, print results (debugging)
-  - `second-brain stats` — print observability metrics
-- [ ] CLI accepts `--db-path` override (default: `~/.second-brain/db.sqlite`)
-- [ ] macOS launchd plist template for daily Dreaming cron
+- [x] Dreaming: recall_count >= 3, avg_relevance >= 0.65, 14-day window → is_longterm (67cc2b8)
+- [x] CLI: dream, import --dir (project_id from dir), search, stats, --db-path override
+- [x] Import: recursive walk, duplicate detection via rusqlite error type
+- [x] launchd plist template (resources/com.second-brain.dream.plist)
 
 Expected files: `src/bin/cli.rs`, `src/core/dreaming.rs`, `resources/com.second-brain.dream.plist`
 
