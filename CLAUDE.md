@@ -86,6 +86,66 @@ Key conventions:
 - DB connection shared via `Arc<Mutex<Connection>>`
 - Embedding model (~90MB) downloaded on first run, cached at `~/.cache/fastembed/`
 
+## rmcp MCP Server Patterns
+
+rmcp v1.3 — the official Rust MCP SDK. Key patterns for this project:
+
+```rust
+// 1. Define server struct with tool_router field
+use rmcp::{tool_router, tool, handler::server::{wrapper::{Parameters, Json}, tool::ToolRouter}, schemars};
+
+struct MyServer {
+    tool_router: ToolRouter<Self>,
+    // ... other state
+}
+
+// 2. Define tool parameter/output types (must derive schemars::JsonSchema)
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SearchParams {
+    query: String,
+    scope: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct SearchOutput {
+    results: Vec<SearchResultItem>,
+}
+
+// 3. Implement tools with #[tool_router] + #[tool] macros
+#[tool_router]
+impl MyServer {
+    #[tool(name = "memory_search", description = "Search memories")]
+    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
+        // ... implementation
+        Json(SearchOutput { results: vec![] })
+    }
+}
+
+// 4. Constructor must call Self::tool_router()
+impl MyServer {
+    fn new() -> Self {
+        Self { tool_router: Self::tool_router() }
+    }
+}
+
+// 5. Start stdio server in main
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let transport = rmcp::transport::io::stdio();
+    let server = MyServer::new();
+    let service = rmcp::serve_server(server, transport).await?;
+    service.waiting().await?;
+    Ok(())
+}
+```
+
+Key notes:
+- `Parameters<T>` extracts tool input; `T` must impl `Deserialize + schemars::JsonSchema`
+- `Json<T>` wraps tool output; `T` must impl `Serialize + schemars::JsonSchema`
+- Tools can be `async fn` — use for spawn_blocking wrapping of fastembed
+- `tool_router` field name defaults to `tool_router` (customizable via macro args)
+- Cargo features required: `server`, `macros`, `transport-io`
+
 ## Review Rules
 
 - All review findings without immediate action go to `docs/backlog/` — never silently dropped
