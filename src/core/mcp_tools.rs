@@ -381,6 +381,7 @@ impl SecondBrainServer {
     }
 }
 
+#[rmcp::tool_handler]
 impl ServerHandler for SecondBrainServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
