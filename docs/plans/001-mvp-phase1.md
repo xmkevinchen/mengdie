@@ -65,14 +65,9 @@ Expected files: `src/core/embeddings.rs`, `src/core/vector.rs`
 
 ### Step 3: Hybrid search + RRF (AC5, AC6)
 
-- [ ] FTS5 search: `search_fts(query, project_id, limit) -> Vec<(id, bm25_score)>`
-- [ ] Vector search: `search_vector(query_embedding, project_id, limit) -> Vec<(id, cosine_score)>`
-- [ ] Score normalization: BM25 → 0-1 (min-max within result set), cosine → 0-1 via `1/(1+distance)`
-- [ ] Reciprocal Rank Fusion: `rrf_merge(fts_results, vec_results, k=60) -> Vec<(id, rrf_score)>`
-- [ ] `memory_search(query, scope?) -> Vec<SearchResult>` — combines FTS5 + vector + RRF
-- [ ] Default scope = current project; `scope: "global"` parameter accepted but searches all projects
-- [ ] On each search hit: increment `recall_count`, update `avg_relevance` (running average with new score), update `last_recalled`
-- [ ] Filter out memories with `valid_until < now` (expired) from results
+- [x] FTS5 search + vector search + RRF merge (k=60) + score normalization (83b6468)
+- [x] memory_search: hybrid FTS5+vector+RRF, project filter, global scope, recall tracking
+- [x] Expired entries filtered (valid_until > now), recall stats updated per hit
 
 Expected files: `src/core/search.rs`
 
