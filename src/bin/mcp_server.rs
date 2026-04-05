@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 
-use second_brain::core::db::Db;
-use second_brain::core::embeddings::Embedder;
-use second_brain::core::mcp_tools::SecondBrainServer;
-use second_brain::core::project::infer_project_id;
+use mengdie::core::db::Db;
+use mengdie::core::embeddings::Embedder;
+use mengdie::core::mcp_tools::MengdieServer;
+use mengdie::core::project::infer_project_id;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("second-brain-mcp starting");
+    tracing::info!("mengdie-mcp starting");
 
     // Open database
     let db_path = Db::default_path();
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(project_id = %project_id, "project identified");
 
     // Create and start MCP server
-    let server = SecondBrainServer::new(db, embedder, project_id);
+    let server = MengdieServer::new(db, embedder, project_id);
     let transport = rmcp::transport::io::stdio();
     let service = rmcp::serve_server(server, transport).await?;
     service.waiting().await?;

@@ -1,13 +1,13 @@
-//! End-to-end smoke tests for the Second Brain pipeline.
+//! End-to-end smoke tests for the Mengdie pipeline.
 //! These tests require the fastembed model (~90MB, downloaded on first run).
 //! Run with: cargo test --test e2e
 
 use std::io::Write;
 
-use second_brain::core::db::Db;
-use second_brain::core::embeddings::Embedder;
-use second_brain::core::ingest::ingest_file;
-use second_brain::core::parser::is_ingestable;
+use mengdie::core::db::Db;
+use mengdie::core::embeddings::Embedder;
+use mengdie::core::ingest::ingest_file;
+use mengdie::core::parser::is_ingestable;
 
 /// E2E: Create a conclusion.md → ingest → search → find it → Dreaming promotes it.
 /// Requires fastembed model (~90MB download). Run with: cargo test --test e2e -- --ignored

@@ -2,17 +2,17 @@
 
 ## What This Is
 
-AI-native Second Brain — a knowledge management layer for AI development workflows.
+Mengdie (梦蝶) — AI-native knowledge memory for development workflows. Named after Zhuangzi's butterfly dream (庄周梦蝶).
 
-Core loop: AI tools produce knowledge → Second Brain ingests and filters → feeds context back to AI tools → better output → richer knowledge → spiral upward.
+Core loop: AI tools produce knowledge → Mengdie ingests and filters → feeds context back to AI tools → better output → richer knowledge → spiral upward.
 
 ## Architecture
 
 - **Delivery**: MCP server (stdio), registered in Claude Code's `~/.claude/settings.json`
-- **Storage**: `~/.second-brain/db.sqlite` (global, per-project search via git-inferred project_id)
+- **Storage**: `~/.mengdie/db.sqlite` (global, per-project search via git-inferred project_id)
 - **Ingestion**: AE pipeline file watcher library (conclusion.md, review.md, plan.md, retrospect.md) — library ready, daemon integration deferred to Phase 2
 - **Feedback**: ae:analyze post-research injection (Round 0 with provenance)
-- **Filtering**: Simplified Dreaming (frequency + relevance scoring, daily promotion pass)
+- **Filtering**: Dreaming (frequency + relevance scoring, daily promotion pass)
 - **Contradiction**: Entity-tag directed comparison + temporal validity (valid_from/valid_until)
 - **Search**: Hybrid FTS5 + vector similarity, merged via Reciprocal Rank Fusion (RRF)
 
@@ -62,13 +62,13 @@ src/
     metrics.rs       # Observability counters
     mod.rs
   bin/
-    mcp_server.rs    # stdio MCP entry point (spawned by Claude Code)
-    cli.rs           # CLI entry point (dream, import, search, stats)
+    mcp_server.rs    # stdio MCP entry point (mengdie-mcp, spawned by Claude Code)
+    cli.rs           # CLI entry point (mengdie dream, import, search, stats)
   lib.rs
 tests/
   e2e.rs             # End-to-end smoke tests
 resources/
-  com.second-brain.dream.plist  # macOS launchd template for daily Dreaming
+  com.mengdie.dream.plist  # macOS launchd template for daily Dreaming
 ```
 
 ## Development

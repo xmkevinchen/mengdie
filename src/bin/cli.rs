@@ -4,16 +4,16 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use second_brain::core::db::Db;
-use second_brain::core::embeddings::Embedder;
-use second_brain::core::ingest::ingest_file;
-use second_brain::core::parser::is_ingestable;
-use second_brain::core::project::infer_project_id;
+use mengdie::core::db::Db;
+use mengdie::core::embeddings::Embedder;
+use mengdie::core::ingest::ingest_file;
+use mengdie::core::parser::is_ingestable;
+use mengdie::core::project::infer_project_id;
 
 #[derive(Parser)]
-#[command(name = "second-brain", about = "AI-native Second Brain CLI")]
+#[command(name = "mengdie", about = "Mengdie — AI-native knowledge memory CLI")]
 struct Cli {
-    /// Database path (default: ~/.second-brain/db.sqlite)
+    /// Database path (default: ~/.mengdie/db.sqlite)
     #[arg(long, global = true)]
     db_path: Option<PathBuf>,
 
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_dream(db: &Db, min_recall: i64, min_relevance: f64, window_days: i64) -> anyhow::Result<()> {
-    use second_brain::core::dreaming::DreamingConfig;
+    use mengdie::core::dreaming::DreamingConfig;
 
     let config = DreamingConfig { min_recall, min_relevance, window_days };
     // Run globally (all projects) — per-project scoping can be added via CLI flag later
@@ -193,7 +193,7 @@ fn cmd_search(db: &Db, query: &str, global: bool, limit: usize, min_score: Optio
 
 fn cmd_stats(db: &Db) -> anyhow::Result<()> {
     let s = db.stats()?;
-    println!("Second Brain Stats:");
+    println!("Mengdie Stats:");
     println!("  Total memories:    {}", s.total);
     println!("  Valid (active):    {}", s.valid);
     println!("  Long-term:         {}", s.longterm);

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.second-brain.dream</string>
+    <string>com.mengdie.dream</string>
     <key>ProgramArguments</key>
     <array>
         <!-- Update this path to your built binary -->
-        <string>/usr/local/bin/second-brain</string>
+        <string>/usr/local/bin/mengdie</string>
         <string>dream</string>
     </array>
     <key>StartCalendarInterval</key>
@@ -18,8 +18,8 @@
         <integer>0</integer>
     </dict>
     <key>StandardErrorPath</key>
-    <string>/tmp/second-brain-dream.log</string>
+    <string>/tmp/mengdie-dream.log</string>
     <key>StandardOutPath</key>
-    <string>/tmp/second-brain-dream.log</string>
+    <string>/tmp/mengdie-dream.log</string>
 </dict>
 </plist>

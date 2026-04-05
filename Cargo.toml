@@ -1,5 +1,5 @@
 [package]
-name = "second-brain"
+name = "mengdie"
 version = "0.1.0"
 edition = "2021"
 
@@ -27,13 +27,13 @@ thiserror = "2"
 tempfile = "3"
 
 [[bin]]
-name = "second-brain"
+name = "mengdie"
 path = "src/bin/cli.rs"
 
 [[bin]]
-name = "second-brain-mcp"
+name = "mengdie-mcp"
 path = "src/bin/mcp_server.rs"
 
 [lib]
-name = "second_brain"
+name = "mengdie"
 path = "src/lib.rs"

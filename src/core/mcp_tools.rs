@@ -11,7 +11,7 @@ use super::embeddings::Embedder;
 use std::sync::{Arc, Mutex};
 
 /// MCP server with 3 tools: memory_search, memory_ingest, memory_invalidate.
-pub struct SecondBrainServer {
+pub struct MengdieServer {
     tool_router: ToolRouter<Self>,
     db: Db,
     embedder: Arc<Mutex<Embedder>>,
@@ -115,10 +115,10 @@ const MAX_FIELD_LEN: usize = 1_000;
 // -- Tool implementations --
 
 #[tool_router]
-impl SecondBrainServer {
+impl MengdieServer {
     #[tool(
         name = "memory_search",
-        description = "Search Second Brain memories. Returns relevant memories with provenance."
+        description = "Search Mengdie memories. Returns relevant memories with provenance."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
         if params.query.len() > MAX_QUERY_LEN {
@@ -215,7 +215,7 @@ impl SecondBrainServer {
 
     #[tool(
         name = "memory_ingest",
-        description = "Ingest a new memory into Second Brain. Returns entry ID and any detected conflicts."
+        description = "Ingest a new memory into Mengdie. Returns entry ID and any detected conflicts."
     )]
     async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
         if params.content.len() > MAX_CONTENT_LEN {
@@ -370,7 +370,7 @@ impl SecondBrainServer {
     }
 }
 
-impl SecondBrainServer {
+impl MengdieServer {
     pub fn new(db: Db, embedder: Embedder, default_project_id: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -382,9 +382,9 @@ impl SecondBrainServer {
 }
 
 #[rmcp::tool_handler]
-impl ServerHandler for SecondBrainServer {
+impl ServerHandler for MengdieServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("AI-native Second Brain — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_invalidate.")
+            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_invalidate.")
     }
 }

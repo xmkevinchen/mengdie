@@ -82,10 +82,10 @@ impl Db {
         })
     }
 
-    /// Default database path: ~/.second-brain/db.sqlite
+    /// Default database path: ~/.mengdie/db.sqlite
     pub fn default_path() -> PathBuf {
         let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".second-brain").join("db.sqlite")
+        home.join(".mengdie").join("db.sqlite")
     }
 
     /// Insert or update a memory, returning its ID.
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn test_default_path() {
         let path = Db::default_path();
-        assert!(path.to_string_lossy().contains(".second-brain"));
+        assert!(path.to_string_lossy().contains(".mengdie"));
         assert!(path.to_string_lossy().ends_with("db.sqlite"));
     }
 }
