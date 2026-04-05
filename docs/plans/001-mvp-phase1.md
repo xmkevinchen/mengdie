@@ -92,13 +92,9 @@ Expected files: `src/core/parser.rs`, `src/core/watcher.rs`, `src/core/ingest.rs
 
 ### Step 5b: Contradiction detection (AC11)
 
-- [ ] At ingestion time: query existing memories with overlapping entities + same knowledge_type
-- [ ] Entity overlap: ≥1 shared entity tag between new and existing memory
-- [ ] Semantic similarity: cosine similarity > 0.7 between embeddings
-- [ ] If entity overlap + high similarity + knowledge_type == "decisional": flag as "evolution candidate"
-- [ ] If entity overlap + time gap <30 days: flag as "conflict"
-- [ ] Return conflict info in `memory_ingest` response (not interactive — caller decides)
-- [ ] When `memory_invalidate` is called with `superseded_by`, link the chain
+- [x] Contradiction detection: entity overlap + cosine checks, runs before insert (998633d)
+- [x] EvolutionCandidate (cosine > 0.7 + both decisional) + RecentConflict (<30d + cosine > 0.4)
+- [x] Conflicts returned in memory_ingest response; invalidate_memory links superseded_by chain
 
 Expected files: `src/core/contradiction.rs`
 

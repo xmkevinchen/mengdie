@@ -32,6 +32,12 @@ tags: [review, deferred, performance, architecture]
 
 ## From Steps 3+4 Review
 
+### BL-002-6: Contradiction detection magic numbers
+- **Source**: Doodlestein (Step 5b review)
+- **Issue**: Cosine thresholds (0.7 evolution, 0.4 recent) and 30-day conflict window are hardcoded. Active projects with common entity tags (auth, api, database) may see false positives.
+- **Fix**: Make thresholds configurable via Db config or pipeline.yml.
+- **Trigger**: When users report noise in contradiction flags.
+
 ### BL-002-5: Manual debounce in watcher should use notify_debouncer_mini
 - **Source**: Doodlestein + Code-reviewer (Step 5a review)
 - **Issue**: Hand-rolled debounce in `watch_loop` has subtle timing bugs (500ms window resets per-batch, not per-path). `notify_debouncer_mini` is already a dependency but unused.
