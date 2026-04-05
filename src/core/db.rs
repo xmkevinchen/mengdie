@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -55,8 +56,10 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        run_migrations(&conn)?;
+        let conn = Connection::open(path)
+            .with_context(|| format!("failed to open database at {}", path.display()))?;
+        run_migrations(&conn)
+            .with_context(|| format!("failed to run migrations on {}", path.display()))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -137,12 +140,12 @@ impl Db {
         Ok(rows > 0)
     }
 
-    /// Update recall statistics after a search hit.
-    pub fn record_recall(&self, id: &str, relevance_score: f64) -> anyhow::Result<()> {
+    /// Update recall statistics after a search hit. Returns false if ID not found.
+    pub fn record_recall(&self, id: &str, relevance_score: f64) -> anyhow::Result<bool> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         // Running average: new_avg = (old_avg * count + new_score) / (count + 1)
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE memory_entries SET
                 avg_relevance = (avg_relevance * recall_count + ?1) / (recall_count + 1),
                 recall_count = recall_count + 1,
@@ -150,17 +153,17 @@ impl Db {
              WHERE id = ?3",
             params![relevance_score, now, id],
         )?;
-        Ok(())
+        Ok(rows > 0)
     }
 
-    /// Set a memory as long-term (promoted by Dreaming).
-    pub fn promote_to_longterm(&self, id: &str) -> anyhow::Result<()> {
+    /// Set a memory as long-term (promoted by Dreaming). Returns false if ID not found.
+    pub fn promote_to_longterm(&self, id: &str) -> anyhow::Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE memory_entries SET is_longterm = 1 WHERE id = ?1",
             params![id],
         )?;
-        Ok(())
+        Ok(rows > 0)
     }
 
     /// Count all memories for a given project.
@@ -255,24 +258,30 @@ mod tests {
         let db = test_db();
         let id = db.insert_memory(sample_memory("test-project")).unwrap();
 
-        db.record_recall(&id, 0.8).unwrap();
+        assert!(db.record_recall(&id, 0.8).unwrap());
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert_eq!(entry.recall_count, 1);
         assert!((entry.avg_relevance - 0.8).abs() < 0.001);
 
-        db.record_recall(&id, 0.6).unwrap();
+        assert!(db.record_recall(&id, 0.6).unwrap());
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert_eq!(entry.recall_count, 2);
         assert!((entry.avg_relevance - 0.7).abs() < 0.001);
+
+        // Non-existent ID returns false
+        assert!(!db.record_recall("nonexistent", 0.5).unwrap());
     }
 
     #[test]
     fn test_promote_to_longterm() {
         let db = test_db();
         let id = db.insert_memory(sample_memory("test-project")).unwrap();
-        db.promote_to_longterm(&id).unwrap();
+        assert!(db.promote_to_longterm(&id).unwrap());
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert!(entry.is_longterm);
+
+        // Non-existent ID returns false
+        assert!(!db.promote_to_longterm("nonexistent").unwrap());
     }
 
     #[test]

@@ -5,12 +5,7 @@ use std::process::Command;
 /// Falls back to a hash of the directory path if no git remote is found.
 pub fn infer_project_id(dir: &Path) -> String {
     if let Some(remote) = git_remote_url(dir) {
-        // Normalize: strip .git suffix, lowercase
-        let normalized = remote
-            .trim()
-            .trim_end_matches(".git")
-            .to_lowercase();
-        normalized
+        normalize_git_url(&remote)
     } else {
         // Fallback: hash of absolute path
         let abs = dir
@@ -18,6 +13,30 @@ pub fn infer_project_id(dir: &Path) -> String {
             .unwrap_or_else(|_| dir.to_path_buf());
         format!("local:{:x}", simple_hash(abs.to_string_lossy().as_bytes()))
     }
+}
+
+/// Normalize git URLs so SSH and HTTPS for the same repo produce the same ID.
+/// `git@github.com:user/repo.git` → `github.com/user/repo`
+/// `https://github.com/user/repo.git` → `github.com/user/repo`
+fn normalize_git_url(url: &str) -> String {
+    let url = url.trim().trim_end_matches(".git").to_lowercase();
+    // SSH: git@host:path → host/path
+    if let Some(rest) = url.strip_prefix("git@") {
+        return rest.replacen(':', "/", 1);
+    }
+    // HTTPS: https://host/path → host/path
+    if let Some(rest) = url.strip_prefix("https://") {
+        return rest.to_string();
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        return rest.to_string();
+    }
+    // ssh://git@host/path → host/path
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.strip_prefix("git@").unwrap_or(rest);
+        return rest.to_string();
+    }
+    url
 }
 
 fn git_remote_url(dir: &Path) -> Option<String> {
@@ -76,5 +95,29 @@ mod tests {
         let h1 = simple_hash(b"hello");
         let h2 = simple_hash(b"world");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_normalize_ssh_and_https_match() {
+        let ssh = normalize_git_url("git@github.com:user/repo.git");
+        let https = normalize_git_url("https://github.com/user/repo.git");
+        assert_eq!(ssh, https);
+        assert_eq!(ssh, "github.com/user/repo");
+    }
+
+    #[test]
+    fn test_normalize_strips_git_suffix() {
+        assert_eq!(
+            normalize_git_url("https://github.com/user/repo.git"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_ssh_protocol() {
+        assert_eq!(
+            normalize_git_url("ssh://git@github.com/user/repo.git"),
+            "github.com/user/repo"
+        );
     }
 }
