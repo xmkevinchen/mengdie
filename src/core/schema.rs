@@ -31,6 +31,9 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_memory_project
             ON memory_entries(project_id);
 
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_source
+            ON memory_entries(project_id, source_file);
+
         CREATE INDEX IF NOT EXISTS idx_memory_knowledge_type
             ON memory_entries(knowledge_type);
 

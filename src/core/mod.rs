@@ -1,7 +1,10 @@
 pub mod db;
 pub mod embeddings;
+pub mod ingest;
 pub mod mcp_tools;
+pub mod parser;
 pub mod project;
 pub mod schema;
 pub mod search;
 pub mod vector;
+pub mod watcher;

@@ -171,7 +171,7 @@ mod tests {
     fn insert_test_memory(db: &Db, project: &str, title: &str, content: &str, entities: &str, embedding: &[f32]) -> String {
         let id = db.insert_memory(NewMemory {
             project_id: project.to_string(),
-            source_file: "test.md".to_string(),
+            source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
             source_type: "conclusion".to_string(),
             knowledge_type: "decisional".to_string(),
             title: title.to_string(),

@@ -114,7 +114,7 @@ mod tests {
     fn mem_with_embedding(project_id: &str, title: &str, embedding: &[f32]) -> (NewMemory, Vec<u8>) {
         let mem = NewMemory {
             project_id: project_id.to_string(),
-            source_file: "test.md".to_string(),
+            source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
             source_type: "conclusion".to_string(),
             knowledge_type: "decisional".to_string(),
             title: title.to_string(),
@@ -133,7 +133,7 @@ mod tests {
         let id = db
             .insert_memory(NewMemory {
                 project_id: "proj".to_string(),
-                source_file: "test.md".to_string(),
+                source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
                 source_type: "conclusion".to_string(),
                 knowledge_type: "decisional".to_string(),
                 title: "Test".to_string(),
@@ -158,7 +158,7 @@ mod tests {
         let id = db
             .insert_memory(NewMemory {
                 project_id: "proj".to_string(),
-                source_file: "test.md".to_string(),
+                source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
                 source_type: "conclusion".to_string(),
                 knowledge_type: "decisional".to_string(),
                 title: "Test".to_string(),

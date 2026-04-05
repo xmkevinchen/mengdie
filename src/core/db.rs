@@ -219,7 +219,7 @@ mod tests {
     fn sample_memory(project_id: &str) -> NewMemory {
         NewMemory {
             project_id: project_id.to_string(),
-            source_file: "docs/discussions/001/conclusion.md".to_string(),
+            source_file: format!("docs/discussions/{}/conclusion.md", uuid::Uuid::new_v4()),
             source_type: "conclusion".to_string(),
             knowledge_type: "decisional".to_string(),
             title: "Auth middleware decision".to_string(),
