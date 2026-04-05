@@ -68,7 +68,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_dream(db: &Db) -> anyhow::Result<()> {
-    let result = db.run_dreaming()?;
+    // Run globally (all projects) — per-project scoping can be added via CLI flag later
+    let result = db.run_dreaming(None)?;
     println!(
         "Dreaming complete: {} promoted out of {} eligible memories",
         result.promoted, result.total_eligible
@@ -160,64 +161,22 @@ fn cmd_search(db: &Db, query: &str, global: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_stats(db: &Db) -> anyhow::Result<()> {
-    let conn = db.lock_conn()?;
-
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_entries",
-        [],
-        |row| row.get(0),
-    )?;
-    let valid: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_entries WHERE valid_until IS NULL",
-        [],
-        |row| row.get(0),
-    )?;
-    let longterm: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_entries WHERE is_longterm = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    let recalled: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_entries WHERE recall_count > 0",
-        [],
-        |row| row.get(0),
-    )?;
-
+    let s = db.stats()?;
     println!("Second Brain Stats:");
-    println!("  Total memories:    {total}");
-    println!("  Valid (active):    {valid}");
-    println!("  Long-term:         {longterm}");
-    println!("  Recalled (≥1x):    {recalled}");
+    println!("  Total memories:    {}", s.total);
+    println!("  Valid (active):    {}", s.valid);
+    println!("  Long-term:         {}", s.longterm);
+    println!("  Recalled (≥1x):    {}", s.recalled);
 
-    // Metrics from metrics table
-    let search_count: i64 = conn
-        .query_row(
-            "SELECT value_int FROM metrics WHERE key = 'search_count'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let search_nonempty: i64 = conn
-        .query_row(
-            "SELECT value_int FROM metrics WHERE key = 'search_nonempty_count'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let ingest_count: i64 = conn
-        .query_row(
-            "SELECT value_int FROM metrics WHERE key = 'ingest_count'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let conflict_count: i64 = conn
-        .query_row(
-            "SELECT value_int FROM metrics WHERE key = 'conflict_count'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
+    let metrics = db.list_metrics()?;
+    let get = |key: &str| -> i64 {
+        metrics.iter().find(|(k, _)| k == key).map(|(_, v)| *v).unwrap_or(0)
+    };
+
+    let search_count = get("search_count");
+    let search_nonempty = get("search_nonempty_count");
+    let ingest_count = get("ingest_count");
+    let conflict_count = get("conflict_count");
 
     if search_count > 0 {
         let injection_rate = (search_nonempty as f64 / search_count as f64) * 100.0;

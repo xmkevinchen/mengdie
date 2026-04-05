@@ -38,6 +38,10 @@ impl Db {
             return Ok(vec![]);
         }
 
+        // Escape FTS5 query syntax: wrap in double quotes to treat as literal phrase.
+        // This prevents FTS5 operators (AND, OR, NOT, *, NEAR) from being interpreted.
+        let safe_query = format!("\"{}\"", query.replace('"', "\"\""));
+
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match project_id {
             Some(pid) => (
                 "SELECT me.id, bm25(memory_fts) as score \
@@ -50,7 +54,7 @@ impl Db {
                  LIMIT ?4"
                     .to_string(),
                 vec![
-                    Box::new(query.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                    Box::new(safe_query.clone()) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(now),
                     Box::new(pid.to_string()),
                     Box::new(limit as i64),
@@ -66,7 +70,7 @@ impl Db {
                  LIMIT ?3"
                     .to_string(),
                 vec![
-                    Box::new(query.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                    Box::new(safe_query.clone()) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(now),
                     Box::new(limit as i64),
                 ],
@@ -113,11 +117,14 @@ impl Db {
         let top_ids: Vec<(String, f64)> = merged.into_iter().take(limit).collect();
 
         // Fetch full entries and update recall stats
+        // RRF scores are raw (~0.01-0.03). Normalize to 0-1 for Dreaming's avg_relevance.
+        // Max theoretical RRF: 2 rankers at rank 1 = 2/(k+1) = 2/61 ≈ 0.0328
+        const RRF_MAX: f64 = 2.0 / 61.0;
         let mut results = Vec::new();
         for (id, score) in &top_ids {
             if let Some(entry) = self.get_memory(id)? {
-                // Normalize score to 0-1 for avg_relevance tracking
-                if let Err(e) = self.record_recall(id, *score) {
+                let normalized = (*score / RRF_MAX).min(1.0).max(0.0);
+                if let Err(e) = self.record_recall(id, normalized) {
                     tracing::warn!(id = %id, error = %e, "failed to record recall");
                 }
                 results.push(SearchResult {

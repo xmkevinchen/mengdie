@@ -122,7 +122,7 @@ impl Db {
                                 .map(|existing_emb| cosine_similarity(new_emb, &existing_emb) > 0.4)
                                 .unwrap_or(false)
                         }
-                        _ => true, // No embeddings → can't check, default to flagging
+                        _ => false, // No embeddings → can't verify similarity, skip flagging
                     };
                     if has_similarity {
                         conflicts.push(Conflict {

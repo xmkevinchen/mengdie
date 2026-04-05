@@ -102,6 +102,12 @@ pub struct InvalidateOutput {
     pub entry_id: String,
 }
 
+// -- Input validation --
+
+const MAX_QUERY_LEN: usize = 10_000;
+const MAX_CONTENT_LEN: usize = 100_000;
+const MAX_FIELD_LEN: usize = 1_000;
+
 // -- Tool implementations --
 
 #[tool_router]
@@ -111,6 +117,12 @@ impl SecondBrainServer {
         description = "Search Second Brain memories. Returns relevant memories with provenance."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
+        if params.query.len() > MAX_QUERY_LEN {
+            return Json(SearchOutput {
+                results: vec![],
+                degraded: Some(format!("query too long (max {MAX_QUERY_LEN} chars)")),
+            });
+        }
         let pid = params
             .project_id
             .as_deref()
@@ -139,7 +151,7 @@ impl SecondBrainServer {
                     Ok(results) => (results, None),
                     Err(e) => {
                         tracing::error!(error = %e, "memory_search failed");
-                        (vec![], Some(format!("search error: {e}")))
+                        (vec![], Some("search temporarily unavailable".into()))
                     }
                 }
             }
@@ -160,7 +172,10 @@ impl SecondBrainServer {
                         }
                         (results, Some("degraded: embedding unavailable, FTS-only".into()))
                     }
-                    Err(e2) => (vec![], Some(format!("search failed: {e}, FTS fallback also failed: {e2}")))
+                    Err(e2) => {
+                        tracing::error!(error = %e2, "FTS fallback also failed");
+                        (vec![], Some("search temporarily unavailable".into()))
+                    }
                 }
             }
         };
@@ -196,6 +211,20 @@ impl SecondBrainServer {
         description = "Ingest a new memory into Second Brain. Returns entry ID and any detected conflicts."
     )]
     async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
+        if params.content.len() > MAX_CONTENT_LEN {
+            return Json(IngestOutput {
+                entry_id: String::new(),
+                conflicts: vec![],
+                error: Some(format!("content too long (max {MAX_CONTENT_LEN} chars)")),
+            });
+        }
+        if params.title.len() > MAX_FIELD_LEN || params.entities.len() > MAX_FIELD_LEN {
+            return Json(IngestOutput {
+                entry_id: String::new(),
+                conflicts: vec![],
+                error: Some(format!("field too long (max {MAX_FIELD_LEN} chars)")),
+            });
+        }
         let pid = params
             .project_id
             .clone()
@@ -291,7 +320,7 @@ impl SecondBrainServer {
                 Json(IngestOutput {
                     entry_id: String::new(),
                     conflicts: vec![],
-                    error: Some(format!("ingestion failed: {e}")),
+                    error: Some("ingestion failed".into()),
                 })
             }
         }

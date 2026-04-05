@@ -74,7 +74,7 @@ fn test_full_pipeline() {
     assert!(entry.avg_relevance > 0.65, "avg_relevance should be above dreaming threshold: {}", entry.avg_relevance);
 
     // 7. Run Dreaming
-    let dream_result = db.run_dreaming().unwrap();
+    let dream_result = db.run_dreaming(None).unwrap();
     assert_eq!(dream_result.promoted, 1);
 
     let entry = db.get_memory(&entry_id).unwrap().unwrap();

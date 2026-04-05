@@ -13,37 +13,45 @@ pub struct DreamingResult {
 }
 
 impl Db {
-    /// Run the Dreaming promotion pass.
+    /// Run the Dreaming promotion pass, optionally scoped to a project.
     /// Promotes memories where: recall_count >= 3 AND avg_relevance >= 0.65
     /// AND last_recalled within 14 days. Sets is_longterm = true.
-    pub fn run_dreaming(&self) -> anyhow::Result<DreamingResult> {
+    pub fn run_dreaming(&self, project_id: Option<&str>) -> anyhow::Result<DreamingResult> {
         let conn = self.lock_conn()?;
         let now = chrono::Utc::now();
         let cutoff = (now - chrono::Duration::days(14)).to_rfc3339();
 
+        let project_filter = project_id
+            .map(|_| "AND project_id = ?2")
+            .unwrap_or("");
+
         // Count total non-longterm valid memories BEFORE promotion
-        let total_valid: usize = conn.query_row(
+        let sql = format!(
             "SELECT COUNT(*) FROM memory_entries
-             WHERE is_longterm = 0 AND valid_until IS NULL",
-            [],
-            |row| row.get::<_, i64>(0).map(|v| v as usize),
-        )?;
+             WHERE is_longterm = 0 AND valid_until IS NULL {project_filter}"
+        );
+        let total_valid: usize = match project_id {
+            Some(pid) => conn.query_row(&sql, params![pid], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
+            None => conn.query_row(&sql, [], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
+        };
 
         // Count candidates that meet thresholds
-        let total_checked: usize = conn.query_row(
+        let sql = format!(
             "SELECT COUNT(*) FROM memory_entries
              WHERE is_longterm = 0
              AND valid_until IS NULL
              AND recall_count >= 3
              AND avg_relevance >= 0.65
              AND last_recalled IS NOT NULL
-             AND last_recalled >= ?1",
-            params![cutoff],
-            |row| row.get::<_, i64>(0).map(|v| v as usize),
-        )?;
+             AND last_recalled >= ?1 {project_filter}"
+        );
+        let total_checked: usize = match project_id {
+            Some(pid) => conn.query_row(&sql, params![cutoff, pid], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
+            None => conn.query_row(&sql, params![cutoff], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
+        };
 
         // Promote qualifying memories
-        let promoted = conn.execute(
+        let sql = format!(
             "UPDATE memory_entries
              SET is_longterm = 1
              WHERE is_longterm = 0
@@ -51,9 +59,12 @@ impl Db {
              AND recall_count >= 3
              AND avg_relevance >= 0.65
              AND last_recalled IS NOT NULL
-             AND last_recalled >= ?1",
-            params![cutoff],
-        )?;
+             AND last_recalled >= ?1 {project_filter}"
+        );
+        let promoted = match project_id {
+            Some(pid) => conn.execute(&sql, params![cutoff, pid])?,
+            None => conn.execute(&sql, params![cutoff])?,
+        };
 
         Ok(DreamingResult {
             promoted,
@@ -97,7 +108,7 @@ mod tests {
             db.record_recall(&id, 0.8).unwrap();
         }
 
-        let result = db.run_dreaming().unwrap();
+        let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 1);
 
         let entry = db.get_memory(&id).unwrap().unwrap();
@@ -112,7 +123,7 @@ mod tests {
         // Only 1 recall — below threshold of 3
         db.record_recall(&id, 0.9).unwrap();
 
-        let result = db.run_dreaming().unwrap();
+        let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 0);
 
         let entry = db.get_memory(&id).unwrap().unwrap();
@@ -129,7 +140,7 @@ mod tests {
             db.record_recall(&id, 0.3).unwrap();
         }
 
-        let result = db.run_dreaming().unwrap();
+        let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 0);
     }
 
@@ -143,11 +154,11 @@ mod tests {
         }
 
         // First pass promotes
-        let result = db.run_dreaming().unwrap();
+        let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 1);
 
         // Second pass — already long-term, should not re-promote
-        let result = db.run_dreaming().unwrap();
+        let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 0);
     }
 
@@ -161,7 +172,7 @@ mod tests {
         }
         db.invalidate_memory(&id, None).unwrap();
 
-        let result = db.run_dreaming().unwrap();
+        let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 0);
     }
 }

@@ -10,7 +10,7 @@ Core loop: AI tools produce knowledge → Second Brain ingests and filters → f
 
 - **Delivery**: MCP server (stdio), registered in Claude Code's `~/.claude/settings.json`
 - **Storage**: `~/.second-brain/db.sqlite` (global, per-project search via git-inferred project_id)
-- **Ingestion**: AE pipeline file watcher (conclusion.md, review.md, plan.md, retrospect.md)
+- **Ingestion**: AE pipeline file watcher library (conclusion.md, review.md, plan.md, retrospect.md) — library ready, daemon integration deferred to Phase 2
 - **Feedback**: ae:analyze post-research injection (Round 0 with provenance)
 - **Filtering**: Simplified Dreaming (frequency + relevance scoring, daily promotion pass)
 - **Contradiction**: Entity-tag directed comparison + temporal validity (valid_from/valid_until)

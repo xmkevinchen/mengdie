@@ -25,6 +25,9 @@ pub fn ingest_document(
         .context("embedding generation failed during ingestion")?;
     let dim = embedding.len() as i64;
 
+    // Normalize entities to lowercase for consistent matching
+    let normalized_entities: Vec<String> = doc.entities.iter().map(|e| e.to_lowercase()).collect();
+
     let mem = NewMemory {
         project_id: project_id.to_string(),
         source_file: doc.source_file.clone(),
@@ -32,7 +35,7 @@ pub fn ingest_document(
         knowledge_type: doc.knowledge_type.clone(),
         title: doc.title.clone(),
         content: doc.content.clone(),
-        entities: doc.entities.join(","),
+        entities: normalized_entities.join(","),
         embedding: Some(embedding_to_blob(&embedding)),
         embedding_dim: Some(dim),
     };

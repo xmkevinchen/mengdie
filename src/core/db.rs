@@ -8,6 +8,14 @@ use uuid::Uuid;
 
 use super::schema::run_migrations;
 
+/// Basic database statistics.
+pub struct DbStats {
+    pub total: i64,
+    pub valid: i64,
+    pub longterm: i64,
+    pub recalled: i64,
+}
+
 /// Shared database handle, safe to clone across async tasks.
 #[derive(Clone)]
 pub struct Db {
@@ -80,11 +88,43 @@ impl Db {
         home.join(".second-brain").join("db.sqlite")
     }
 
-    /// Insert a new memory, returning its generated ID.
+    /// Insert or update a memory, returning its ID.
+    /// On conflict (same project_id + source_file), updates content and metadata.
     pub fn insert_memory(&self, mem: NewMemory) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+
+        // Check if this source_file already exists for this project
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM memory_entries WHERE project_id = ?1 AND source_file = ?2",
+                params![mem.project_id, mem.source_file],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(eid) = existing_id {
+            // Update existing entry
+            conn.execute(
+                "UPDATE memory_entries SET
+                    source_type = ?1, knowledge_type = ?2, title = ?3,
+                    content = ?4, entities = ?5, embedding = ?6, embedding_dim = ?7
+                 WHERE id = ?8",
+                params![
+                    mem.source_type,
+                    mem.knowledge_type,
+                    mem.title,
+                    mem.content,
+                    mem.entities,
+                    mem.embedding,
+                    mem.embedding_dim,
+                    eid,
+                ],
+            )?;
+            return Ok(eid);
+        }
+
         conn.execute(
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
@@ -166,11 +206,22 @@ impl Db {
         Ok(rows > 0)
     }
 
-    /// Access the underlying connection lock.
-    pub fn lock_conn(
+    /// Access the underlying connection lock. Crate-internal only to prevent
+    /// external callers from holding the guard while calling other Db methods (deadlock).
+    pub(crate) fn lock_conn(
         &self,
     ) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))
+    }
+
+    /// Get basic stats about the database.
+    pub fn stats(&self) -> anyhow::Result<DbStats> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |r| r.get(0))?;
+        let valid: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries WHERE valid_until IS NULL", [], |r| r.get(0))?;
+        let longterm: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries WHERE is_longterm = 1", [], |r| r.get(0))?;
+        let recalled: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries WHERE recall_count > 0", [], |r| r.get(0))?;
+        Ok(DbStats { total, valid, longterm, recalled })
     }
 
     /// Count all memories for a given project.

@@ -1,9 +1,13 @@
 use rusqlite::Connection;
 
+const SCHEMA_VERSION: i64 = 1;
+
 /// Run all schema migrations. Idempotent — safe to call on every startup.
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+
+    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
     conn.execute_batch(
         "
@@ -69,6 +73,12 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         );
         ",
     )?;
+
+    // Future migrations go here:
+    // if current_version < 2 { ... ALTER TABLE ...; }
+
+    // Set schema version
+    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
 
     Ok(())
 }

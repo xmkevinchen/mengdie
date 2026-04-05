@@ -53,20 +53,26 @@ impl Db {
             Some(pid) => (
                 "SELECT id, embedding FROM memory_entries \
                  WHERE embedding IS NOT NULL \
+                 AND embedding_dim = ?3 \
                  AND (valid_until IS NULL OR valid_until > ?1) \
                  AND project_id = ?2"
                     .to_string(),
                 vec![
                     Box::new(now.clone()) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(pid.to_string()),
+                    Box::new(query_embedding.len() as i64),
                 ],
             ),
             None => (
                 "SELECT id, embedding FROM memory_entries \
                  WHERE embedding IS NOT NULL \
+                 AND embedding_dim = ?2 \
                  AND (valid_until IS NULL OR valid_until > ?1)"
                     .to_string(),
-                vec![Box::new(now.clone()) as Box<dyn rusqlite::types::ToSql>],
+                vec![
+                    Box::new(now.clone()) as Box<dyn rusqlite::types::ToSql>,
+                    Box::new(query_embedding.len() as i64),
+                ],
             ),
         };
 
