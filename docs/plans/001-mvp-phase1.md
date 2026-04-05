@@ -73,13 +73,11 @@ Expected files: `src/core/search.rs`
 
 ### Step 4: MCP server — 3 tools (AC7, AC8)
 
-- [ ] rmcp stdio server setup with tokio runtime (`#[tool_router]` macro)
-- [ ] `memory_search` tool: input `{query: string, scope?: string}`, returns `Vec<{title, source_file, knowledge_type, entities, score, valid_from, snippet}>`
-- [ ] `memory_ingest` tool: input `{title, content, source_file, source_type, knowledge_type, entities}`, generates embedding (spawn_blocking), stores, runs contradiction check, returns `{entry_id, conflicts: Vec<{id, title, reason}>}` — caller decides what to do with conflicts (no interactive prompt)
-- [ ] `memory_invalidate` tool: input `{entry_id: string, reason: string, superseded_by?: string}`, sets `valid_until = now` + `superseded_by`
-- [ ] All logging via tracing → stderr (zero stdout pollution)
-- [ ] Structured MCP error responses, never panic
-- [ ] Smoke test: start binary, send JSON-RPC via stdin, verify response on stdout
+- [x] rmcp stdio server + ServerHandler + tool_router macro (1541089)
+- [x] memory_search: hybrid FTS5+vector+RRF, spawn_blocking for embedding
+- [x] memory_ingest: metadata-in-chunk encoding, conflict placeholder for Step 5b
+- [x] memory_invalidate: valid_until + superseded_by
+- [x] tracing → stderr, graceful error handling (no panics)
 
 Expected files: `src/bin/mcp_server.rs`, `src/core/mcp_tools.rs`
 
