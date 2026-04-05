@@ -208,19 +208,54 @@ impl SecondBrainServer {
         .await
         .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn: {e}")));
 
-        let (embedding_blob, embedding_dim) = match embedding_result {
-            Ok(emb) => {
-                let dim = emb.len() as i64;
-                (Some(super::embeddings::embedding_to_blob(&emb)), Some(dim))
-            }
+        let raw_embedding: Option<Vec<f32>> = match embedding_result {
+            Ok(emb) => Some(emb),
             Err(e) => {
                 tracing::error!(error = %e, "embedding failed, storing without embedding");
-                (None, None)
+                None
+            }
+        };
+
+        let (embedding_blob, embedding_dim) = match &raw_embedding {
+            Some(emb) => {
+                let dim = emb.len() as i64;
+                (Some(super::embeddings::embedding_to_blob(emb)), Some(dim))
+            }
+            None => (None, None),
+        };
+
+        // Capture for contradiction check before move into NewMemory
+        let entities_for_check: Vec<String> = params.entities
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let knowledge_type_for_check = params.knowledge_type.clone();
+
+        // Contradiction check BEFORE insert (so we don't match the new entry against itself)
+        let embedding_for_check = raw_embedding.as_deref();
+        let conflicts = match self.db.check_contradictions(
+            &entities_for_check,
+            embedding_for_check,
+            &knowledge_type_for_check,
+            &pid,
+        ) {
+            Ok(cs) => cs
+                .into_iter()
+                .map(|c| ConflictItem {
+                    id: c.existing_id,
+                    title: c.existing_title,
+                    reason: c.reason.to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "contradiction check failed");
+                vec![]
             }
         };
 
         let mem = super::db::NewMemory {
-            project_id: pid,
+            project_id: pid.clone(),
             source_file: params.source_file,
             source_type: params.source_type,
             knowledge_type: params.knowledge_type,
@@ -233,10 +268,9 @@ impl SecondBrainServer {
 
         match self.db.insert_memory(mem) {
             Ok(entry_id) => {
-                // TODO: contradiction detection (Step 5b)
                 Json(IngestOutput {
                     entry_id,
-                    conflicts: vec![],
+                    conflicts,
                     error: None,
                 })
             }

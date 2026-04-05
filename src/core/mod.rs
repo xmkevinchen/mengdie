@@ -1,3 +1,4 @@
+pub mod contradiction;
 pub mod db;
 pub mod embeddings;
 pub mod ingest;
