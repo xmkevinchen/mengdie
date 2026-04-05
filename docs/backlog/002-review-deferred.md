@@ -32,6 +32,12 @@ tags: [review, deferred, performance, architecture]
 
 ## From Steps 3+4 Review
 
+### BL-002-5: Manual debounce in watcher should use notify_debouncer_mini
+- **Source**: Doodlestein + Code-reviewer (Step 5a review)
+- **Issue**: Hand-rolled debounce in `watch_loop` has subtle timing bugs (500ms window resets per-batch, not per-path). `notify_debouncer_mini` is already a dependency but unused.
+- **Fix**: Replace manual debounce with `notify_debouncer_mini::new_debouncer()`.
+- **Trigger**: When watcher is integrated into MCP server or CLI daemon (Step 6+).
+
 ### BL-002-4: FTS5 syntax abuse not sanitized
 - **Source**: Codex (Steps 3-4 review)
 - **Issue**: User query passed directly to FTS5 MATCH — FTS5 operators (OR, NOT, NEAR, wildcards) can alter semantics or trigger expensive queries.
