@@ -3,7 +3,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Context;
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::RecursiveMode;
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 
 use super::parser::is_ingestable;
 
@@ -15,31 +16,41 @@ pub struct FileEvent {
 
 /// Start watching directories for AE output files.
 /// Returns a receiver that yields debounced file events for ingestable files.
-/// The watcher handle must be kept alive (dropping it stops watching).
+/// The debouncer handle must be kept alive (dropping it stops watching).
 pub fn start_watcher(
     dirs: &[PathBuf],
-) -> anyhow::Result<(mpsc::Receiver<FileEvent>, RecommendedWatcher)> {
+) -> anyhow::Result<(
+    mpsc::Receiver<FileEvent>,
+    Debouncer<notify::RecommendedWatcher>,
+)> {
+    let (raw_tx, raw_rx) = mpsc::channel::<DebounceEventResult>();
     let (tx, rx) = mpsc::channel();
 
-    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-        if let Ok(event) = res {
-            match event.kind {
-                EventKind::Create(_) | EventKind::Modify(_) => {
-                    for path in event.paths {
-                        if is_ingestable(&path) {
-                            let _ = tx.send(FileEvent { path });
+    // Forward debounced events, filtering to ingestable files
+    std::thread::spawn(move || {
+        for result in raw_rx {
+            match result {
+                Ok(events) => {
+                    for event in events {
+                        if event.path.exists() && is_ingestable(&event.path) {
+                            let _ = tx.send(FileEvent { path: event.path });
                         }
                     }
                 }
-                _ => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "watcher error");
+                }
             }
         }
-    })
-    .context("failed to create file watcher")?;
+    });
+
+    let mut debouncer =
+        new_debouncer(Duration::from_millis(500), raw_tx).context("failed to create debouncer")?;
 
     for dir in dirs {
         if dir.exists() {
-            watcher
+            debouncer
+                .watcher()
                 .watch(dir, RecursiveMode::Recursive)
                 .with_context(|| format!("failed to watch {}", dir.display()))?;
             tracing::info!(dir = %dir.display(), "watching directory");
@@ -48,7 +59,7 @@ pub fn start_watcher(
         }
     }
 
-    Ok((rx, watcher))
+    Ok((rx, debouncer))
 }
 
 /// Process file events from the watcher in a loop.
@@ -58,37 +69,8 @@ pub fn watch_loop<F>(rx: mpsc::Receiver<FileEvent>, mut on_file: F)
 where
     F: FnMut(&Path),
 {
-    // Simple debounce: collect events for 500ms, deduplicate by path
-    loop {
-        // Wait for first event
-        let first = match rx.recv() {
-            Ok(e) => e,
-            Err(_) => break, // Channel closed
-        };
-
-        // Collect more events for 500ms
-        let mut paths = std::collections::HashSet::new();
-        paths.insert(first.path);
-
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match rx.recv_timeout(remaining) {
-                Ok(e) => {
-                    paths.insert(e.path);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-        }
-
-        // Process deduplicated paths
-        for path in paths {
-            on_file(&path);
-        }
+    for event in rx {
+        on_file(&event.path);
     }
 }
 
@@ -100,7 +82,7 @@ mod tests {
     #[test]
     fn test_watcher_detects_file() {
         let dir = tempfile::tempdir().unwrap();
-        let (rx, _watcher) = start_watcher(&[dir.path().to_path_buf()]).unwrap();
+        let (rx, _debouncer) = start_watcher(&[dir.path().to_path_buf()]).unwrap();
 
         // Small delay for watcher to register
         std::thread::sleep(Duration::from_millis(100));
@@ -111,7 +93,7 @@ mod tests {
         writeln!(f, "# Test").unwrap();
         drop(f);
 
-        // Wait for event (up to 3 seconds)
+        // Wait for event (up to 3 seconds — debouncer adds 500ms delay)
         let event = rx.recv_timeout(Duration::from_secs(3));
         assert!(event.is_ok(), "expected file event within 3 seconds");
         let event_path = event.unwrap().path;
@@ -124,7 +106,7 @@ mod tests {
     #[test]
     fn test_watcher_ignores_non_ingestable() {
         let dir = tempfile::tempdir().unwrap();
-        let (rx, _watcher) = start_watcher(&[dir.path().to_path_buf()]).unwrap();
+        let (rx, _debouncer) = start_watcher(&[dir.path().to_path_buf()]).unwrap();
 
         // Create a non-ingestable file
         let path = dir.path().join("round-01.md");
@@ -132,9 +114,12 @@ mod tests {
         writeln!(f, "# Round 1").unwrap();
         drop(f);
 
-        // Should NOT get an event
-        let event = rx.recv_timeout(Duration::from_secs(1));
-        assert!(event.is_err(), "should not receive event for non-ingestable file");
+        // Should NOT get an event (wait longer than debounce window)
+        let event = rx.recv_timeout(Duration::from_secs(2));
+        assert!(
+            event.is_err(),
+            "should not receive event for non-ingestable file"
+        );
     }
 
     #[test]

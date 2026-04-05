@@ -2,6 +2,22 @@ use std::path::Path;
 
 use anyhow::Context;
 
+/// Valid source types for memory entries.
+pub const VALID_SOURCE_TYPES: &[&str] = &["conclusion", "review", "plan", "retrospect"];
+
+/// Valid knowledge types for memory entries.
+pub const VALID_KNOWLEDGE_TYPES: &[&str] = &["decisional", "experiential", "factual"];
+
+/// Validate source_type against known values. Returns "unknown" for unrecognized values.
+pub fn validate_source_type(s: &str) -> &str {
+    if VALID_SOURCE_TYPES.contains(&s) { s } else { "unknown" }
+}
+
+/// Validate knowledge_type against known values. Returns "factual" (safest default) for unrecognized values.
+pub fn validate_knowledge_type(s: &str) -> &str {
+    if VALID_KNOWLEDGE_TYPES.contains(&s) { s } else { "factual" }
+}
+
 /// Parsed AE output file.
 #[derive(Debug, Clone)]
 pub struct ParsedDocument {

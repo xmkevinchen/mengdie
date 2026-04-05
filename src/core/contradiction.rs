@@ -3,6 +3,16 @@ use rusqlite::params;
 use super::db::Db;
 use super::embeddings::{blob_to_embedding, cosine_similarity};
 
+// -- Tunable thresholds --
+// See BL-002-6: make configurable when users report false positives.
+
+/// Cosine similarity threshold for evolution candidate detection (both decisional, same entities).
+pub const EVOLUTION_SIMILARITY_THRESHOLD: f32 = 0.7;
+/// Cosine similarity floor for recent conflict detection (reduces false positives on common tags).
+pub const RECENT_CONFLICT_SIMILARITY_FLOOR: f32 = 0.4;
+/// Time window (days) for recent conflict detection.
+pub const RECENT_CONFLICT_WINDOW_DAYS: i64 = 30;
+
 /// A detected conflict between a new memory and an existing one.
 #[derive(Debug, Clone)]
 pub struct Conflict {
@@ -95,7 +105,7 @@ impl Db {
                 if let (Some(new_emb), Some(existing_blob)) = (new_embedding, &embedding_blob) {
                     if let Ok(existing_emb) = blob_to_embedding(existing_blob) {
                         let sim = cosine_similarity(new_emb, &existing_emb);
-                        if sim > 0.7 {
+                        if sim > EVOLUTION_SIMILARITY_THRESHOLD {
                             conflicts.push(Conflict {
                                 existing_id: id.clone(),
                                 existing_title: title.clone(),
@@ -114,12 +124,11 @@ impl Db {
                 let days_apart = (now - created.with_timezone(&chrono::Utc))
                     .num_days()
                     .abs();
-                if days_apart < 30 {
-                    // Require minimum semantic similarity (0.4) to reduce false positives
+                if days_apart < RECENT_CONFLICT_WINDOW_DAYS {
                     let has_similarity = match (new_embedding, &embedding_blob) {
                         (Some(new_emb), Some(blob)) => {
                             blob_to_embedding(blob)
-                                .map(|existing_emb| cosine_similarity(new_emb, &existing_emb) > 0.4)
+                                .map(|existing_emb| cosine_similarity(new_emb, &existing_emb) > RECENT_CONFLICT_SIMILARITY_FLOOR)
                                 .unwrap_or(false)
                         }
                         _ => false, // No embeddings → can't verify similarity, skip flagging

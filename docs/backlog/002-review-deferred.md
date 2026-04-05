@@ -8,75 +8,18 @@ tags: [review, deferred, performance, architecture]
 
 # Deferred Review Findings
 
-## From Step 1 Review
-
-### BL-002-1: std::sync::Mutex blocks async executor
-- **Source**: Doodlestein + Codex (Step 1 + Step 2 reviews)
-- **Issue**: `Arc<std::sync::Mutex<Connection>>` blocks tokio executor threads during DB operations. At scale, concurrent MCP requests will serialize on the lock.
-- **Fix**: Fetch rows into local Vec, drop lock, then compute outside. Or switch to `tokio::sync::Mutex` / connection pool.
-- **Trigger**: When MCP server handles concurrent requests (Phase 2 daemon mode).
-
-## From Step 2 Review
-
-### BL-002-2: Metadata-in-chunk query asymmetry
-- **Source**: Doodlestein (Step 2 review)
-- **Issue**: Documents get metadata prepended before embedding (`[decisional] [entities: auth]...`) but queries do not. This creates an asymmetry in the embedding space — doc embeddings are "colored" by metadata while query embeddings are plain text.
-- **Current rationale**: By design — queries match semantic content; docs are enriched. qmd uses the same pattern.
-- **Revisit trigger**: If search quality tests show metadata-enriched docs rank lower than expected for plain-text queries, consider also prepending metadata to query embeddings.
-
-### BL-002-3: No score threshold in vector search / hardcoded limit
-- **Source**: Doodlestein (Step 2 review)
-- **Issue**: `search_vector` returns all results sorted by similarity, including low-relevance noise (e.g., score 0.1).
-- **Fix**: Add `min_score: Option<f32>` parameter to filter results below threshold. Also add `limit` parameter to MCP tool (currently hardcoded to 10).
-- **Trigger**: When search results include clearly irrelevant entries in practice.
-
-## From Steps 3+4 Review
-
-### BL-002-10: E2e test bypasses organic scoring path
-- **Source**: Doodlestein (Step 7 review)
-- **Issue**: E2e test manually stuffs 9x record_recall(0.9) to overpower the tiny RRF score (~0.03). Tests DB plumbing, not realistic promotion signal.
-- **Fix**: Add a separate test with realistic data volumes and organic search patterns.
-- **Trigger**: When Dreaming thresholds are tuned based on real usage.
-
-### BL-002-11: CLI import discards contradiction results
-- **Source**: Doodlestein (Step 7 review)
-- **Issue**: `ingest_file` returns entry_id but not conflicts. CLI import path doesn't surface contradictions.
-- **Fix**: Return conflicts from `ingest_file`, display in import output.
-- **Trigger**: When batch import is used on repos with evolving decisions.
-
-### BL-002-8: Dreaming thresholds hardcoded
-- **Source**: Doodlestein (Step 6 review)
-- **Issue**: recall_count (3), avg_relevance (0.65), window (14 days) are compile-time constants. No way to tune without rebuilding.
-- **Fix**: Add CLI flags (`--min-recall`, `--min-relevance`, `--window-days`) or read from config file.
-- **Trigger**: When real usage data shows thresholds are too aggressive or too lenient.
-
-### BL-002-9: Stats shows 0s on cold start
-- **Source**: Code-reviewer (Step 6 review)
-- **Issue**: `second-brain stats` queries metrics table that Step 7 populates. On cold start, all metrics show 0.
-- **Fix**: Either seed metrics on schema creation, or display "no data" instead of 0.
-- **Trigger**: After Step 7 implements metric tracking.
-
-### BL-002-7: Contradiction full table scan at scale
-- **Source**: Code-reviewer (Step 5b review)
-- **Issue**: `check_contradictions` scans all valid memories per project with no index on entity overlap. O(n) per ingest.
-- **Current**: Acceptable for MVP (1K-10K memories).
-- **Fix**: Add entity index or pre-filter query when scan exceeds ~50ms.
-- **Trigger**: Ingestion latency exceeds 100ms per file.
-
-### BL-002-6: Contradiction detection magic numbers
-- **Source**: Doodlestein (Step 5b review)
-- **Issue**: Cosine thresholds (0.7 evolution, 0.4 recent) and 30-day conflict window are hardcoded. Active projects with common entity tags (auth, api, database) may see false positives.
-- **Fix**: Make thresholds configurable via Db config or pipeline.yml.
-- **Trigger**: When users report noise in contradiction flags.
-
-### BL-002-5: Manual debounce in watcher should use notify_debouncer_mini
-- **Source**: Doodlestein + Code-reviewer (Step 5a review)
-- **Issue**: Hand-rolled debounce in `watch_loop` has subtle timing bugs (500ms window resets per-batch, not per-path). `notify_debouncer_mini` is already a dependency but unused.
-- **Fix**: Replace manual debounce with `notify_debouncer_mini::new_debouncer()`.
-- **Trigger**: When watcher is integrated into MCP server or CLI daemon (Step 6+).
-
-### BL-002-4: FTS5 syntax abuse not sanitized
-- **Source**: Codex (Steps 3-4 review)
-- **Issue**: User query passed directly to FTS5 MATCH — FTS5 operators (OR, NOT, NEAR, wildcards) can alter semantics or trigger expensive queries.
-- **Current rationale**: Queries come from trusted AI agents (ae:analyze), not end users.
-- **Revisit trigger**: If Second Brain is exposed to user-facing queries or untrusted input.
+| ID | Status | Issue | Source | Fix | Trigger |
+|----|--------|-------|--------|-----|---------|
+| 002-1 | open | `Arc<std::sync::Mutex<Connection>>` blocks tokio executor threads during DB ops. Concurrent MCP requests serialize on the lock. | Doodlestein + Codex (Step 1+2) | Fetch rows into Vec, drop lock before compute. Or `tokio::sync::Mutex` / connection pool. | Phase 2 concurrent requests |
+| 002-2 | open | Metadata-in-chunk query asymmetry: docs get metadata prepended before embedding but queries do not. By design (qmd uses same pattern). | Doodlestein (Step 2) | Prepend metadata to query embeddings if quality degrades. | Search quality tests show metadata-enriched docs rank lower than expected |
+| 002-3 | ✅ fixed | Hardcoded limit=10, no score threshold. | Doodlestein (Step 2) | Added `limit` + `min_score` to MCP and CLI. See 002-12 for score scale issue. | — |
+| 002-4 | open | FTS5 syntax abuse: query passed directly to MATCH. Operators (OR, NOT, NEAR) can alter semantics. Trusted agents only for now. | Codex (Steps 3-4) | Sanitize/escape FTS5 operators in query. | Exposed to user-facing or untrusted input |
+| 002-5 | ✅ fixed | Hand-rolled debounce in watcher; `notify_debouncer_mini` in Cargo.toml but unused. | Doodlestein + Code-reviewer (Step 5a) | Replaced with `notify-debouncer-mini` 0.7 + `path.exists()` guard. | — |
+| 002-6 | ✅ fixed | Contradiction detection magic numbers: extracted to named constants (`EVOLUTION_SIMILARITY_THRESHOLD`, `RECENT_CONFLICT_SIMILARITY_FLOOR`, `RECENT_CONFLICT_WINDOW_DAYS`). | Doodlestein (Step 5b) | — | — |
+| 002-7 | open | Contradiction full table scan O(n) per ingest. No index on entity overlap. | Code-reviewer (Step 5b) | Add entity index or pre-filter query. | Ingestion latency exceeds 100ms per file |
+| 002-8 | ✅ fixed | Dreaming thresholds now configurable via CLI: `--min-recall`, `--min-relevance`, `--window-days`. Defaults unchanged (3, 0.65, 14). | Doodlestein (Step 6) | — | — |
+| 002-9 | ✅ fixed | Stats shows 0s on cold start. | Code-reviewer (Step 6) | Shows "no searches yet" / "no ingestions yet". | — |
+| 002-10 | open | E2e test bypasses organic scoring: manually stuffs 9x `record_recall(0.9)` to overpower tiny RRF score. Tests plumbing, not realistic promotion. | Doodlestein (Step 7) | Add separate test with realistic data volumes and organic search patterns. | Dreaming thresholds tuned from real usage |
+| 002-11 | ✅ fixed | CLI import discards contradiction results. | Doodlestein (Step 7) | `ingest_file` returns `IngestResult{entry_id, conflicts}`. CLI prints conflicts. | — |
+| 002-12 | open | `min_score` doc says 0.0-1.0 but RRF scores are ~0.01-0.03 and FTS fallback uses `abs(bm25_score)` (unbounded). | Codex (backlog cleanup review) | Normalize both paths to 0.0-1.0, or disable min_score in degraded mode, or update docs. | min_score used in practice with confusing results |
+| 002-13 | open | `check_contradictions` + `insert_memory` not in a transaction. Concurrent ingestions can race, missing conflicts. Advisory-only for MVP. | Codex (backlog cleanup review) | Wrap check + insert in single DB transaction. | Conflicts drive automated actions or concurrent ingestion supported |

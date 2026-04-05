@@ -10,7 +10,9 @@ use second_brain::core::ingest::ingest_file;
 use second_brain::core::parser::is_ingestable;
 
 /// E2E: Create a conclusion.md → ingest → search → find it → Dreaming promotes it.
+/// Requires fastembed model (~90MB download). Run with: cargo test --test e2e -- --ignored
 #[test]
+#[ignore]
 fn test_full_pipeline() {
     // Setup
     let db = Db::open_in_memory().unwrap();
@@ -36,7 +38,8 @@ fn test_full_pipeline() {
     assert!(is_ingestable(&path));
 
     // 2. Ingest the file
-    let entry_id = ingest_file(&db, &mut embedder, &path, project_id).unwrap();
+    let result = ingest_file(&db, &mut embedder, &path, project_id).unwrap();
+    let entry_id = result.entry_id;
     assert!(!entry_id.is_empty());
 
     // 3. Verify it's stored correctly
@@ -95,21 +98,12 @@ fn test_full_pipeline() {
     }
 
     // Ingest second file — should detect conflict with first
-    let entry2_id = ingest_file(&db, &mut embedder, &path2, project_id).unwrap();
-    assert!(!entry2_id.is_empty());
+    let result2 = ingest_file(&db, &mut embedder, &path2, project_id).unwrap();
+    assert!(!result2.entry_id.is_empty());
 
-    // Check contradictions manually (ingest_file doesn't return conflicts directly)
-    let entry2 = db.get_memory(&entry2_id).unwrap().unwrap();
-    let entities: Vec<String> = entry2.entities.split(',').map(|s| s.trim().to_string()).collect();
-    let emb2 = second_brain::core::embeddings::blob_to_embedding(
-        entry2.embedding.as_ref().unwrap()
-    ).unwrap();
-    let conflicts = db
-        .check_contradictions(&entities, Some(&emb2), &entry2.knowledge_type, project_id)
-        .unwrap();
-    // Should find the first entry as a conflict (same entities, both decisional)
+    // ingest_file now returns conflicts directly
     assert!(
-        !conflicts.is_empty(),
+        !result2.conflicts.is_empty(),
         "should detect conflict between old and new auth decisions"
     );
 

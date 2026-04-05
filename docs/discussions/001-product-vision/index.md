@@ -1,13 +1,13 @@
 ---
 id: "001"
 title: "AI-native Second Brain — Product Vision"
-status: active
+status: done
 created: 2026-04-05
 pipeline:
   analyze: skipped
   discuss: done
-  plan: pending
-  work: pending
+  plan: skipped
+  work: skipped
 plan: ""
 tags: [product-vision, architecture, memory]
 ---

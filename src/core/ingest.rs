@@ -2,9 +2,16 @@ use std::path::Path;
 
 use anyhow::Context;
 
+use super::contradiction::Conflict;
 use super::db::{Db, NewMemory};
 use super::embeddings::{embedding_to_blob, EmbeddingContext, Embedder};
 use super::parser::{parse_ae_file, ParsedDocument};
+
+/// Result of ingesting a document, including any detected contradictions.
+pub struct IngestResult {
+    pub entry_id: String,
+    pub conflicts: Vec<Conflict>,
+}
 
 /// Ingest a parsed document into the database with embedding.
 pub fn ingest_document(
@@ -12,7 +19,7 @@ pub fn ingest_document(
     embedder: &mut Embedder,
     doc: &ParsedDocument,
     project_id: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<IngestResult> {
     // Generate embedding with metadata-in-chunk encoding
     let ctx = EmbeddingContext {
         knowledge_type: doc.knowledge_type.clone(),
@@ -28,6 +35,14 @@ pub fn ingest_document(
     // Normalize entities to lowercase for consistent matching
     let normalized_entities: Vec<String> = doc.entities.iter().map(|e| e.to_lowercase()).collect();
 
+    // Check contradictions BEFORE insert (so we don't match against ourselves)
+    let conflicts = db
+        .check_contradictions(&normalized_entities, Some(&embedding), &doc.knowledge_type, project_id)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "contradiction check failed during ingestion");
+            vec![]
+        });
+
     let mem = NewMemory {
         project_id: project_id.to_string(),
         source_file: doc.source_file.clone(),
@@ -40,7 +55,8 @@ pub fn ingest_document(
         embedding_dim: Some(dim),
     };
 
-    db.insert_memory(mem)
+    let entry_id = db.insert_memory(mem)?;
+    Ok(IngestResult { entry_id, conflicts })
 }
 
 /// Parse and ingest a file from disk.
@@ -49,7 +65,7 @@ pub fn ingest_file(
     embedder: &mut Embedder,
     path: &Path,
     project_id: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<IngestResult> {
     let doc = parse_ae_file(path)?;
     ingest_document(db, embedder, &doc, project_id)
 }
@@ -76,8 +92,8 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let mut embedder = Embedder::new().unwrap();
 
-        let id = ingest_file(&db, &mut embedder, &path, "test-project").unwrap();
-        let entry = db.get_memory(&id).unwrap().unwrap();
+        let result = ingest_file(&db, &mut embedder, &path, "test-project").unwrap();
+        let entry = db.get_memory(&result.entry_id).unwrap().unwrap();
         assert_eq!(entry.title, "Test Decision");
         assert_eq!(entry.entities, "test,ingest");
         assert_eq!(entry.knowledge_type, "decisional");

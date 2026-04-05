@@ -28,6 +28,10 @@ pub struct SearchParams {
     pub scope: Option<String>,
     /// Override project_id (default: inferred from cwd at server startup).
     pub project_id: Option<String>,
+    /// Maximum number of results to return (default: 10).
+    pub limit: Option<usize>,
+    /// Minimum score threshold — results below this are filtered out (0.0-1.0).
+    pub min_score: Option<f64>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -142,11 +146,14 @@ impl SecondBrainServer {
         .await
         .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn: {e}")));
 
+        let limit = params.limit.unwrap_or(10);
+        let min_score = params.min_score.unwrap_or(0.0);
+
         let (results, degraded) = match query_embedding {
             Ok(embedding) => {
                 match self
                     .db
-                    .memory_search(&params.query, &embedding, project_id, 10)
+                    .memory_search(&params.query, &embedding, project_id, limit)
                 {
                     Ok(results) => (results, None),
                     Err(e) => {
@@ -158,12 +165,11 @@ impl SecondBrainServer {
             Err(e) => {
                 tracing::warn!(error = %e, "embedding failed, falling back to FTS-only");
                 // FTS-only fallback
-                match self.db.search_fts(&params.query, project_id, 10) {
+                match self.db.search_fts(&params.query, project_id, limit) {
                     Ok(fts_results) => {
                         let mut results = Vec::new();
                         for fts in &fts_results {
                             if let Ok(Some(entry)) = self.db.get_memory(&fts.id) {
-                                let snippet = entry.content.chars().take(200).collect::<String>();
                                 results.push(super::search::SearchResult {
                                     entry,
                                     score: fts.bm25_score.abs(),
@@ -182,6 +188,7 @@ impl SecondBrainServer {
 
         let items: Vec<SearchResultItem> = results
             .into_iter()
+            .filter(|r| r.score >= min_score)
             .map(|r| {
                 let snippet = r.entry.content.chars().take(200).collect::<String>();
                 SearchResultItem {
@@ -225,13 +232,23 @@ impl SecondBrainServer {
                 error: Some(format!("field too long (max {MAX_FIELD_LEN} chars)")),
             });
         }
+        // Validate and normalize source_type / knowledge_type
+        let source_type = super::parser::validate_source_type(&params.source_type).to_string();
+        let knowledge_type = super::parser::validate_knowledge_type(&params.knowledge_type).to_string();
+        if source_type != params.source_type {
+            tracing::warn!(given = %params.source_type, normalized = %source_type, "unknown source_type, defaulting");
+        }
+        if knowledge_type != params.knowledge_type {
+            tracing::warn!(given = %params.knowledge_type, normalized = %knowledge_type, "unknown knowledge_type, defaulting");
+        }
+
         let pid = params
             .project_id
             .clone()
             .unwrap_or_else(|| self.default_project_id.clone());
         let embedder = self.embedder.clone();
         let ctx = super::embeddings::EmbeddingContext {
-            knowledge_type: params.knowledge_type.clone(),
+            knowledge_type: knowledge_type.clone(),
             entities: params.entities.clone(),
             project_id: pid.clone(),
             title: params.title.clone(),
@@ -266,7 +283,7 @@ impl SecondBrainServer {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let knowledge_type_for_check = params.knowledge_type.clone();
+        let knowledge_type_for_check = knowledge_type.clone();
 
         // Contradiction check BEFORE insert (so we don't match the new entry against itself)
         let embedding_for_check = raw_embedding.as_deref();
@@ -293,8 +310,8 @@ impl SecondBrainServer {
         let mem = super::db::NewMemory {
             project_id: pid.clone(),
             source_file: params.source_file,
-            source_type: params.source_type,
-            knowledge_type: params.knowledge_type,
+            source_type,
+            knowledge_type,
             title: params.title,
             content: params.content,
             entities: params.entities,
