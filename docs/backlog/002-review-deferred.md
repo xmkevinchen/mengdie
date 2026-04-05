@@ -32,6 +32,18 @@ tags: [review, deferred, performance, architecture]
 
 ## From Steps 3+4 Review
 
+### BL-002-10: E2e test bypasses organic scoring path
+- **Source**: Doodlestein (Step 7 review)
+- **Issue**: E2e test manually stuffs 9x record_recall(0.9) to overpower the tiny RRF score (~0.03). Tests DB plumbing, not realistic promotion signal.
+- **Fix**: Add a separate test with realistic data volumes and organic search patterns.
+- **Trigger**: When Dreaming thresholds are tuned based on real usage.
+
+### BL-002-11: CLI import discards contradiction results
+- **Source**: Doodlestein (Step 7 review)
+- **Issue**: `ingest_file` returns entry_id but not conflicts. CLI import path doesn't surface contradictions.
+- **Fix**: Return conflicts from `ingest_file`, display in import output.
+- **Trigger**: When batch import is used on repos with evolving decisions.
+
 ### BL-002-8: Dreaming thresholds hardcoded
 - **Source**: Doodlestein (Step 6 review)
 - **Issue**: recall_count (3), avg_relevance (0.65), window (14 days) are compile-time constants. No way to tune without rebuilding.

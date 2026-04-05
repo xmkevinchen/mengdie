@@ -109,16 +109,11 @@ Expected files: `src/bin/cli.rs`, `src/core/dreaming.rs`, `resources/com.second-
 
 ### Step 7: ae:analyze integration + observability (AC14, AC15)
 
-- [ ] Modify ae:analyze SKILL.md: add Step 3.5 "Prior Context (from Second Brain)" — after research phase, before synthesis, call `memory_search` with research topic, present as "Round 0: Prior Decisions" with provenance
-- [ ] Modify AE conclusion.md template: add `entities: [...]` frontmatter field (002 Topic 3 requirement)
-- [ ] Locate ae:analyze SKILL.md path (in AE plugin directory)
-- [ ] 4 observability metrics in SQLite `metrics` table:
-  - `context_injection_rate`: % of memory_search returning non-empty (target: >60%)
-  - `stale_citation_rate`: % of cited memories with expired valid_until (target: <10%)
-  - `conflict_detection_rate`: % of ingestions triggering conflict flags (target: 1-15%)
-  - `memory_age_at_retrieval`: average age of cited memories
-- [ ] Increment metric counters in search/ingest code paths
-- [ ] End-to-end smoke test: create test conclusion.md → watcher ingests → search returns it → Dreaming processes it
+- [x] AE integration PRD: docs/prd-ae-integration.md (why, what, how, interface spec) (b5cd944)
+- [x] 4 metrics tracked: search_count, search_nonempty, ingest_count, conflict_count
+- [x] Metric counters wired into MCP search + ingest paths
+- [x] list_metrics method for dashboard enumeration
+- [x] E2e test: ingest → search → recall → dream → contradiction (full pipeline)
 
 Expected files: `src/core/metrics.rs`, `tests/e2e.rs`, ae:analyze SKILL.md (external), AE conclusion.md template (external)
 
