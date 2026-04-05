@@ -88,51 +88,49 @@ Key conventions:
 
 ## rmcp MCP Server Patterns
 
-rmcp v1.3 — the official Rust MCP SDK. Key patterns for this project:
+rmcp v1.3 — the official Rust MCP SDK. Patterns used in this project (from tests/common/calculator.rs):
 
 ```rust
-// 1. Define server struct with tool_router field
-use rmcp::{tool_router, tool, handler::server::{wrapper::{Parameters, Json}, tool::ToolRouter}, schemars};
+use rmcp::{ServerHandler, tool_router, tool,
+    handler::server::{router::tool::ToolRouter, wrapper::{Parameters, Json}},
+    model::{ServerCapabilities, ServerInfo}, schemars};
 
+// 1. Struct with tool_router field
 struct MyServer {
     tool_router: ToolRouter<Self>,
-    // ... other state
 }
 
-// 2. Define tool parameter/output types (must derive schemars::JsonSchema)
+// 2. Params: Deserialize + schemars::JsonSchema; Output: Serialize + schemars::JsonSchema
 #[derive(Deserialize, schemars::JsonSchema)]
-struct SearchParams {
-    query: String,
-    scope: Option<String>,
-}
+struct SearchParams { query: String }
 
-#[derive(Serialize, schemars::JsonSchema)]
-struct SearchOutput {
-    results: Vec<SearchResultItem>,
-}
-
-// 3. Implement tools with #[tool_router] + #[tool] macros
+// 3. Tools via #[tool_router] + #[tool]
 #[tool_router]
 impl MyServer {
     #[tool(name = "memory_search", description = "Search memories")]
-    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
-        // ... implementation
-        Json(SearchOutput { results: vec![] })
+    async fn search(&self, Parameters(p): Parameters<SearchParams>) -> String {
+        "result".to_string()  // or Json<T> for structured output
     }
 }
 
-// 4. Constructor must call Self::tool_router()
+// 4. Constructor calls Self::tool_router()
 impl MyServer {
-    fn new() -> Self {
-        Self { tool_router: Self::tool_router() }
+    fn new() -> Self { Self { tool_router: Self::tool_router() } }
+}
+
+// 5. Implement ServerHandler — only get_info() required
+impl ServerHandler for MyServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("description")
     }
 }
 
-// 5. Start stdio server in main
+// 6. Start stdio server
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let transport = rmcp::transport::io::stdio();
     let server = MyServer::new();
+    let transport = rmcp::transport::io::stdio();
     let service = rmcp::serve_server(server, transport).await?;
     service.waiting().await?;
     Ok(())
@@ -140,11 +138,10 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 Key notes:
-- `Parameters<T>` extracts tool input; `T` must impl `Deserialize + schemars::JsonSchema`
-- `Json<T>` wraps tool output; `T` must impl `Serialize + schemars::JsonSchema`
-- Tools can be `async fn` — use for spawn_blocking wrapping of fastembed
-- `tool_router` field name defaults to `tool_router` (customizable via macro args)
-- Cargo features required: `server`, `macros`, `transport-io`
+- `Parameters<T>` extracts tool input; `Json<T>` wraps structured output
+- Tools can be `async fn` — use `spawn_blocking` for fastembed
+- `ServerHandler` trait: only `get_info()` required; `#[tool_router]` provides tool dispatch via the `tool_router` field
+- Cargo features: `server`, `macros`, `transport-io`
 
 ## Review Rules
 
