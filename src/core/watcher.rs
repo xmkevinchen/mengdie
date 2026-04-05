@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 
 use super::parser::is_ingestable;
 

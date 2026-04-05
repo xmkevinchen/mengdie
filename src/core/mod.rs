@@ -4,6 +4,7 @@ pub mod dreaming;
 pub mod embeddings;
 pub mod ingest;
 pub mod mcp_tools;
+pub mod metrics;
 pub mod parser;
 pub mod project;
 pub mod schema;

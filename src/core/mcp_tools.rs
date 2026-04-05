@@ -6,6 +6,7 @@ use rmcp::{tool, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
 
 use super::db::Db;
+use super::metrics;
 use super::embeddings::Embedder;
 use std::sync::{Arc, Mutex};
 
@@ -164,7 +165,7 @@ impl SecondBrainServer {
             }
         };
 
-        let items = results
+        let items: Vec<SearchResultItem> = results
             .into_iter()
             .map(|r| {
                 let snippet = r.entry.content.chars().take(200).collect::<String>();
@@ -180,6 +181,12 @@ impl SecondBrainServer {
                 }
             })
             .collect();
+
+        // Track metrics
+        let _ = self.db.increment_metric(metrics::METRIC_SEARCH_COUNT);
+        if !items.is_empty() {
+            let _ = self.db.increment_metric(metrics::METRIC_SEARCH_NONEMPTY);
+        }
 
         Json(SearchOutput { results: items, degraded })
     }
@@ -268,6 +275,11 @@ impl SecondBrainServer {
 
         match self.db.insert_memory(mem) {
             Ok(entry_id) => {
+                // Track metrics
+                let _ = self.db.increment_metric(metrics::METRIC_INGEST_COUNT);
+                if !conflicts.is_empty() {
+                    let _ = self.db.increment_metric(metrics::METRIC_CONFLICT_COUNT);
+                }
                 Json(IngestOutput {
                     entry_id,
                     conflicts,
