@@ -166,6 +166,13 @@ impl Db {
         Ok(rows > 0)
     }
 
+    /// Access the underlying connection lock (for modules that need direct SQL).
+    pub(crate) fn lock_conn(
+        &self,
+    ) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))
+    }
+
     /// Count all memories for a given project.
     pub fn count_memories(&self, project_id: &str) -> anyhow::Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
