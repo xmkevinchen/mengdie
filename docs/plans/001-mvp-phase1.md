@@ -41,29 +41,14 @@ Key changes from review:
 
 ### Step 1: Project scaffold + SQLite core (AC1, AC2)
 
-- [ ] Initialize Cargo project with `Cargo.toml`:
-  ```toml
-  rusqlite = { version = "0.39", features = ["bundled", "fts5", "load_extension"] }
-  rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
-  tokio = { version = "1", features = ["full"] }
-  fastembed = "5"
-  notify = "8"
-  tracing = "0.1"
-  tracing-subscriber = "0.3"
-  serde = { version = "1", features = ["derive"] }
-  serde_yaml = "0.9"
-  clap = { version = "4", features = ["derive"] }
-  uuid = { version = "1", features = ["v4"] }
-  ```
-- [ ] Create directory structure: `src/core/`, `src/bin/mcp_server.rs`, `src/bin/cli.rs`
-- [ ] SQLite schema with migration:
-  - `memory_entries` table: id (TEXT PK), project_id, source_file, source_type, knowledge_type, title, content, entities (TEXT, comma-separated), valid_from, valid_until, superseded_by, recall_count (INT DEFAULT 0), avg_relevance (REAL DEFAULT 0.0), last_recalled, embedding (BLOB), embedding_dim (INT), is_longterm (BOOL DEFAULT false), created_at
-  - FTS5 virtual table on title + content + entities
-- [ ] WAL mode + `busy_timeout(5000)`
-- [ ] DB connection wrapper: `Arc<Mutex<Connection>>` for sharing between MCP server and background tasks
-- [ ] Core DB module: open/create at `~/.second-brain/db.sqlite`, run migrations, CRUD (insert_memory, get_memory, update_memory, invalidate_memory)
-- [ ] `project_id` inference: `git remote get-url origin` (fallback: directory path hash)
-- [ ] tracing subscriber → stderr (never stdout)
+- [x] Initialize Cargo project with `Cargo.toml` (78c59fd)
+- [x] Create directory structure: `src/core/`, `src/bin/mcp_server.rs`, `src/bin/cli.rs`
+- [x] SQLite schema with migration (memory_entries + FTS5 + metrics)
+- [x] WAL mode + `busy_timeout(5000)`
+- [x] DB connection wrapper: `Arc<Mutex<Connection>>`
+- [x] Core DB module: open/create, migrations, CRUD, recall tracking, promotion
+- [x] `project_id` inference: git remote (fallback: FNV-1a path hash)
+- [x] tracing subscriber → stderr
 
 Expected files: `Cargo.toml`, `src/lib.rs`, `src/core/mod.rs`, `src/core/db.rs`, `src/core/schema.rs`, `src/core/project.rs`, `src/bin/mcp_server.rs` (stub), `src/bin/cli.rs` (stub)
 
