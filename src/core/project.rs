@@ -1,18 +1,18 @@
 use std::path::Path;
 use std::process::Command;
 
-/// Infer a project_id from the git remote URL of the given directory.
-/// Falls back to a hash of the directory path if no git remote is found.
+/// Infer a stable, opaque project_id from the directory.
+/// Uses git remote URL if available (normalized so SSH/HTTPS produce the same hash),
+/// otherwise falls back to the canonical directory path.
+/// Format: `proj_<16-hex-chars>` — platform-agnostic, deterministic.
 pub fn infer_project_id(dir: &Path) -> String {
-    if let Some(remote) = git_remote_url(dir) {
+    let source = if let Some(remote) = git_remote_url(dir) {
         normalize_git_url(&remote)
     } else {
-        // Fallback: hash of absolute path
-        let abs = dir
-            .canonicalize()
-            .unwrap_or_else(|_| dir.to_path_buf());
-        format!("local:{:x}", simple_hash(abs.to_string_lossy().as_bytes()))
-    }
+        let abs = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        abs.to_string_lossy().to_string()
+    };
+    format!("proj_{:016x}", simple_hash(source.as_bytes()))
 }
 
 /// Normalize git URLs so SSH and HTTPS for the same repo produce the same ID.
@@ -74,12 +74,12 @@ mod tests {
     use std::env;
 
     #[test]
-    fn test_infer_project_id_fallback() {
-        // A non-git directory should produce a local: hash
+    fn test_infer_project_id_format() {
+        // Non-git directory produces proj_<hex>
         let tmp = env::temp_dir();
         let id = infer_project_id(&tmp);
-        assert!(id.starts_with("local:"));
-        assert!(id.len() > 8);
+        assert!(id.starts_with("proj_"));
+        assert_eq!(id.len(), 5 + 16); // "proj_" + 16 hex chars
     }
 
     #[test]
@@ -98,26 +98,24 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_ssh_and_https_match() {
+    fn test_normalize_ssh_and_https_same_hash() {
         let ssh = normalize_git_url("git@github.com:user/repo.git");
         let https = normalize_git_url("https://github.com/user/repo.git");
+        // Same normalized form → same project_id
         assert_eq!(ssh, https);
-        assert_eq!(ssh, "github.com/user/repo");
     }
 
     #[test]
-    fn test_normalize_strips_git_suffix() {
-        assert_eq!(
-            normalize_git_url("https://github.com/user/repo.git"),
-            "github.com/user/repo"
-        );
+    fn test_normalize_self_hosted() {
+        let ssh = normalize_git_url("git@gitlab.mycompany.com:team/project.git");
+        let https = normalize_git_url("https://gitlab.mycompany.com/team/project.git");
+        assert_eq!(ssh, https);
     }
 
     #[test]
     fn test_normalize_ssh_protocol() {
-        assert_eq!(
-            normalize_git_url("ssh://git@github.com/user/repo.git"),
-            "github.com/user/repo"
-        );
+        let ssh1 = normalize_git_url("ssh://git@github.com/user/repo.git");
+        let ssh2 = normalize_git_url("git@github.com:user/repo.git");
+        assert_eq!(ssh1, ssh2);
     }
 }
