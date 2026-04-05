@@ -16,9 +16,9 @@ pub struct SearchResult {
 
 /// FTS5 search result (id + BM25 score).
 #[derive(Debug)]
-struct FtsResult {
-    id: String,
-    bm25_score: f64,
+pub struct FtsResult {
+    pub id: String,
+    pub bm25_score: f64,
 }
 
 impl Db {
