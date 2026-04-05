@@ -85,6 +85,53 @@ entities: []    # ← NEW: extracted entity tags for Second Brain ingestion
 - fastembed model must be downloaded (happens automatically on first run)
 - At least one memory must be ingested for `memory_search` to return results
 
+## Testing Setup (for AE plugin developers)
+
+### 1. Build Second Brain
+
+```bash
+cd /Users/ckai/Workspace/Projects/second-brain
+# Requires Rust toolchain (rustup)
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path) cargo build --release
+```
+
+Binary: `target/release/second-brain-mcp`
+
+### 2. Register MCP Server
+
+Add to `~/.claude/settings.json` → `mcpServers`:
+
+```json
+"second-brain": {
+  "command": "/Users/ckai/Workspace/Projects/second-brain/target/release/second-brain-mcp",
+  "args": []
+}
+```
+
+### 3. Seed Test Data
+
+```bash
+# Import existing AE discussions into Second Brain
+cd /Users/ckai/Workspace/Projects/second-brain
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path) cargo run --release --bin second-brain -- import --dir docs/discussions/
+```
+
+### 4. Verify
+
+```bash
+# Search for a known decision
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path) cargo run --release --bin second-brain -- search "tech stack"
+```
+
+Should return the Rust tech stack decision from Discussion 003.
+
+### 5. Test ae:analyze Integration
+
+After modifying ae:analyze SKILL.md:
+1. Restart Claude Code (to pick up MCP server registration)
+2. Run `/ae:analyze` on any topic where Second Brain has prior decisions
+3. Verify "Round 0: Prior Decisions" appears in output with provenance
+
 ## What Second Brain Provides (Integration Interface)
 
 AE agents interact with Second Brain exclusively through 3 MCP tools. No code dependency, no shared library, no import — just MCP tool calls.
