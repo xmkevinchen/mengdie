@@ -60,7 +60,6 @@ mod tests {
     // They are ignored by default and run with `cargo test -- --ignored`.
 
     #[test]
-    #[ignore] // Requires model download
     fn test_ingest_file_e2e() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("conclusion.md");
