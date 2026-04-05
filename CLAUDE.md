@@ -145,9 +145,13 @@ Key notes:
 
 ## Review Rules
 
-- All review findings without immediate action go to `docs/backlog/` — never silently dropped
-- "Defer", "Note", "OK with caveat" = backlog item with a revisit trigger
-- Backlog items have an explicit trigger condition ("revisit when X happens")
+- **OK (unconditional)** — confirmed no issue. No tracking needed.
+- **OK with caveat** ("for MVP", "at scale", "if X happens") — has an implicit "but". Goes to `docs/backlog/` with explicit trigger condition.
+- **Warning/Block + defer** — goes to `docs/backlog/` with trigger condition.
+- **Warning/Block + fix now** — fix immediately.
+
+The test: **does the finding contain "but"?** If yes → backlog. If no → done.
+Backlog items always have: what to do, why it matters, when to revisit (trigger).
 
 ## Project Status
 
