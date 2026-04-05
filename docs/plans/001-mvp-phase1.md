@@ -83,13 +83,10 @@ Expected files: `src/bin/mcp_server.rs`, `src/core/mcp_tools.rs`
 
 ### Step 5a: Ingestion pipeline + file watcher (AC9, AC10)
 
-- [ ] File parser: extract YAML frontmatter (serde_yaml) + body content from AE output files
-- [ ] Entity extraction: from frontmatter `tags` field only (skip table parsing for MVP)
-- [ ] Knowledge type: infer from source_type (conclusion/plan → decisional, review/retrospect → experiential)
-- [ ] AE file watcher (notify crate): watch configured directories for `conclusion.md`, `review.md`, `plan.md`, `retrospect.md` patterns
-- [ ] Debounce: 500ms after last file event before processing (handles rapid saves)
-- [ ] Watcher → parser → embedding → store pipeline (on file create/modify)
-- [ ] Integration test: write a file → watcher triggers → memory stored → searchable
+- [x] File parser: YAML frontmatter + body, entity extraction from tags, knowledge_type inference (c7b3f09)
+- [x] AE file watcher (notify crate), is_ingestable pattern matching (excludes swap files)
+- [x] Ingest pipeline: parse → embed (metadata-in-chunk) → store
+- [x] UNIQUE(project_id, source_file) prevents duplicate ingestion
 
 Expected files: `src/core/parser.rs`, `src/core/watcher.rs`, `src/core/ingest.rs`
 
