@@ -32,6 +32,13 @@ tags: [review, deferred, performance, architecture]
 
 ## From Steps 3+4 Review
 
+### BL-002-7: Contradiction full table scan at scale
+- **Source**: Code-reviewer (Step 5b review)
+- **Issue**: `check_contradictions` scans all valid memories per project with no index on entity overlap. O(n) per ingest.
+- **Current**: Acceptable for MVP (1K-10K memories).
+- **Fix**: Add entity index or pre-filter query when scan exceeds ~50ms.
+- **Trigger**: Ingestion latency exceeds 100ms per file.
+
 ### BL-002-6: Contradiction detection magic numbers
 - **Source**: Doodlestein (Step 5b review)
 - **Issue**: Cosine thresholds (0.7 evolution, 0.4 recent) and 30-day conflict window are hardcoded. Active projects with common entity tags (auth, api, database) may see false positives.
