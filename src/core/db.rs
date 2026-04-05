@@ -166,8 +166,8 @@ impl Db {
         Ok(rows > 0)
     }
 
-    /// Access the underlying connection lock (for modules that need direct SQL).
-    pub(crate) fn lock_conn(
+    /// Access the underlying connection lock.
+    pub fn lock_conn(
         &self,
     ) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))

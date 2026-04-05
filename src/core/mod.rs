@@ -1,5 +1,6 @@
 pub mod contradiction;
 pub mod db;
+pub mod dreaming;
 pub mod embeddings;
 pub mod ingest;
 pub mod mcp_tools;
