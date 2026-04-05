@@ -54,14 +54,12 @@ Expected files: `Cargo.toml`, `src/lib.rs`, `src/core/mod.rs`, `src/core/db.rs`,
 
 ### Step 2: Embedding + vector search (AC3, AC4)
 
-- [ ] fastembed-rs integration: model loading (all-MiniLM-L6-v2, 384 dimensions, ~90MB downloaded on first run)
-- [ ] `text_to_embedding(text) -> Vec<f32>` — wrapped in `tokio::task::spawn_blocking` (fastembed is sync/blocking)
-- [ ] Metadata-in-chunk encoding at embedding time: prepend `[{knowledge_type}] [entities: {entities}] [project: {project_id}]\nTitle: {title}\n---\n` to content before embedding (from qmd learnings)
-- [ ] Float32 blob storage: IEEE 754 little-endian, dimension count stored in `embedding_dim` column
-- [ ] Primary vector search: app-level cosine similarity over float32 blobs (brute-force scan with project_id filter)
-- [ ] Optional sqlite-vec: attempt `load_extension` at startup; if available, use vec0 virtual table for indexed search; if unavailable, log warning and use cosine fallback silently
-- [ ] Validate `embedding_dim` matches model dimension on upsert
-- [ ] Unit tests: embed → store → retrieve by similarity → top result is semantically closest
+- [x] fastembed-rs integration: Embedder struct (all-MiniLM-L6-v2, 384d) (a31b997)
+- [x] `embed_text` / `embed_with_context` (metadata-in-chunk encoding from qmd)
+- [x] Float32 blob storage: IEEE 754 LE, embedding_dim validation
+- [x] Cosine similarity: brute-force scan with project_id filter + expired exclusion
+- [x] sqlite-vec deferred (cosine primary path sufficient for MVP)
+- [x] 11 new unit tests (blob roundtrip, cosine math, vector search, project filter, expiry)
 
 Expected files: `src/core/embeddings.rs`, `src/core/vector.rs`
 
