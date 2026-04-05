@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: |
+          source ~/.cargo/env
+          cargo build --release --target x86_64-unknown-linux-gnu
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/mengdie dist/mengdie-linux-amd64
+          cp target/x86_64-unknown-linux-gnu/release/mengdie-mcp dist/mengdie-mcp-linux-amd64
+          chmod +x dist/*
+          ls -lh dist/
+
+      - name: Create release and upload
+        env:
+          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+
+          # Create release
+          RELEASE_ID=$(curl -s -X POST \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases" \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Release ${TAG}\\n\\nLinux x86_64 binaries. macOS arm64 binaries built separately.\"}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+          echo "Created release ID: ${RELEASE_ID}"
+
+          # Upload binaries
+          for file in dist/*; do
+            name=$(basename "$file")
+            echo "Uploading ${name}..."
+            curl -s -X POST \
+              "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${name}" \
+              -H "Authorization: token ${FORGEJO_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"${file}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  -> {d.get(\"name\",\"?\")} ({d.get(\"size\",0)} bytes)')"
+          done
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: |
+          source ~/.cargo/env
+          cargo test 2>&1
