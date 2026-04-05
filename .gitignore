@@ -1,1 +1,3 @@
 /target
+.fastembed_cache/
+.claude/cross-family-status.json
