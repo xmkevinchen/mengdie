@@ -2,7 +2,7 @@ use anyhow::Context;
 use rusqlite::params;
 
 use super::db::Db;
-use super::embeddings::{blob_to_embedding, cosine_similarity, embedding_to_blob};
+use super::embeddings::{blob_to_embedding, cosine_similarity, embedding_to_blob, validate_embedding};
 
 /// A scored search result from vector similarity search.
 #[derive(Debug, Clone)]
@@ -26,6 +26,7 @@ impl Db {
             embedding.len(),
             expected_dim
         );
+        validate_embedding(embedding)?;
         let blob = embedding_to_blob(embedding);
         let dim = expected_dim as i64;
         let conn = self.lock_conn()?;
@@ -38,7 +39,7 @@ impl Db {
 
     /// Brute-force cosine similarity search over all embeddings in a project.
     /// Returns results sorted by descending similarity, limited to `limit`.
-    /// Skips entries with `valid_until < now` (expired).
+    /// Skips expired entries (valid_until set and in the past).
     pub fn search_vector(
         &self,
         query_embedding: &[f32],
@@ -46,22 +47,26 @@ impl Db {
         limit: usize,
     ) -> anyhow::Result<Vec<VectorResult>> {
         let conn = self.lock_conn()?;
+        let now = chrono::Utc::now().to_rfc3339();
 
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match project_id {
             Some(pid) => (
                 "SELECT id, embedding FROM memory_entries \
                  WHERE embedding IS NOT NULL \
-                 AND valid_until IS NULL \
-                 AND project_id = ?1"
+                 AND (valid_until IS NULL OR valid_until > ?1) \
+                 AND project_id = ?2"
                     .to_string(),
-                vec![Box::new(pid.to_string()) as Box<dyn rusqlite::types::ToSql>],
+                vec![
+                    Box::new(now.clone()) as Box<dyn rusqlite::types::ToSql>,
+                    Box::new(pid.to_string()),
+                ],
             ),
             None => (
                 "SELECT id, embedding FROM memory_entries \
                  WHERE embedding IS NOT NULL \
-                 AND valid_until IS NULL"
+                 AND (valid_until IS NULL OR valid_until > ?1)"
                     .to_string(),
-                vec![],
+                vec![Box::new(now.clone()) as Box<dyn rusqlite::types::ToSql>],
             ),
         };
 
@@ -77,7 +82,13 @@ impl Db {
         let mut results: Vec<VectorResult> = Vec::new();
         for row in rows {
             let (id, blob) = row?;
-            let stored = blob_to_embedding(&blob);
+            let stored = match blob_to_embedding(&blob) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "skipping entry with malformed embedding");
+                    continue;
+                }
+            };
             let score = cosine_similarity(query_embedding, &stored);
             results.push(VectorResult { id, score });
         }

@@ -68,10 +68,28 @@ pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 }
 
 /// Deserialize IEEE 754 little-endian BLOB back to Vec<f32>.
-pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
+/// Returns error if blob length is not divisible by 4 (corrupted data).
+pub fn blob_to_embedding(blob: &[u8]) -> anyhow::Result<Vec<f32>> {
+    anyhow::ensure!(
+        blob.len() % 4 == 0,
+        "invalid embedding blob: length {} not divisible by 4",
+        blob.len()
+    );
+    Ok(blob
+        .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
+        .collect())
+}
+
+/// Validate that an embedding contains only finite values (no NaN/Inf).
+pub fn validate_embedding(embedding: &[f32]) -> anyhow::Result<()> {
+    for (i, &v) in embedding.iter().enumerate() {
+        anyhow::ensure!(
+            v.is_finite(),
+            "embedding contains non-finite value at index {i}: {v}"
+        );
+    }
+    Ok(())
 }
 
 /// Cosine similarity between two vectors. Returns 0.0 for zero-length or mismatched vectors.
@@ -97,8 +115,29 @@ mod tests {
         let original = vec![1.0_f32, -0.5, 0.0, 3.14159];
         let blob = embedding_to_blob(&original);
         assert_eq!(blob.len(), 16); // 4 floats * 4 bytes
-        let restored = blob_to_embedding(&blob);
+        let restored = blob_to_embedding(&blob).unwrap();
         assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_blob_malformed_length() {
+        let bad_blob = vec![0u8, 1, 2]; // 3 bytes, not divisible by 4
+        assert!(blob_to_embedding(&bad_blob).is_err());
+    }
+
+    #[test]
+    fn test_validate_embedding_finite() {
+        assert!(validate_embedding(&[1.0, 2.0, 3.0]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_embedding_nan() {
+        assert!(validate_embedding(&[1.0, f32::NAN, 3.0]).is_err());
+    }
+
+    #[test]
+    fn test_validate_embedding_inf() {
+        assert!(validate_embedding(&[f32::INFINITY, 0.0]).is_err());
     }
 
     #[test]
