@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
-use rusqlite::params;
 
 use super::db::{Db, MemoryEntry};
-use super::embeddings::cosine_similarity;
 use super::vector::VectorResult;
 
 /// Score multiplier for long-term memories (promoted by Dreaming).
