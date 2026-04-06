@@ -7,6 +7,9 @@ use super::db::{Db, MemoryEntry};
 use super::embeddings::cosine_similarity;
 use super::vector::VectorResult;
 
+/// Score multiplier for long-term memories (promoted by Dreaming).
+const LONGTERM_BOOST: f64 = 1.2;
+
 /// A search result with merged score and full memory data.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -124,15 +127,24 @@ impl Db {
         for (id, score) in &top_ids {
             if let Some(entry) = self.get_memory(id)? {
                 let normalized = (*score / RRF_MAX).min(1.0).max(0.0);
+                let boosted = if entry.is_longterm {
+                    (normalized * LONGTERM_BOOST).min(1.0)
+                } else {
+                    normalized
+                };
+                // Record recall with original score, not boosted — avoid circular amplification
                 if let Err(e) = self.record_recall(id, normalized) {
                     tracing::warn!(id = %id, error = %e, "failed to record recall");
                 }
                 results.push(SearchResult {
                     entry,
-                    score: normalized,
+                    score: boosted,
                 });
             }
         }
+
+        // Re-sort after boost may have changed ordering
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(results)
     }

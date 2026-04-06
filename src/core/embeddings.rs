@@ -19,7 +19,8 @@ impl Embedder {
     /// Initialize the embedding model. Downloads ~90MB on first run.
     pub fn new() -> anyhow::Result<Self> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(true),
+            // false: progress output to stderr corrupts MCP stdio transport
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
         )
         .context("failed to initialize embedding model")?;
 
