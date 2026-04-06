@@ -236,7 +236,7 @@ mod tests {
     fn test_fts5_search_skips_expired() {
         let db = test_db();
         let id = insert_test_memory(&db, "proj", "Old Decision", "Use Redis for caching", "redis", &[1.0, 0.0, 0.0]);
-        db.invalidate_memory(&id, None).unwrap();
+        db.invalidate_memory(&id, None, None).unwrap();
 
         let results = db.search_fts("Redis", Some("proj"), 10).unwrap();
         assert_eq!(results.len(), 0);

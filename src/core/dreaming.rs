@@ -198,7 +198,7 @@ mod tests {
         for _ in 0..5 {
             db.record_recall(&id, 0.8).unwrap();
         }
-        db.invalidate_memory(&id, None).unwrap();
+        db.invalidate_memory(&id, None, None).unwrap();
 
         let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 0);

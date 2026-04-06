@@ -256,7 +256,7 @@ mod tests {
     fn test_no_conflict_with_invalidated() {
         let db = test_db();
         let id = insert_mem(&db, "proj", "Old Auth", "auth", "decisional", &[0.9, 0.1, 0.0]);
-        db.invalidate_memory(&id, None).unwrap();
+        db.invalidate_memory(&id, None, None).unwrap();
 
         let conflicts = db
             .check_contradictions(

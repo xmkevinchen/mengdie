@@ -51,6 +51,9 @@ pub struct IngestParams {
     pub entities: String,
     /// Override project_id (default: inferred from cwd at server startup).
     pub project_id: Option<String>,
+    /// IDs of existing memories this new memory supersedes. When provided, the
+    /// insert and all invalidations are wrapped in a single atomic transaction.
+    pub resolves: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -105,6 +108,9 @@ pub struct ConflictItem {
 pub struct InvalidateOutput {
     pub success: bool,
     pub entry_id: String,
+    /// The ID of the memory that supersedes this one, if provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 // -- Input validation --
@@ -216,7 +222,7 @@ impl MengdieServer {
 
     #[tool(
         name = "memory_ingest",
-        description = "Ingest a new memory into Mengdie. Returns entry ID and any detected conflicts."
+        description = "Ingest a new memory into Mengdie. Returns entry_id and any detected conflicts. For each conflict returned: if reason contains 'evolution candidate', call memory_invalidate with entry_id=conflict.id, reason='superseded', superseded_by=this entry_id to resolve it atomically. For 'recent conflict', surface to the user before resolving. Alternatively, pass resolves=[conflict.id, ...] to atomically insert this memory and invalidate the listed memories in one transaction."
     )]
     async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
         if params.content.len() > MAX_CONTENT_LEN {
@@ -320,7 +326,14 @@ impl MengdieServer {
             embedding_dim,
         };
 
-        match self.db.insert_memory(mem) {
+        let resolves = params.resolves.unwrap_or_default();
+        let insert_result = if resolves.is_empty() {
+            self.db.insert_memory(mem)
+        } else {
+            self.db.insert_memory_resolving(mem, &resolves)
+        };
+
+        match insert_result {
             Ok(entry_id) => {
                 // Track metrics
                 let _ = self.db.increment_metric(metrics::METRIC_INGEST_COUNT);
@@ -346,25 +359,29 @@ impl MengdieServer {
 
     #[tool(
         name = "memory_invalidate",
-        description = "Mark a memory as invalid. Optionally link to the superseding memory."
+        description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit."
     )]
     async fn invalidate(
         &self,
         Parameters(params): Parameters<InvalidateParams>,
     ) -> Json<InvalidateOutput> {
-        match self
-            .db
-            .invalidate_memory(&params.entry_id, params.superseded_by.as_deref())
-        {
+        let superseded_by = params.superseded_by.clone();
+        match self.db.invalidate_memory(
+            &params.entry_id,
+            params.superseded_by.as_deref(),
+            Some(&params.reason),
+        ) {
             Ok(updated) => Json(InvalidateOutput {
                 success: updated,
                 entry_id: params.entry_id,
+                superseded_by,
             }),
             Err(e) => {
                 tracing::error!(error = %e, "memory_invalidate failed");
                 Json(InvalidateOutput {
                     success: false,
                     entry_id: params.entry_id,
+                    superseded_by: None,
                 })
             }
         }

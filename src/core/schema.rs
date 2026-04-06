@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Compute SHA-256 hex hash of content for dedup.
 pub fn compute_content_hash(content: &str) -> String {
@@ -104,6 +104,13 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             "DROP INDEX IF EXISTS idx_memory_source;
              CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_content_hash
                  ON memory_entries(project_id, content_hash);"
+        )?;
+    }
+
+    // Migration v3: persist invalidation reason for audit trail
+    if current_version < 3 {
+        conn.execute_batch(
+            "ALTER TABLE memory_entries ADD COLUMN invalidation_reason TEXT;"
         )?;
     }
 

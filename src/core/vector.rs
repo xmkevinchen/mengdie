@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Invalidate it
-        db.invalidate_memory(&id, None).unwrap();
+        db.invalidate_memory(&id, None, None).unwrap();
 
         // Should no longer find it
         let results = db.search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10).unwrap();

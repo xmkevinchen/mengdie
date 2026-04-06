@@ -149,19 +149,77 @@ impl Db {
         Ok(entry)
     }
 
-    /// Mark a memory as invalid (set valid_until and optionally superseded_by).
+    /// Mark a memory as invalid (set valid_until, optionally superseded_by and invalidation_reason).
     pub fn invalidate_memory(
         &self,
         id: &str,
         superseded_by: Option<&str>,
+        reason: Option<&str>,
     ) -> anyhow::Result<bool> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         let rows = conn.execute(
-            "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2 WHERE id = ?3",
-            params![now, superseded_by, id],
+            "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2, invalidation_reason = ?3 WHERE id = ?4",
+            params![now, superseded_by, reason, id],
         )?;
         Ok(rows > 0)
+    }
+
+    /// Insert a new memory and atomically invalidate a set of existing memories that it supersedes.
+    /// All writes happen in a single SQLite transaction — safe under process death.
+    pub fn insert_memory_resolving(
+        &self,
+        mem: NewMemory,
+        resolves: &[String],
+    ) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let content_hash = super::schema::compute_content_hash(&mem.content);
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
+
+        let returned_id: String = tx.query_row(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, embedding, embedding_dim,
+                 created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(project_id, content_hash) DO UPDATE SET
+                source_file = excluded.source_file,
+                source_type = excluded.source_type,
+                knowledge_type = excluded.knowledge_type,
+                title = excluded.title,
+                entities = excluded.entities,
+                embedding = excluded.embedding,
+                embedding_dim = excluded.embedding_dim
+             RETURNING id",
+            params![
+                id,
+                mem.project_id,
+                mem.source_file,
+                mem.source_type,
+                mem.knowledge_type,
+                mem.title,
+                mem.content,
+                mem.entities,
+                now,
+                mem.embedding,
+                mem.embedding_dim,
+                now,
+                content_hash,
+            ],
+            |row| row.get(0),
+        )?;
+
+        for old_id in resolves {
+            tx.execute(
+                "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2, invalidation_reason = 'superseded' WHERE id = ?3",
+                params![now, returned_id, old_id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(returned_id)
     }
 
     /// Update recall statistics after a search hit. Returns false if ID not found.
@@ -323,7 +381,7 @@ mod tests {
     fn test_invalidate() {
         let db = test_db();
         let id = db.insert_memory(sample_memory("test-project")).unwrap();
-        let updated = db.invalidate_memory(&id, Some("new-id")).unwrap();
+        let updated = db.invalidate_memory(&id, Some("new-id"), Some("test reason")).unwrap();
         assert!(updated);
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert!(entry.valid_until.is_some());
