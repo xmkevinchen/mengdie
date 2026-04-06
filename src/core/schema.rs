@@ -1,6 +1,14 @@
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Compute SHA-256 hex hash of content for dedup.
+pub fn compute_content_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// Run all schema migrations. Idempotent — safe to call on every startup.
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
@@ -34,9 +42,6 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_memory_project
             ON memory_entries(project_id);
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_source
-            ON memory_entries(project_id, source_file);
 
         CREATE INDEX IF NOT EXISTS idx_memory_knowledge_type
             ON memory_entries(knowledge_type);
@@ -74,8 +79,33 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         ",
     )?;
 
-    // Future migrations go here:
-    // if current_version < 2 { ... ALTER TABLE ...; }
+    // Migration v2: content_hash dedup replaces source_file dedup
+    if current_version < 2 {
+        conn.execute_batch(
+            "ALTER TABLE memory_entries ADD COLUMN content_hash TEXT;"
+        )?;
+
+        // Backfill content_hash for any existing rows (safety net)
+        let mut stmt = conn.prepare("SELECT id, content FROM memory_entries WHERE content_hash IS NULL")?;
+        let rows: Vec<(String, String)> = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        for (id, content) in &rows {
+            let hash = compute_content_hash(content);
+            conn.execute(
+                "UPDATE memory_entries SET content_hash = ?1 WHERE id = ?2",
+                rusqlite::params![hash, id],
+            )?;
+        }
+
+        // Swap unique index: source_file → content_hash
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_memory_source;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_content_hash
+                 ON memory_entries(project_id, content_hash);"
+        )?;
+    }
 
     // Set schema version
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;

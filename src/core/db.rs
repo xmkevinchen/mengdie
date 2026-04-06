@@ -6,7 +6,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::schema::run_migrations;
+use super::schema::{compute_content_hash, run_migrations};
 
 /// Basic database statistics.
 pub struct DbStats {
@@ -89,47 +89,29 @@ impl Db {
     }
 
     /// Insert or update a memory, returning its ID.
-    /// On conflict (same project_id + source_file), updates content and metadata.
+    /// On conflict (same project_id + content_hash), updates metadata but preserves
+    /// recall stats, timestamps, and ID. Atomic via ON CONFLICT DO UPDATE.
     pub fn insert_memory(&self, mem: NewMemory) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        let content_hash = compute_content_hash(&mem.content);
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
 
-        // Check if this source_file already exists for this project
-        let existing_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM memory_entries WHERE project_id = ?1 AND source_file = ?2",
-                params![mem.project_id, mem.source_file],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        if let Some(eid) = existing_id {
-            // Update existing entry
-            conn.execute(
-                "UPDATE memory_entries SET
-                    source_type = ?1, knowledge_type = ?2, title = ?3,
-                    content = ?4, entities = ?5, embedding = ?6, embedding_dim = ?7
-                 WHERE id = ?8",
-                params![
-                    mem.source_type,
-                    mem.knowledge_type,
-                    mem.title,
-                    mem.content,
-                    mem.entities,
-                    mem.embedding,
-                    mem.embedding_dim,
-                    eid,
-                ],
-            )?;
-            return Ok(eid);
-        }
-
-        conn.execute(
+        let returned_id: String = conn.query_row(
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
-                 title, content, entities, valid_from, embedding, embedding_dim, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 title, content, entities, valid_from, embedding, embedding_dim,
+                 created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(project_id, content_hash) DO UPDATE SET
+                source_file = excluded.source_file,
+                source_type = excluded.source_type,
+                knowledge_type = excluded.knowledge_type,
+                title = excluded.title,
+                entities = excluded.entities,
+                embedding = excluded.embedding,
+                embedding_dim = excluded.embedding_dim
+             RETURNING id",
             params![
                 id,
                 mem.project_id,
@@ -143,9 +125,11 @@ impl Db {
                 mem.embedding,
                 mem.embedding_dim,
                 now,
+                content_hash,
             ],
+            |row| row.get(0),
         )?;
-        Ok(id)
+        Ok(returned_id)
     }
 
     /// Get a memory by ID.
@@ -268,13 +252,14 @@ mod tests {
     }
 
     fn sample_memory(project_id: &str) -> NewMemory {
+        let uid = uuid::Uuid::new_v4();
         NewMemory {
             project_id: project_id.to_string(),
-            source_file: format!("docs/discussions/{}/conclusion.md", uuid::Uuid::new_v4()),
+            source_file: format!("docs/discussions/{}/conclusion.md", uid),
             source_type: "conclusion".to_string(),
             knowledge_type: "decisional".to_string(),
             title: "Auth middleware decision".to_string(),
-            content: "Use JWT tokens with Redis session store".to_string(),
+            content: format!("Use JWT tokens with Redis session store ({})", uid),
             entities: "auth,middleware,jwt".to_string(),
             embedding: None,
             embedding_dim: None,
@@ -373,5 +358,186 @@ mod tests {
         let path = Db::default_path();
         assert!(path.to_string_lossy().contains(".mengdie"));
         assert!(path.to_string_lossy().ends_with("db.sqlite"));
+    }
+
+    #[test]
+    fn test_content_hash_dedup() {
+        let db = test_db();
+        let content = "Use JWT tokens with Redis session store";
+
+        // Insert first memory
+        let id_a = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "file-a.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Auth decision v1".to_string(),
+            content: content.to_string(),
+            entities: "auth".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        // Insert same content with different source_file → should upsert (return same id)
+        let id_b = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "file-b.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Auth decision v2".to_string(),
+            content: content.to_string(),
+            entities: "auth,jwt".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        assert_eq!(id_a, id_b, "same content should upsert, returning same ID");
+
+        // Verify the entry was updated (new title, entities)
+        let entry = db.get_memory(&id_a).unwrap().unwrap();
+        assert_eq!(entry.title, "Auth decision v2");
+        assert_eq!(entry.entities, "auth,jwt");
+
+        // Insert different content → should create new entry
+        let id_c = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "file-c.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "DB decision".to_string(),
+            content: "Use PostgreSQL for persistence".to_string(),
+            entities: "database".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        assert_ne!(id_a, id_c, "different content should create new entry");
+        assert_eq!(db.count_memories("proj").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_source_file_optional() {
+        let db = test_db();
+
+        // Insert with empty source_file (simulating MCP call without source_file)
+        let id = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: String::new(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "factual".to_string(),
+            title: "Finding A".to_string(),
+            content: "Some factual finding".to_string(),
+            entities: "topic".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        let entry = db.get_memory(&id).unwrap().unwrap();
+        assert_eq!(entry.source_file, "");
+        assert_eq!(entry.title, "Finding A");
+
+        // Insert another with empty source_file but different content → new entry
+        let id2 = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: String::new(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "factual".to_string(),
+            title: "Finding B".to_string(),
+            content: "Different factual finding".to_string(),
+            entities: "other".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        assert_ne!(id, id2, "different content with empty source_file should create separate entries");
+    }
+
+    #[test]
+    fn test_content_hash_upsert_fts5_sync() {
+        let db = test_db();
+        let content = "Use JWT tokens with Redis session store";
+
+        // Insert with title "v1"
+        db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "a.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Auth v1".to_string(),
+            content: content.to_string(),
+            entities: "auth".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        // Upsert same content with title "v2" and different entities
+        db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "b.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Auth v2".to_string(),
+            content: content.to_string(),
+            entities: "auth,jwt,redis".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        // FTS should find "redis" (from updated entities) but NOT find "v1" in title
+        let conn = db.conn.lock().unwrap();
+        let count_redis: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'redis'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count_redis, 1, "FTS should find updated entities after upsert");
+
+        // Search for old title should not match (FTS was updated)
+        // Note: "v1" is too short for FTS5 default tokenizer, so search for the full title token
+        let count_total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_fts",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count_total, 1, "FTS should have exactly 1 entry after upsert (not 2)");
+    }
+
+    #[test]
+    fn test_content_hash_preserves_recall_stats() {
+        let db = test_db();
+        let content = "Shared decision content";
+
+        let id = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "original.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Decision v1".to_string(),
+            content: content.to_string(),
+            entities: "tag".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        // Simulate recall
+        db.record_recall(&id, 0.8).unwrap();
+        db.record_recall(&id, 0.6).unwrap();
+
+        // Upsert same content → should preserve recall stats
+        let id2 = db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "updated.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Decision v2".to_string(),
+            content: content.to_string(),
+            entities: "tag,new".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        assert_eq!(id, id2);
+        let entry = db.get_memory(&id).unwrap().unwrap();
+        assert_eq!(entry.recall_count, 2, "recall stats should be preserved on upsert");
+        assert!((entry.avg_relevance - 0.7).abs() < 0.01);
+        assert_eq!(entry.title, "Decision v2", "title should be updated");
     }
 }

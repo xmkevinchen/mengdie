@@ -40,7 +40,8 @@ pub struct IngestParams {
     pub title: String,
     /// Full content of the memory.
     pub content: String,
-    /// Source file path.
+    /// Source file path (optional — omit or pass empty string if not applicable).
+    #[serde(default)]
     pub source_file: String,
     /// Source type: conclusion, review, plan, retrospect.
     pub source_type: String,

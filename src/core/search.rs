@@ -129,7 +129,7 @@ impl Db {
                 }
                 results.push(SearchResult {
                     entry,
-                    score: *score,
+                    score: normalized,
                 });
             }
         }
@@ -313,5 +313,23 @@ mod tests {
 
         let results = db.memory_search("JWT", &[1.0, 0.0, 0.0], None, 10).unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_memory_search_scores_normalized() {
+        let db = test_db();
+        // Insert entry that matches both FTS and vector — should get highest possible RRF score
+        insert_test_memory(&db, "proj", "JWT Auth", "Use JWT tokens for auth", "auth,jwt", &[1.0, 0.0, 0.0]);
+        insert_test_memory(&db, "proj", "DB Choice", "Use PostgreSQL for persistence", "db", &[0.0, 1.0, 0.0]);
+
+        let results = db.memory_search("JWT auth tokens", &[0.9, 0.1, 0.0], Some("proj"), 10).unwrap();
+        assert!(!results.is_empty());
+        // Top result should match both rankers → normalized score should be high (> 0.4)
+        // Raw RRF would be ~0.03 which is NOT > 0.4, so this tests normalization
+        assert!(results[0].score > 0.4, "top result normalized score should be > 0.4, got {}", results[0].score);
+        for r in &results {
+            assert!(r.score >= 0.0, "score should be >= 0.0, got {}", r.score);
+            assert!(r.score <= 1.0, "score should be <= 1.0, got {}", r.score);
+        }
     }
 }
