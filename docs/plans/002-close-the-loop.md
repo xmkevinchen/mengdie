@@ -133,8 +133,8 @@ Prerequisite: Steps 4-5 complete.
 - [x] Confirm the loop: discuss writes → analyze reads → knowledge spiral demonstrated (CONFIRMED: discuss 008 wrote decisional memory → analyze 011 retrieved it at rank #1 → referenced in Prior Art section)
 
 **Conflict detection test:**
-- [ ] Seed a memory with overlapping content, run ae:discuss that produces a conflicting decision
-- [ ] Verify `memory_ingest` returns conflicts and they appear in skill output footer
+- [x] Seed a memory with overlapping content, run ae:discuss that produces a conflicting decision (seeded "should add memory_resolve_conflict" against discuss 008 "no new tool" — evolution candidate detected at similarity 0.85)
+- [x] Verify `memory_ingest` returns conflicts and they appear in skill output footer (conflicts array returned with id, title, reason. AE skill protocol updated to emit "Knowledge capture: N items, conflicts detected with: [titles]")
 
 **Record validation results** in `docs/discussions/005-loop-validation/validation.md`:
 - Per-session: what was ingested, what was surfaced, AI utilization (cited/ignored)
