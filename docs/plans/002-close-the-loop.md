@@ -128,9 +128,9 @@ Prerequisite: Steps 4-5 complete.
 - [x] If gate fails: stop, reassess extraction quality and search relevance before Phase B (gate passed; 14 memories ingested, recall_count up to 5 on earliest finding)
 
 **Phase B validation (discuss→analyze cross-loop):**
-- [ ] Run ae:discuss on a real topic → verify resolved decisions ingested into Mengdie (check via `mengdie list`)
-- [ ] Run ae:analyze on a related topic → verify prior discussion decisions surface in Step 3.5
-- [ ] Confirm the loop: discuss writes → analyze reads → knowledge spiral demonstrated
+- [x] Run ae:discuss on a real topic → verify resolved decisions ingested into Mengdie (check via `mengdie list`) (discussion 008: memory_resolve_conflict tool — decided no new tool, 4 fixes. Memory 99bc8ea4 ingested as decisional type)
+- [x] Run ae:analyze on a related topic → verify prior discussion decisions surface in Step 3.5 (analysis 011: MCP tool API design — discuss decision surfaced as rank #1 result in Step 3.5)
+- [x] Confirm the loop: discuss writes → analyze reads → knowledge spiral demonstrated (CONFIRMED: discuss 008 wrote decisional memory → analyze 011 retrieved it at rank #1 → referenced in Prior Art section)
 
 **Conflict detection test:**
 - [ ] Seed a memory with overlapping content, run ae:discuss that produces a conflicting decision
