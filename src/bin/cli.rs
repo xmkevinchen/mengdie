@@ -43,6 +43,21 @@ enum Commands {
         /// Directory to scan for conclusion.md, review.md, plan.md files
         #[arg(long)]
         dir: PathBuf,
+
+        /// Preview what would be imported without writing to the database
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List all memories in the database
+    List {
+        /// Show memories from all projects (default: current project only)
+        #[arg(long)]
+        global: bool,
+
+        /// Output format: table (default) or json
+        #[arg(long, default_value = "table")]
+        format: String,
     },
 
     /// Search memories (debugging)
@@ -81,7 +96,8 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Dream { min_recall, min_relevance, window_days } => cmd_dream(&db, min_recall, min_relevance, window_days),
-        Commands::Import { dir } => cmd_import(&db, &dir),
+        Commands::Import { dir, dry_run } => cmd_import(&db, &dir, dry_run),
+        Commands::List { global, format } => cmd_list(&db, global, &format),
         Commands::Search { query, global, limit, min_score } => cmd_search(&db, &query, global, limit, min_score),
         Commands::Stats => cmd_stats(&db),
     }
@@ -100,44 +116,55 @@ fn cmd_dream(db: &Db, min_recall: i64, min_relevance: f64, window_days: i64) -> 
     Ok(())
 }
 
-fn cmd_import(db: &Db, dir: &PathBuf) -> anyhow::Result<()> {
+fn cmd_import(db: &Db, dir: &PathBuf, dry_run: bool) -> anyhow::Result<()> {
     anyhow::ensure!(dir.exists(), "directory does not exist: {}", dir.display());
+
+    let project_id = infer_project_id(dir);
+
+    // Collect ingestable files first
+    let files: Vec<_> = walkdir(dir)?
+        .into_iter()
+        .filter(|p| is_ingestable(p))
+        .collect();
+
+    if dry_run {
+        println!("Dry run — no changes will be made.\n");
+        println!("Project ID: {}", project_id);
+        println!("Files to import: {}\n", files.len());
+        for path in &files {
+            println!("  + {}", path.display());
+        }
+        if files.is_empty() {
+            println!("  (no ingestable files found)");
+        }
+        return Ok(());
+    }
 
     eprintln!("Loading embedding model...");
     let mut embedder = Embedder::new().context("failed to initialize embedding model")?;
     eprintln!("Model loaded.");
-
-    // Infer project_id from the import directory (not cwd), so importing
-    // from an external archive gets the correct project_id.
-    let project_id = infer_project_id(dir);
 
     let mut imported = 0;
     let mut skipped = 0;
     let mut errors = 0;
     let mut conflicts_found = 0;
 
-    // Walk directory recursively
-    for entry in walkdir(dir)? {
-        let path = entry;
-        if !is_ingestable(&path) {
-            continue;
-        }
-
-        match ingest_file(db, &mut embedder, &path, &project_id) {
+    for path in &files {
+        match ingest_file(db, &mut embedder, path, &project_id) {
             Ok(result) => {
-                println!("  ✓ {} → {}", path.display(), result.entry_id);
+                println!("  + {} -> {}", path.display(), result.entry_id);
                 for conflict in &result.conflicts {
-                    println!("    ⚠ conflict: \"{}\" — {}", conflict.existing_title, conflict.reason);
+                    println!("    ! conflict: \"{}\" -- {}", conflict.existing_title, conflict.reason);
                     conflicts_found += 1;
                 }
                 imported += 1;
             }
             Err(e) => {
                 if is_unique_violation(&e) {
-                    eprintln!("  ⊘ {} (already imported)", path.display());
+                    eprintln!("  = {} (already imported)", path.display());
                     skipped += 1;
                 } else {
-                    eprintln!("  ✗ {}: {}", path.display(), e);
+                    eprintln!("  x {}: {}", path.display(), e);
                     errors += 1;
                 }
             }
@@ -148,6 +175,52 @@ fn cmd_import(db: &Db, dir: &PathBuf) -> anyhow::Result<()> {
         "\nImport complete: {} imported, {} skipped (duplicates), {} errors, {} conflicts detected",
         imported, skipped, errors, conflicts_found
     );
+    Ok(())
+}
+
+fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_id = infer_project_id(&cwd);
+    let scope = if global { None } else { Some(project_id.as_str()) };
+
+    let entries = db.list_memories(scope)?;
+
+    if entries.is_empty() {
+        println!("No memories found.");
+        return Ok(());
+    }
+
+    if format == "json" {
+        let items: Vec<serde_json::Value> = entries.iter().map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "project_id": e.project_id,
+                "title": e.title,
+                "knowledge_type": e.knowledge_type,
+                "source_file": e.source_file,
+                "entities": e.entities,
+                "recall_count": e.recall_count,
+                "is_longterm": e.is_longterm,
+                "valid_from": e.valid_from,
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else {
+        // Table format
+        println!("{:<8} {:<40} {:<12} {:>6} {:<4} {}",
+            "ID", "Title", "Type", "Recall", "LT", "Source");
+        println!("{}", "-".repeat(90));
+        for e in &entries {
+            let short_id = if e.id.len() > 8 { &e.id[..8] } else { &e.id };
+            let title = if e.title.len() > 40 { format!("{}...", &e.title[..37]) } else { e.title.clone() };
+            let lt = if e.is_longterm { "Y" } else { "N" };
+            let source = if e.source_file.is_empty() { "-" } else { &e.source_file };
+            let source_short = if source.len() > 30 { &source[source.len()-30..] } else { source };
+            println!("{:<8} {:<40} {:<12} {:>6} {:<4} {}",
+                short_id, title, e.knowledge_type, e.recall_count, lt, source_short);
+        }
+        println!("\n{} memories total", entries.len());
+    }
     Ok(())
 }
 

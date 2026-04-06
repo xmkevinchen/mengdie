@@ -208,6 +208,40 @@ impl Db {
         Ok(DbStats { total, valid, longterm, recalled })
     }
 
+    /// List all memories, optionally filtered by project.
+    pub fn list_memories(&self, project_id: Option<&str>) -> anyhow::Result<Vec<MemoryEntry>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match project_id {
+            Some(pid) => (
+                "SELECT id, project_id, source_file, source_type, knowledge_type, \
+                        title, content, entities, valid_from, valid_until, \
+                        superseded_by, recall_count, avg_relevance, last_recalled, \
+                        embedding, embedding_dim, is_longterm, created_at \
+                 FROM memory_entries WHERE project_id = ?1 \
+                 ORDER BY created_at DESC".to_string(),
+                vec![Box::new(pid.to_string()) as Box<dyn rusqlite::types::ToSql>],
+            ),
+            None => (
+                "SELECT id, project_id, source_file, source_type, knowledge_type, \
+                        title, content, entities, valid_from, valid_until, \
+                        superseded_by, recall_count, avg_relevance, last_recalled, \
+                        embedding, embedding_dim, is_longterm, created_at \
+                 FROM memory_entries \
+                 ORDER BY created_at DESC".to_string(),
+                vec![],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_entry(row))?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
     /// Count all memories for a given project.
     pub fn count_memories(&self, project_id: &str) -> anyhow::Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
