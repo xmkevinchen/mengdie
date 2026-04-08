@@ -3,7 +3,7 @@ id: "002"
 title: "Close the Knowledge Loop — Mengdie + AE Integration"
 type: plan
 created: 2026-04-05
-status: reviewed
+status: done
 discussion: ""
 ---
 

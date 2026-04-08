@@ -175,6 +175,7 @@ impl Db {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let content_hash = super::schema::compute_content_hash(&mem.content);
+        let project_id = mem.project_id.clone();
         let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         let tx = conn.transaction()?;
 
@@ -213,8 +214,8 @@ impl Db {
 
         for old_id in resolves {
             tx.execute(
-                "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2, invalidation_reason = 'superseded' WHERE id = ?3",
-                params![now, returned_id, old_id],
+                "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2, invalidation_reason = 'superseded' WHERE id = ?3 AND project_id = ?4",
+                params![now, returned_id, old_id, project_id],
             )?;
         }
 
