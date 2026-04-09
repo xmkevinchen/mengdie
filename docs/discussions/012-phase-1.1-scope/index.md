@@ -6,9 +6,9 @@ created: 2026-04-09
 pipeline:
   analyze: skipped
   discuss: done
-  plan: pending
+  plan: done
   work: pending
-plan: ""
+plan: "docs/plans/003-phase-1.1.md"
 tags: [phase-1.1, scope, roadmap, backlog-triage]
 ---
 
