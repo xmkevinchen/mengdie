@@ -34,6 +34,46 @@ pub struct SearchParams {
     pub min_score: Option<f64>,
 }
 
+/// Valid source types for memory entries.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceType {
+    Conclusion,
+    Review,
+    Plan,
+    Retrospect,
+}
+
+impl std::fmt::Display for SourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conclusion => write!(f, "conclusion"),
+            Self::Review => write!(f, "review"),
+            Self::Plan => write!(f, "plan"),
+            Self::Retrospect => write!(f, "retrospect"),
+        }
+    }
+}
+
+/// Valid knowledge types for memory entries.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgeType {
+    Decisional,
+    Experiential,
+    Factual,
+}
+
+impl std::fmt::Display for KnowledgeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decisional => write!(f, "decisional"),
+            Self::Experiential => write!(f, "experiential"),
+            Self::Factual => write!(f, "factual"),
+        }
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct IngestParams {
     /// Title of the memory entry.
@@ -43,10 +83,10 @@ pub struct IngestParams {
     /// Source file path (optional — omit or pass empty string if not applicable).
     #[serde(default)]
     pub source_file: String,
-    /// Source type: conclusion, review, plan, retrospect.
-    pub source_type: String,
-    /// Knowledge type: decisional, experiential, factual.
-    pub knowledge_type: String,
+    /// Source type for this memory.
+    pub source_type: SourceType,
+    /// Knowledge type for this memory.
+    pub knowledge_type: KnowledgeType,
     /// Comma-separated entity tags.
     pub entities: String,
     /// Override project_id (default: inferred from cwd at server startup).
@@ -239,15 +279,9 @@ impl MengdieServer {
                 error: Some(format!("field too long (max {MAX_FIELD_LEN} chars)")),
             });
         }
-        // Validate and normalize source_type / knowledge_type
-        let source_type = super::parser::validate_source_type(&params.source_type).to_string();
-        let knowledge_type = super::parser::validate_knowledge_type(&params.knowledge_type).to_string();
-        if source_type != params.source_type {
-            tracing::warn!(given = %params.source_type, normalized = %source_type, "unknown source_type, defaulting");
-        }
-        if knowledge_type != params.knowledge_type {
-            tracing::warn!(given = %params.knowledge_type, normalized = %knowledge_type, "unknown knowledge_type, defaulting");
-        }
+        // Enum types validated at deserialization — unknown values rejected by serde
+        let source_type = params.source_type.to_string();
+        let knowledge_type = params.knowledge_type.to_string();
 
         let pid = params
             .project_id
