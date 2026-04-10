@@ -165,7 +165,7 @@ const MAX_FIELD_LEN: usize = 1_000;
 impl MengdieServer {
     #[tool(
         name = "memory_search",
-        description = "Search Mengdie memories. Returns relevant memories with provenance."
+        description = "Search Mengdie memories by query. Returns ranked results with title, snippet (first 200 characters of content, not full text), score, and provenance. Results are ranked by hybrid FTS5 + vector similarity merged via Reciprocal Rank Fusion. Use min_score to filter low-relevance results. Use scope='global' to search across all projects (default: current project only)."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
         if params.query.len() > MAX_QUERY_LEN {
@@ -262,7 +262,7 @@ impl MengdieServer {
 
     #[tool(
         name = "memory_ingest",
-        description = "Ingest a new memory into Mengdie. Returns entry_id and any detected conflicts. For each conflict returned: if reason contains 'evolution candidate', call memory_invalidate with entry_id=conflict.id, reason='superseded', superseded_by=this entry_id to resolve it atomically. For 'recent conflict', surface to the user before resolving. Alternatively, pass resolves=[conflict.id, ...] to atomically insert this memory and invalidate the listed memories in one transaction."
+        description = "Ingest a new memory into Mengdie. Returns entry_id and any detected conflicts (evolution candidates or recent conflicts with existing memories sharing entity tags). Pass resolves=[id, ...] to atomically insert this memory and invalidate the listed memories in one transaction. See server instructions for the full conflict resolution workflow."
     )]
     async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
         if params.content.len() > MAX_CONTENT_LEN {
@@ -437,7 +437,10 @@ impl MengdieServer {
 impl ServerHandler for MengdieServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_invalidate.")
+            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_invalidate. \
+Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output. \
+Conflict resolution: memory_ingest returns detected conflicts. For 'evolution candidate' conflicts (high similarity, same entity tags), call memory_invalidate with superseded_by=new_entry_id to link old→new. For 'recent conflict', surface to the user before resolving. \
+For atomic resolution, pass resolves=[old_id, ...] to memory_ingest to insert and invalidate in one transaction.")
     }
 }
 
