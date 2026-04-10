@@ -3,7 +3,7 @@ id: "003"
 title: "Phase 1.1 — API Contract Correctness + Knowledge Capture Completeness"
 type: plan
 created: 2026-04-09
-status: reviewed
+status: done
 discussion: "docs/discussions/012-phase-1.1-scope/"
 ---
 

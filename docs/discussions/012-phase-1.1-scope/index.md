@@ -7,7 +7,7 @@ pipeline:
   analyze: skipped
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/003-phase-1.1.md"
 tags: [phase-1.1, scope, roadmap, backlog-triage]
 ---
