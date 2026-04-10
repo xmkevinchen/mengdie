@@ -440,3 +440,50 @@ impl ServerHandler for MengdieServer {
             .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_invalidate.")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ingest_params_rejects_invalid_source_type() {
+        let json = serde_json::json!({
+            "title": "Test",
+            "content": "Test content",
+            "source_type": "decision",
+            "knowledge_type": "factual",
+            "entities": "test"
+        });
+        let result = serde_json::from_value::<IngestParams>(json);
+        assert!(result.is_err(), "should reject 'decision' (valid is 'decisional' or source types)");
+    }
+
+    #[test]
+    fn test_ingest_params_accepts_valid_source_type() {
+        let json = serde_json::json!({
+            "title": "Test",
+            "content": "Test content",
+            "source_type": "conclusion",
+            "knowledge_type": "decisional",
+            "entities": "test"
+        });
+        let result = serde_json::from_value::<IngestParams>(json);
+        assert!(result.is_ok(), "should accept valid source_type 'conclusion'");
+        let params = result.unwrap();
+        assert_eq!(params.source_type.to_string(), "conclusion");
+        assert_eq!(params.knowledge_type.to_string(), "decisional");
+    }
+
+    #[test]
+    fn test_ingest_params_rejects_invalid_knowledge_type() {
+        let json = serde_json::json!({
+            "title": "Test",
+            "content": "Test content",
+            "source_type": "conclusion",
+            "knowledge_type": "decision",
+            "entities": "test"
+        });
+        let result = serde_json::from_value::<IngestParams>(json);
+        assert!(result.is_err(), "should reject 'decision' as knowledge_type");
+    }
+}
