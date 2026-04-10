@@ -48,25 +48,25 @@ Before starting, verify the knowledge loop is functional:
 
 ### Step 1: source_type/knowledge_type → Rust enums (AC1)
 
-- [ ] Create `SourceType` enum (`Conclusion`, `Review`, `Plan`, `Retrospect`) with `Deserialize + schemars::JsonSchema` derives
-- [ ] Create `KnowledgeType` enum (`Decisional`, `Experiential`, `Factual`) with same derives
-- [ ] Replace `source_type: String` and `knowledge_type: String` in `IngestParams` with enum types
-- [ ] Remove silent normalization logic (`validate_source_type`, `validate_knowledge_type` functions)
-- [ ] Enum variants serialize as lowercase (`#[serde(rename_all = "lowercase")]`) to match existing stored values
-- [ ] Update `NewMemory` struct to accept enum `.to_string()` — DB stores as TEXT, no schema change needed
-- [ ] Add test: ingest with `source_type="decision"` (invalid) returns error, not silent normalization
-- [ ] Add test: ingest with `source_type="conclusion"` (valid) succeeds
-- [ ] `cargo test` passes, `cargo clippy` clean
+- [x] Create `SourceType` enum (`Conclusion`, `Review`, `Plan`, `Retrospect`) with `Deserialize + schemars::JsonSchema` derives (e773081)
+- [x] Create `KnowledgeType` enum (`Decisional`, `Experiential`, `Factual`) with same derives (e773081)
+- [x] Replace `source_type: String` and `knowledge_type: String` in `IngestParams` with enum types (e773081)
+- [x] Remove silent normalization logic (`validate_source_type`, `validate_knowledge_type` functions) (e773081)
+- [x] Enum variants serialize as lowercase (`#[serde(rename_all = "lowercase")]`) to match existing stored values (e773081)
+- [x] Update `NewMemory` struct to accept enum `.to_string()` — DB stores as TEXT, no schema change needed (e773081)
+- [x] Add test: ingest with `source_type="decision"` (invalid) returns error, not silent normalization (766cf8a)
+- [x] Add test: ingest with `source_type="conclusion"` (valid) succeeds (766cf8a)
+- [x] `cargo test` passes, `cargo clippy` clean (e773081)
 
 Expected files: `src/core/mcp_tools.rs`, `src/core/db.rs`, `src/core/ingest.rs`, `src/core/parser.rs`
 
 ### Step 2: Tool descriptions + server instructions rewrite (AC2, AC3)
 
-- [ ] Expand `memory_search` description to 3-4 sentences: purpose, what's returned (200-char snippets, not full content), hybrid FTS5+vector ranking, guidance on `min_score` and `scope` params
-- [ ] Move conflict resolution workflow logic from `memory_ingest` description to `ServerHandler::get_info()` instructions
-- [ ] Server instructions explain: (a) search for context, (b) ingest to store, (c) two-call resolution with `superseded_by`, (d) `resolves` param for atomic resolution
-- [ ] `memory_ingest` description reduced to: what it does, what it returns, mention of `resolves` param — no branching decision tree
-- [ ] `cargo build` succeeds
+- [x] Expand `memory_search` description to 3-4 sentences: purpose, what's returned (200-char snippets, not full content), hybrid FTS5+vector ranking, guidance on `min_score` and `scope` params (36838c1)
+- [x] Move conflict resolution workflow logic from `memory_ingest` description to `ServerHandler::get_info()` instructions (36838c1)
+- [x] Server instructions explain: (a) search for context, (b) ingest to store, (c) two-call resolution with `superseded_by`, (d) `resolves` param for atomic resolution (36838c1)
+- [x] `memory_ingest` description reduced to: what it does, what it returns, mention of `resolves` param — no branching decision tree (36838c1)
+- [x] `cargo build` succeeds (36838c1)
 
 Expected files: `src/core/mcp_tools.rs`
 
@@ -76,47 +76,47 @@ Rebuild mengdie-mcp binary (`cargo build --release`), restart MCP server, verify
 
 ### Step 3: ae:think — read integration (AC7)
 
-- [ ] Add Step 1.5 Prior Context after Frame (Step 1), before Agent Teams Investigation (Step 2)
-- [ ] Query: use $ARGUMENTS problem statement
-- [ ] Graceful degradation: "Prior context: unavailable" on failure/no results
-- [ ] No write step (output is ephemeral reasoning per PRD)
+- [x] Add Step 1.5 Prior Context after Frame (Step 1), before Agent Teams Investigation (Step 2) (ba5fe5d)
+- [x] Query: use $ARGUMENTS problem statement (ba5fe5d)
+- [x] Graceful degradation: "Prior context: unavailable" on failure/no results (ba5fe5d)
+- [x] No write step (output is ephemeral reasoning per PRD) (ba5fe5d)
 
 Expected files (AE repo): `plugins/ae/skills/think/SKILL.md`
 
 ### Step 4: ae:plan — read + write integration (AC4)
 
-- [ ] Add Step 1.5 Prior Context after Research (Step 1), before Write Plan (Step 2)
-- [ ] Query: feature description from $ARGUMENTS or referenced discussion's problem statement
-- [ ] Add Knowledge Capture step after Doodlestein (Step 4), before Confirm (Step 5)
-- [ ] Gate: only capture if plan `status: reviewed` (skip for draft plans)
-- [ ] Extraction: overall approach rationale + non-obvious technical choices, max 3, source_type `plan`, knowledge_type `decisional`
-- [ ] Entities: compound tags per decision (per knowledge-capture-protocol.md rule 4)
-- [ ] Add conflict summary to Confirm step output
-- [ ] Reference knowledge-capture-protocol.md for common rules
+- [x] Add Step 1.5 Prior Context after Research (Step 1), before Write Plan (Step 2) (22ee40c)
+- [x] Query: feature description from $ARGUMENTS or referenced discussion's problem statement (22ee40c)
+- [x] Add Knowledge Capture step after Doodlestein (Step 4), before Confirm (Step 5) (22ee40c)
+- [x] Gate: only capture if plan `status: reviewed` (skip for draft plans) (22ee40c)
+- [x] Extraction: overall approach rationale + non-obvious technical choices, max 3, source_type `plan`, knowledge_type `decisional` (22ee40c)
+- [x] Entities: compound tags per decision (per knowledge-capture-protocol.md rule 4) (22ee40c)
+- [x] Add conflict summary to Confirm step output (22ee40c)
+- [x] Reference knowledge-capture-protocol.md for common rules (22ee40c)
 
 Expected files (AE repo): `plugins/ae/skills/plan/SKILL.md`
 
 ### Step 5: ae:review — read + write integration (AC5)
 
-- [ ] Add Prior Context step before Step 1 (Create Team), after Pre-checks
-- [ ] Query: feature name from $ARGUMENTS or plan title
-- [ ] Include prior art in reviewer prompts as context (add prior art to Step 3 prompt templates)
-- [ ] Add Knowledge Capture step after Output (review file written), before "Prompt user to create PR"
-- [ ] Extraction: reusable patterns (P2+ findings that apply beyond this code), max 3, source_type `review`, knowledge_type `experiential`
-- [ ] Add conflict summary to output
-- [ ] Reference knowledge-capture-protocol.md
+- [x] Add Prior Context step before Step 1 (Create Team), after Pre-checks (7431143)
+- [x] Query: feature name from $ARGUMENTS or plan title (7431143)
+- [x] Include prior art in reviewer prompts as context (add prior art to Step 3 prompt templates) (7431143)
+- [x] Add Knowledge Capture step after Output (review file written), before "Prompt user to create PR" (7431143)
+- [x] Extraction: reusable patterns (P2+ findings that apply beyond this code), max 3, source_type `review`, knowledge_type `experiential` (7431143)
+- [x] Add conflict summary to output (7431143)
+- [x] Reference knowledge-capture-protocol.md (7431143)
 
 Expected files (AE repo): `plugins/ae/skills/review/SKILL.md`
 
 ### Step 6: ae:retrospect — read + write integration (AC6)
 
-- [ ] Add Step 0.5 Prior Context between Pre-check and Step 1 (Collect Outcome Statistics)
-- [ ] Query: "retrospective insights" or $ARGUMENTS filter
-- [ ] Add Knowledge Capture step after Step 4 (Output written), before Next Steps
-- [ ] Gate: skip Knowledge Capture in `--compare` mode (comparison, not new insights)
-- [ ] Extraction: actionable trend conclusions, skip raw statistics, max 3, source_type `retrospect`, knowledge_type `experiential`
-- [ ] Add conflict summary to output
-- [ ] Reference knowledge-capture-protocol.md
+- [x] Add Step 0.5 Prior Context between Pre-check and Step 1 (Collect Outcome Statistics) (3e33a57)
+- [x] Query: "retrospective insights" or $ARGUMENTS filter (3e33a57)
+- [x] Add Knowledge Capture step after Step 4 (Output written), before Next Steps (3e33a57)
+- [x] Gate: skip Knowledge Capture in `--compare` mode (comparison, not new insights) (3e33a57)
+- [x] Extraction: actionable trend conclusions, skip raw statistics, max 3, source_type `retrospect`, knowledge_type `experiential` (3e33a57)
+- [x] Add conflict summary to output (3e33a57)
+- [x] Reference knowledge-capture-protocol.md (3e33a57)
 
 Expected files (AE repo): `plugins/ae/skills/retrospect/SKILL.md`
 
