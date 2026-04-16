@@ -3,7 +3,7 @@ id: "004"
 title: "Search Quality Fixes: Dreaming Threshold + FTS5 Tokenization"
 type: plan
 created: 2026-04-16
-status: reviewed
+status: done
 discussion: "docs/discussions/013-what-next-after-pause/"
 ---
 
