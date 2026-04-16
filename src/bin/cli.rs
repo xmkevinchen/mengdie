@@ -78,6 +78,27 @@ enum Commands {
         min_score: Option<f64>,
     },
 
+    /// Rename a project_id in the database
+    Rename {
+        /// Source project_id to rename from (or --list to show all projects)
+        from: Option<String>,
+
+        /// Target project_id to rename to
+        to: Option<String>,
+
+        /// List all project_ids with memory counts
+        #[arg(long)]
+        list: bool,
+
+        /// Preview what would happen without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
+
     /// Print observability metrics
     Stats,
 }
@@ -97,6 +118,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Dream { min_recall, min_relevance, window_days } => cmd_dream(&db, min_recall, min_relevance, window_days),
         Commands::Import { dir, dry_run } => cmd_import(&db, &dir, dry_run),
+        Commands::Rename { from, to, list, dry_run, yes } => cmd_rename(&db, from, to, list, dry_run, yes),
         Commands::List { global, format } => cmd_list(&db, global, &format),
         Commands::Search { query, global, limit, min_score } => cmd_search(&db, &query, global, limit, min_score),
         Commands::Stats => cmd_stats(&db),
@@ -175,6 +197,82 @@ fn cmd_import(db: &Db, dir: &PathBuf, dry_run: bool) -> anyhow::Result<()> {
         "\nImport complete: {} imported, {} skipped (duplicates), {} errors, {} conflicts detected",
         imported, skipped, errors, conflicts_found
     );
+    Ok(())
+}
+
+fn cmd_rename(
+    db: &Db,
+    from: Option<String>,
+    to: Option<String>,
+    list: bool,
+    dry_run: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
+    if list {
+        let projects = db.list_projects()?;
+        if projects.is_empty() {
+            println!("No projects found.");
+        } else {
+            println!("{:<40} {:>6}", "Project ID", "Count");
+            println!("{}", "-".repeat(48));
+            for (id, count) in &projects {
+                println!("{:<40} {:>6}", id, count);
+            }
+        }
+        return Ok(());
+    }
+
+    let from = from.ok_or_else(|| anyhow::anyhow!("missing <from> argument (use --list to see project_ids)"))?;
+    let to = to.ok_or_else(|| anyhow::anyhow!("missing <to> argument"))?;
+
+    if from == to {
+        anyhow::bail!("source and target project_id are the same: '{}'", from);
+    }
+
+    if dry_run {
+        let (would_rename, would_merge) = db.rename_project_dry_run(&from, &to)?;
+        if would_rename == 0 && would_merge == 0 {
+            println!("No memories found under '{}'.", from);
+        } else {
+            println!("Dry run: would rename {} memories from '{}' to '{}'", would_rename, from, to);
+            if would_merge > 0 {
+                println!("         would merge {} duplicates (same content already under '{}')", would_merge, to);
+            }
+        }
+        return Ok(());
+    }
+
+    // Count first for confirmation
+    let (would_rename, would_merge) = db.rename_project_dry_run(&from, &to)?;
+    if would_rename == 0 && would_merge == 0 {
+        println!("No memories found under '{}'.", from);
+        return Ok(());
+    }
+
+    if !yes {
+        if would_merge > 0 {
+            eprint!(
+                "Rename {} memories from '{}' to '{}' ({} duplicates will be merged)? [y/N] ",
+                would_rename + would_merge, from, to, would_merge
+            );
+        } else {
+            eprint!("Rename {} memories from '{}' to '{}'? [y/N] ", would_rename, from, to);
+        }
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let (renamed, merged) = db.rename_project(&from, &to)?;
+    println!("Renamed {} memories from '{}' to '{}'.", renamed, from, to);
+    if merged > 0 {
+        println!("Merged {} duplicates (deleted from '{}', kept under '{}').", merged, from, to);
+    }
+    eprintln!("\nNote: restart mengdie-mcp if it's running — cached project_id is now stale.");
+
     Ok(())
 }
 
