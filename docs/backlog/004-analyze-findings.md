@@ -32,4 +32,4 @@ Source: Step 6 Phase A validation of plan 002 (Close the Loop).
 | 004-18 | Add explicit project name override | 010 Cross-Project | Multi-machine or monorepo use | `--project-name` flag, store human-readable name |
 | 004-19 | Wrap DB calls in spawn_blocking | 006 SQLite Concurrency | File watcher on same runtime | Or migrate to tokio-rusqlite |
 | 004-20 | Migrate vector search to sqlite-vec | 006 SQLite Concurrency | >10K memories | Already in VectorStore interface |
-| 004-21 | Wire knowledge capture into ae:plan, ae:review, ae:retrospect, ae:think | PRD Phase C | Phase B validation passes | PRD: `agentic-engineering-mengdie/docs/prd/mengdie-integration.md` — extraction heuristics already defined |
+| 004-21 | ~~Wire knowledge capture into ae:plan, ae:review, ae:retrospect, ae:think~~ | PRD Phase C | ✅ done | Completed in Plan 003 Steps 3–6 (ae:plan, ae:review, ae:retrospect, ae:think skills all wired) |

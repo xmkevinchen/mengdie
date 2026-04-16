@@ -1,7 +1,7 @@
 ---
-id: "003"
+id: "015"
 title: "Memory Credibility — Quality Variance Across Users"
-status: active
+status: deferred
 created: 2026-04-05
 pipeline:
   analyze: skipped

@@ -1,13 +1,13 @@
 ---
 id: "008"
 title: "Contradiction Detection Strategies"
-status: active
+status: done
 created: 2026-04-05
 pipeline:
   analyze: done
   discuss: done
-  plan: pending
-  work: pending
+  plan: skipped
+  work: skipped
 plan: ""
 tags: [contradiction, entity-tag, temporal-validity, knowledge-evolution]
 ---

@@ -1,7 +1,7 @@
 ---
 id: "013"
 title: "What Next After 2-Week Pause"
-status: active
+status: done
 created: 2026-04-16
 pipeline:
   analyze: done

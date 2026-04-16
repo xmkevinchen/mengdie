@@ -3,7 +3,7 @@ id: "001"
 title: "Second Brain MVP Phase 1"
 type: plan
 created: 2026-04-04
-status: reviewed
+status: done
 discussion: "docs/discussions/002-mvp-phase1/conclusion.md"
 ---
 

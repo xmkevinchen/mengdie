@@ -1,13 +1,13 @@
 ---
 id: "002"
 title: "MVP Phase 1 Design"
-status: active
+status: done
 created: 2026-04-05
 pipeline:
   analyze: skipped
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/001-mvp-phase1.md"
 tags: [mvp, implementation, architecture]
 ---

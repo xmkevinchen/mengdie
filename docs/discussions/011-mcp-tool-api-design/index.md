@@ -1,7 +1,7 @@
 ---
 id: "011"
 title: "MCP Tool API Design Patterns"
-status: active
+status: deferred
 created: 2026-04-05
 pipeline:
   analyze: done

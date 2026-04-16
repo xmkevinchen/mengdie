@@ -1,7 +1,7 @@
 ---
 id: "012"
 title: "Phase 1.1 Scope and Execution"
-status: active
+status: done
 created: 2026-04-09
 pipeline:
   analyze: skipped

@@ -1,7 +1,7 @@
 ---
 id: "010"
 title: "Cross-Project Knowledge Sharing"
-status: active
+status: deferred
 created: 2026-04-05
 pipeline:
   analyze: done

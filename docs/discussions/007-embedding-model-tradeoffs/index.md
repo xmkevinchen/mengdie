@@ -1,7 +1,7 @@
 ---
 id: "007"
 title: "Embedding Model Tradeoffs"
-status: active
+status: deferred
 created: 2026-04-05
 pipeline:
   analyze: done

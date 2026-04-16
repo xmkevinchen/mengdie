@@ -32,9 +32,9 @@ See `docs/discussions/` for full context:
 ## Tech Stack
 
 - **Rust** — strictest compiler guardrail for agent-written code, single binary, sub-5ms startup
-- **SQLite**: `rusqlite` with `features = ["bundled", "fts5", "load_extension"]`
-- **Vector search**: `sqlite-vec` (optional, behind `VectorStore` interface); app-level cosine as primary fallback
-- **MCP SDK**: `rmcp` v0.16 with `features = ["server", "macros", "transport-io"]`
+- **SQLite**: `rusqlite` with `features = ["bundled", "load_extension"]` (FTS5 included via bundled SQLite)
+- **Vector search**: App-level brute-force cosine similarity (sqlite-vec deferred; no VectorStore trait)
+- **MCP SDK**: `rmcp` v1.3 with `features = ["server", "macros", "transport-io"]`
 - **Async**: `tokio` (full features)
 - **Embeddings**: `fastembed` v5 — local ONNX Runtime, all-MiniLM-L6-v2 (384d, ~90MB model, 2-10ms inference)
 - **FS watcher**: `notify` v8
@@ -51,7 +51,7 @@ src/
     schema.rs        # Table definitions, FTS5 setup
     project.rs       # project_id inference from git remote
     embeddings.rs    # fastembed-rs integration, metadata-in-chunk encoding
-    vector.rs        # VectorStore trait, cosine fallback, sqlite-vec optional
+    vector.rs        # Brute-force cosine similarity search (sqlite-vec deferred)
     search.rs        # Hybrid FTS5 + vector + RRF merge, score normalization
     parser.rs        # YAML frontmatter extraction, entity extraction from tags
     watcher.rs       # notify-based AE file watcher
@@ -155,8 +155,17 @@ Backlog items always have: what to do, why it matters, when to revisit (trigger)
 
 ## Project Status
 
-Phase 1 MVP — plan reviewed, ready for implementation.
+Phase 1 complete — MVP built, validated, and iterating. At validation gate (2-week forced-use scorecard pending).
 
-- Plan: `docs/plans/001-mvp-phase1.md` (8 steps, 15 acceptance criteria)
-- Discussions: `docs/discussions/002-mvp-phase1/` (scope) + `003-tech-stack/` (Rust)
-- Backlog: `docs/backlog/001-qmd-learnings.md` (RRF, score normalization, metadata-in-chunk)
+**Completed plan cycles** (all reviewed PASS):
+1. `docs/plans/001-mvp-phase1.md` — Core MVP (MCP server, search, ingest, dreaming, contradiction)
+2. `docs/plans/002-close-the-loop.md` — AE integration (knowledge capture, watcher library, ae:analyze injection)
+3. `docs/plans/003-phase-1.1.md` — API contract correctness + skill wiring (enums, Phase C capture)
+4. `docs/plans/004-search-quality-fixes.md` — Dreaming threshold + FTS5 tokenization
+
+**Next step**: 2-week forced-use validation scorecard (from discussion 013) — not more features.
+
+**Deferred discussions** (findings in `docs/backlog/004-analyze-findings.md` with trigger conditions):
+006 (SQLite concurrency), 007 (embedding models), 009 (dreaming tuning), 010 (cross-project), 011 (MCP API design)
+
+**Backlog**: `docs/backlog/` (4 files — review deferred items, analyze findings, qmd learnings)

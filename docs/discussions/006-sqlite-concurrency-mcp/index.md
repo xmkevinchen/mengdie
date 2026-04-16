@@ -1,7 +1,7 @@
 ---
 id: "006"
 title: "SQLite Concurrency Under MCP"
-status: active
+status: deferred
 created: 2026-04-05
 pipeline:
   analyze: done

@@ -7,7 +7,7 @@ pipeline:
   analyze: skipped
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/001-mvp-phase1.md"
 tags: [tech-stack, language, architecture]
 ---

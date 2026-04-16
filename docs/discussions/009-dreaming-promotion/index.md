@@ -1,7 +1,7 @@
 ---
 id: "009"
 title: "Dreaming/Promotion Tuning"
-status: active
+status: deferred
 created: 2026-04-05
 pipeline:
   analyze: done
