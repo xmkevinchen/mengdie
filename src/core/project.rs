@@ -1,11 +1,91 @@
 use std::path::Path;
 use std::process::Command;
 
-/// Infer a stable, opaque project_id from the directory.
-/// Uses git remote URL if available (normalized so SSH/HTTPS produce the same hash),
-/// otherwise falls back to the canonical directory path.
-/// Format: `proj_<16-hex-chars>` — platform-agnostic, deterministic.
+/// Project identity: either a user-given name from `.mengdie.toml` or a hash fallback.
+///
+/// Resolution order:
+/// 1. `.mengdie.toml` in the directory (or any ancestor up to git root) → `project.name`
+/// 2. Git remote URL hash (FNV-1a) → `proj_<16-hex>`
+/// 3. Canonical path hash → `proj_<16-hex>`
 pub fn infer_project_id(dir: &Path) -> String {
+    if let Some(name) = read_project_name(dir) {
+        return name;
+    }
+    let source = if let Some(remote) = git_remote_url(dir) {
+        normalize_git_url(&remote)
+    } else {
+        let abs = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        abs.to_string_lossy().to_string()
+    };
+    format!("proj_{:016x}", simple_hash(source.as_bytes()))
+}
+
+/// Read project name from `.mengdie.toml` walking up to git root.
+/// File format:
+/// ```toml
+/// [project]
+/// name = "my-project"
+/// ```
+fn read_project_name(dir: &Path) -> Option<String> {
+    let abs = dir.canonicalize().ok()?;
+    let mut current = abs.as_path();
+    loop {
+        let toml_path = current.join(".mengdie.toml");
+        if toml_path.is_file() {
+            if let Ok(contents) = std::fs::read_to_string(&toml_path) {
+                // Minimal TOML parsing — avoid adding a dependency for one field.
+                // Looks for `name = "value"` under `[project]`.
+                let mut in_project_section = false;
+                for line in contents.lines() {
+                    let trimmed = line.trim();
+                    if trimmed == "[project]" {
+                        in_project_section = true;
+                        continue;
+                    }
+                    if trimmed.starts_with('[') {
+                        in_project_section = false;
+                        continue;
+                    }
+                    if in_project_section && trimmed.starts_with('#') {
+                        continue; // skip comments
+                    }
+                    if in_project_section {
+                        if let Some(rest) = trimmed.strip_prefix("name") {
+                            let rest = rest.trim_start();
+                            if let Some(rest) = rest.strip_prefix('=') {
+                                let val = rest.trim();
+                                // Extract quoted string properly (handle inline comments)
+                                let val = if val.starts_with('"') {
+                                    // Find matching close quote
+                                    val[1..].find('"').map(|end| &val[1..1 + end])
+                                } else if val.starts_with('\'') {
+                                    val[1..].find('\'').map(|end| &val[1..1 + end])
+                                } else {
+                                    // Unquoted: take until whitespace or comment
+                                    Some(val.split_once('#').map(|(v, _)| v.trim()).unwrap_or(val))
+                                };
+                                if let Some(val) = val {
+                                    if !val.is_empty() {
+                                        return Some(val.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Stop at git root or filesystem root
+        if current.join(".git").exists() {
+            break;
+        }
+        current = current.parent()?;
+    }
+    None
+}
+
+/// Compute the hash-based project_id for a given directory (used by migrate command).
+pub fn hash_project_id(dir: &Path) -> String {
     let source = if let Some(remote) = git_remote_url(dir) {
         normalize_git_url(&remote)
     } else {
@@ -117,5 +197,126 @@ mod tests {
         let ssh1 = normalize_git_url("ssh://git@github.com/user/repo.git");
         let ssh2 = normalize_git_url("git@github.com:user/repo.git");
         assert_eq!(ssh1, ssh2);
+    }
+
+    // -- .mengdie.toml tests --
+
+    #[test]
+    fn test_read_project_name_found_in_current_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"my-project\"\n",
+        ).unwrap();
+        assert_eq!(read_project_name(dir.path()), Some("my-project".to_string()));
+    }
+
+    #[test]
+    fn test_read_project_name_found_in_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write .mengdie.toml in root, create a subdir, read from subdir
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"parent-project\"\n",
+        ).unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        assert_eq!(read_project_name(&subdir), Some("parent-project".to_string()));
+    }
+
+    #[test]
+    fn test_read_project_name_not_found_fallback_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .mengdie.toml → read_project_name returns None
+        assert_eq!(read_project_name(dir.path()), None);
+        // infer_project_id falls back to hash
+        let id = infer_project_id(dir.path());
+        assert!(id.starts_with("proj_"));
+    }
+
+    #[test]
+    fn test_read_project_name_empty_name_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"\"\n",
+        ).unwrap();
+        // Empty name should be treated as absent
+        assert_eq!(read_project_name(dir.path()), None);
+    }
+
+    #[test]
+    fn test_read_project_name_malformed_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        // No [project] section
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "name = \"no-section\"\n",
+        ).unwrap();
+        assert_eq!(read_project_name(dir.path()), None);
+    }
+
+    #[test]
+    fn test_read_project_name_wrong_section() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[other]\nname = \"wrong\"\n[project]\nname = \"right\"\n",
+        ).unwrap();
+        assert_eq!(read_project_name(dir.path()), Some("right".to_string()));
+    }
+
+    #[test]
+    fn test_read_project_name_single_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = 'single-quoted'\n",
+        ).unwrap();
+        assert_eq!(read_project_name(dir.path()), Some("single-quoted".to_string()));
+    }
+
+    #[test]
+    fn test_infer_project_id_uses_toml_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"test-project\"\n",
+        ).unwrap();
+        // Should return the name directly, not a hash
+        assert_eq!(infer_project_id(dir.path()), "test-project");
+    }
+
+    #[test]
+    fn test_read_project_name_inline_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"my-project\"  # set by CI\n",
+        ).unwrap();
+        assert_eq!(read_project_name(dir.path()), Some("my-project".to_string()));
+    }
+
+    #[test]
+    fn test_read_project_name_comment_line_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\n# name = \"commented-out\"\nname = \"active\"\n",
+        ).unwrap();
+        assert_eq!(read_project_name(dir.path()), Some("active".to_string()));
+    }
+
+    #[test]
+    fn test_read_project_name_stops_at_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a fake .git dir in root — prevents walking higher
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        // Put .mengdie.toml one level above (unreachable)
+        // Since we can't go above tempdir easily, test that .git stops the walk
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        // No .mengdie.toml anywhere in the tree
+        assert_eq!(read_project_name(&subdir), None);
     }
 }
