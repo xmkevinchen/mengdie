@@ -3,7 +3,7 @@ id: "005"
 title: "Human-Readable Project Naming"
 type: plan
 created: 2026-04-16
-status: reviewed
+status: done
 discussion: ""
 ---
 
