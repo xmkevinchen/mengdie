@@ -168,11 +168,15 @@ pub fn is_ingestable(path: &Path) -> bool {
         return false;
     }
 
-    // Match by keyword anywhere in filename (handles NNN-prefixed files)
-    filename == "conclusion.md" || filename.contains("-conclusion")
-        || filename.contains("review") || filename.contains("test-report")
-        || filename.contains("plan")
-        || filename.contains("retrospect")
+    // Blocklist: structural/intermediate files that are not knowledge output
+    let excluded = filename == "index.md"
+        || filename == "readme.md"
+        || filename.starts_with("round-")
+        || filename == "summary.md"
+        || filename == "analysis.md"
+        || filename == "api.md";
+
+    !excluded
 }
 
 #[cfg(test)]
@@ -231,25 +235,27 @@ mod tests {
 
     #[test]
     fn test_is_ingestable() {
-        // Direct names
+        // Most .md files pass (blocklist approach)
         assert!(is_ingestable(Path::new("conclusion.md")));
         assert!(is_ingestable(Path::new("code-review.md")));
         assert!(is_ingestable(Path::new("plan-001.md")));
-        assert!(is_ingestable(Path::new("retrospect-q1.md")));
-        // Number-prefixed (AE output format)
         assert!(is_ingestable(Path::new("004-review-test-plugin-v2.md")));
-        assert!(is_ingestable(Path::new("001-retrospect-comparison.md")));
-        assert!(is_ingestable(Path::new("003-phase2-plan-review.md")));
-        assert!(is_ingestable(Path::new("003-test-report-ae-test-plugin.md")));
-        assert!(is_ingestable(Path::new("021-claude-code-source-analysis-conclusion.md")));
-        // Excluded
+        assert!(is_ingestable(Path::new("BL-007-e2e-testing.md")));
+        assert!(is_ingestable(Path::new("topic-04-selection-algorithm.md")));
+        assert!(is_ingestable(Path::new("notes.md")));
+        assert!(is_ingestable(Path::new("step-summaries.md")));
+        assert!(is_ingestable(Path::new("DEVELOPMENT_PLAN.md")));
+        // Blocklisted structural files
         assert!(!is_ingestable(Path::new("round-01.md")));
         assert!(!is_ingestable(Path::new("index.md")));
         assert!(!is_ingestable(Path::new("summary.md")));
         assert!(!is_ingestable(Path::new("analysis.md")));
-        // Swap files / temp files excluded
+        assert!(!is_ingestable(Path::new("README.md")));
+        assert!(!is_ingestable(Path::new("api.md")));
+        // Non-.md and temp files excluded
         assert!(!is_ingestable(Path::new("conclusion.md.swp")));
         assert!(!is_ingestable(Path::new("conclusion.md~")));
+        assert!(!is_ingestable(Path::new("code.rs")));
     }
 
     #[test]
