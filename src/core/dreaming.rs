@@ -8,7 +8,7 @@ use super::db::Db;
 /// Default minimum recall count for promotion.
 pub const DEFAULT_MIN_RECALL: i64 = 3;
 /// Default minimum average relevance for promotion.
-pub const DEFAULT_MIN_RELEVANCE: f64 = 0.65;
+pub const DEFAULT_MIN_RELEVANCE: f64 = 0.45;
 /// Default recency window (days) — last_recalled must be within this window.
 pub const DEFAULT_WINDOW_DAYS: i64 = 14;
 

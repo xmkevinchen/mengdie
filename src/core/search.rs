@@ -22,6 +22,23 @@ pub struct FtsResult {
     pub bm25_score: f64,
 }
 
+/// FTS5 reserved words that must be filtered from query tokens.
+const FTS5_RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
+
+/// Sanitize a query string for safe use in FTS5 MATCH.
+/// Splits on non-alphanumeric boundaries (aligning with FTS5's unicode61 tokenizer),
+/// filters empty tokens and FTS5 reserved words, joins with AND.
+/// Returns an empty string if no valid tokens remain.
+pub fn sanitize_fts_query(query: &str) -> String {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|s| s.to_string())
+        .filter(|token| !token.is_empty())
+        .filter(|token| !FTS5_RESERVED.iter().any(|r| r.eq_ignore_ascii_case(token)))
+        .collect();
+    tokens.join(" AND ")
+}
+
 impl Db {
     /// FTS5 full-text search. Returns results ranked by BM25.
     /// Filters out expired entries.
@@ -34,14 +51,11 @@ impl Db {
         let conn = self.lock_conn()?;
         let now = chrono::Utc::now().to_rfc3339();
 
-        // FTS5 MATCH requires non-empty query
-        if query.trim().is_empty() {
+        // Sanitize query: allowlist alphanumeric chars, filter reserved words, join with AND.
+        let safe_query = sanitize_fts_query(query);
+        if safe_query.is_empty() {
             return Ok(vec![]);
         }
-
-        // Escape FTS5 query syntax: wrap in double quotes to treat as literal phrase.
-        // This prevents FTS5 operators (AND, OR, NOT, *, NEAR) from being interpreted.
-        let safe_query = format!("\"{}\"", query.replace('"', "\"\""));
 
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match project_id {
             Some(pid) => (
@@ -201,6 +215,51 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_fts_query_multi_word() {
+        assert_eq!(sanitize_fts_query("JWT authentication"), "JWT AND authentication");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_single_word() {
+        assert_eq!(sanitize_fts_query("JWT"), "JWT");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_with_operators() {
+        assert_eq!(sanitize_fts_query("JWT AND authentication"), "JWT AND authentication");
+        assert_eq!(sanitize_fts_query("JWT OR auth"), "JWT AND auth");
+        assert_eq!(sanitize_fts_query("NOT bad"), "bad");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_special_chars() {
+        assert_eq!(sanitize_fts_query("rust *** memory"), "rust AND memory");
+        // Splits on non-alnum boundaries (aligns with FTS5 unicode61 tokenizer)
+        assert_eq!(sanitize_fts_query("rust-lang (systems)"), "rust AND lang AND systems");
+        assert_eq!(sanitize_fts_query("title:rust ^fast"), "title AND rust AND fast");
+        assert_eq!(sanitize_fts_query("NEAR/5 test"), "5 AND test");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_strips_to_empty() {
+        assert_eq!(sanitize_fts_query("***"), "");
+        assert_eq!(sanitize_fts_query("AND OR NOT"), "");
+        assert_eq!(sanitize_fts_query(""), "");
+        assert_eq!(sanitize_fts_query("   "), "");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_consecutive_spaces() {
+        assert_eq!(sanitize_fts_query("JWT    authentication"), "JWT AND authentication");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_mixed_case_reserved() {
+        assert_eq!(sanitize_fts_query("rust And memory"), "rust AND memory");
+        assert_eq!(sanitize_fts_query("near Or far"), "far");
+    }
+
+    #[test]
     fn test_fts5_search_keyword() {
         let db = test_db();
         insert_test_memory(&db, "proj", "JWT Auth Decision", "Use JWT tokens for authentication", "auth,jwt", &[1.0, 0.0, 0.0]);
@@ -332,14 +391,27 @@ mod tests {
         insert_test_memory(&db, "proj", "JWT Auth", "Use JWT tokens for auth", "auth,jwt", &[1.0, 0.0, 0.0]);
         insert_test_memory(&db, "proj", "DB Choice", "Use PostgreSQL for persistence", "db", &[0.0, 1.0, 0.0]);
 
+        // "JWT auth tokens" now uses AND-term matching: "JWT AND auth AND tokens"
+        // FTS5 should match the JWT Auth entry (contains "JWT", "auth", "tokens")
+        // Both FTS and vector match → dual-ranker → score should be > 0.5
         let results = db.memory_search("JWT auth tokens", &[0.9, 0.1, 0.0], Some("proj"), 10).unwrap();
         assert!(!results.is_empty());
-        // Top result should match both rankers → normalized score should be high (> 0.4)
-        // Raw RRF would be ~0.03 which is NOT > 0.4, so this tests normalization
-        assert!(results[0].score > 0.4, "top result normalized score should be > 0.4, got {}", results[0].score);
+        // Dual-ranker hits produce scores > 0.5 (confirming FTS5 is now contributing)
+        assert!(results[0].score > 0.5, "dual-ranker normalized score should be > 0.5, got {}", results[0].score);
         for r in &results {
             assert!(r.score >= 0.0, "score should be >= 0.0, got {}", r.score);
             assert!(r.score <= 1.0, "score should be <= 1.0, got {}", r.score);
         }
+    }
+
+    #[test]
+    fn test_fts5_multi_word_non_adjacent_match() {
+        let db = test_db();
+        // "JWT" in title, "authentication" in content — NOT adjacent
+        insert_test_memory(&db, "proj", "JWT tokens", "for authentication and authorization", "auth,jwt", &[1.0, 0.0, 0.0]);
+
+        // AND-term matching: "JWT AND authentication" should match even though terms are non-adjacent
+        let results = db.search_fts("JWT authentication", Some("proj"), 10).unwrap();
+        assert!(!results.is_empty(), "FTS5 AND-term should match non-adjacent terms across title and content");
     }
 }

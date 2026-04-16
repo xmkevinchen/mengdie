@@ -67,14 +67,14 @@ fn test_full_pipeline() {
     assert!(entry.avg_relevance > 0.0);
 
     // 6. Simulate enough recalls for Dreaming promotion
-    // Need avg_relevance >= 0.65 — search RRF score is small (~0.03),
+    // Need avg_relevance >= 0.45 (DEFAULT_MIN_RELEVANCE) — search RRF score is small (~0.03),
     // so add high-relevance recalls to bring average up.
     for _ in 0..9 {
         db.record_recall(&entry_id, 0.9).unwrap();
     }
     let entry = db.get_memory(&entry_id).unwrap().unwrap();
     assert_eq!(entry.recall_count, 10); // 1 from search + 9 manual
-    assert!(entry.avg_relevance > 0.65, "avg_relevance should be above dreaming threshold: {}", entry.avg_relevance);
+    assert!(entry.avg_relevance > 0.45, "avg_relevance should be above dreaming threshold: {}", entry.avg_relevance);
 
     // 7. Run Dreaming
     let dream_result = db.run_dreaming(None).unwrap();

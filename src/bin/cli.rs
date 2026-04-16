@@ -25,16 +25,16 @@ struct Cli {
 enum Commands {
     /// Run Dreaming promotion pass
     Dream {
-        /// Minimum recall count for promotion (default: 3)
-        #[arg(long, default_value = "3")]
+        /// Minimum recall count for promotion
+        #[arg(long, default_value_t = mengdie::core::dreaming::DEFAULT_MIN_RECALL)]
         min_recall: i64,
 
-        /// Minimum average relevance for promotion (default: 0.65)
-        #[arg(long, default_value = "0.65")]
+        /// Minimum average relevance for promotion
+        #[arg(long, default_value_t = mengdie::core::dreaming::DEFAULT_MIN_RELEVANCE)]
         min_relevance: f64,
 
-        /// Recency window in days — last_recalled must be within this window (default: 14)
-        #[arg(long, default_value = "14")]
+        /// Recency window in days — last_recalled must be within this window
+        #[arg(long, default_value_t = mengdie::core::dreaming::DEFAULT_WINDOW_DAYS)]
         window_days: i64,
     },
 
