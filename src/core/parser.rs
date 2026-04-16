@@ -168,11 +168,11 @@ pub fn is_ingestable(path: &Path) -> bool {
         return false;
     }
 
-    // Exact match or known patterns
-    filename == "conclusion.md"
-        || filename.starts_with("review") || filename.ends_with("-review.md") || filename == "code-review.md"
-        || filename.starts_with("plan") || filename.ends_with("-plan.md")
-        || filename.starts_with("retrospect") || filename.ends_with("-retrospect.md")
+    // Match by keyword anywhere in filename (handles NNN-prefixed files)
+    filename == "conclusion.md" || filename.contains("-conclusion")
+        || filename.contains("review") || filename.contains("test-report")
+        || filename.contains("plan")
+        || filename.contains("retrospect")
 }
 
 #[cfg(test)]
@@ -231,13 +231,22 @@ mod tests {
 
     #[test]
     fn test_is_ingestable() {
+        // Direct names
         assert!(is_ingestable(Path::new("conclusion.md")));
         assert!(is_ingestable(Path::new("code-review.md")));
         assert!(is_ingestable(Path::new("plan-001.md")));
         assert!(is_ingestable(Path::new("retrospect-q1.md")));
+        // Number-prefixed (AE output format)
+        assert!(is_ingestable(Path::new("004-review-test-plugin-v2.md")));
+        assert!(is_ingestable(Path::new("001-retrospect-comparison.md")));
+        assert!(is_ingestable(Path::new("003-phase2-plan-review.md")));
+        assert!(is_ingestable(Path::new("003-test-report-ae-test-plugin.md")));
+        assert!(is_ingestable(Path::new("021-claude-code-source-analysis-conclusion.md")));
+        // Excluded
         assert!(!is_ingestable(Path::new("round-01.md")));
         assert!(!is_ingestable(Path::new("index.md")));
         assert!(!is_ingestable(Path::new("summary.md")));
+        assert!(!is_ingestable(Path::new("analysis.md")));
         // Swap files / temp files excluded
         assert!(!is_ingestable(Path::new("conclusion.md.swp")));
         assert!(!is_ingestable(Path::new("conclusion.md~")));
