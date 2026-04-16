@@ -301,6 +301,84 @@ impl Db {
         Ok(entries)
     }
 
+    /// Rename a project_id in the database. Merges (deletes) duplicates where
+    /// the same content_hash already exists under new_id.
+    /// Returns (renamed_count, merged_count).
+    pub fn rename_project(&self, old_id: &str, new_id: &str) -> anyhow::Result<(usize, usize)> {
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
+
+        // Step 1: Find collision rows (same content_hash exists under both old and new project)
+        let collisions: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT old.id, old.title FROM memory_entries old
+                 INNER JOIN memory_entries new
+                   ON old.content_hash = new.content_hash
+                 WHERE old.project_id = ?1 AND new.project_id = ?2"
+            )?;
+            let rows = stmt.query_map(params![old_id, new_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let merged = collisions.len();
+
+        // Step 2: Delete collision rows from old project (merge — content already exists under new)
+        for (id, title) in &collisions {
+            tx.execute("DELETE FROM memory_entries WHERE id = ?1", params![id])?;
+            tracing::info!(id = %id, title = %title, "merged (deleted duplicate)");
+        }
+
+        // Step 3: Rename remaining rows
+        let renamed = tx.execute(
+            "UPDATE memory_entries SET project_id = ?1 WHERE project_id = ?2",
+            params![new_id, old_id],
+        )?;
+
+        tx.commit()?;
+        Ok((renamed, merged))
+    }
+
+    /// Dry-run rename: returns (would_rename, would_merge) without modifying the database.
+    pub fn rename_project_dry_run(&self, old_id: &str, new_id: &str) -> anyhow::Result<(usize, usize)> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+
+        let collision_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_entries old
+             INNER JOIN memory_entries new
+               ON old.content_hash = new.content_hash
+             WHERE old.project_id = ?1 AND new.project_id = ?2",
+            params![old_id, new_id],
+            |row| row.get(0),
+        )?;
+
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_entries WHERE project_id = ?1",
+            params![old_id],
+            |row| row.get(0),
+        )?;
+
+        let rename_count = (total - collision_count).max(0) as usize;
+        Ok((rename_count, collision_count as usize))
+    }
+
+    /// List all distinct project_ids with their memory counts.
+    pub fn list_projects(&self) -> anyhow::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT project_id, COUNT(*) FROM memory_entries GROUP BY project_id ORDER BY COUNT(*) DESC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Count all memories for a given project.
     pub fn count_memories(&self, project_id: &str) -> anyhow::Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
@@ -632,5 +710,100 @@ mod tests {
         assert_eq!(entry.recall_count, 2, "recall stats should be preserved on upsert");
         assert!((entry.avg_relevance - 0.7).abs() < 0.01);
         assert_eq!(entry.title, "Decision v2", "title should be updated");
+    }
+
+    #[test]
+    fn test_rename_project_basic() {
+        let db = test_db();
+        db.insert_memory(sample_memory("old")).unwrap();
+        db.insert_memory(sample_memory("old")).unwrap();
+        db.insert_memory(sample_memory("old")).unwrap();
+
+        let (renamed, merged) = db.rename_project("old", "new").unwrap();
+        assert_eq!(renamed, 3);
+        assert_eq!(merged, 0);
+        assert_eq!(db.count_memories("old").unwrap(), 0);
+        assert_eq!(db.count_memories("new").unwrap(), 3);
+    }
+
+    #[test]
+    fn test_rename_project_collision_merges() {
+        let db = test_db();
+        let shared_content = "Identical content for collision test";
+
+        // Insert under old project
+        db.insert_memory(NewMemory {
+            project_id: "old".to_string(),
+            source_file: "a.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "Old version".to_string(),
+            content: shared_content.to_string(),
+            entities: "test".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        // Insert same content under new project (will collide)
+        let new_id = db.insert_memory(NewMemory {
+            project_id: "new".to_string(),
+            source_file: "b.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "New version".to_string(),
+            content: shared_content.to_string(),
+            entities: "test".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        // Also insert a non-colliding memory under old
+        db.insert_memory(NewMemory {
+            project_id: "old".to_string(),
+            source_file: "c.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "factual".to_string(),
+            title: "Unique to old".to_string(),
+            content: "This content has no duplicate".to_string(),
+            entities: "unique".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        }).unwrap();
+
+        let (renamed, merged) = db.rename_project("old", "new").unwrap();
+        assert_eq!(merged, 1, "one collision should be merged");
+        assert_eq!(renamed, 1, "one non-colliding row should be renamed");
+        assert_eq!(db.count_memories("old").unwrap(), 0, "no rows left under old");
+        assert_eq!(db.count_memories("new").unwrap(), 2, "new has original + renamed");
+
+        // Verify the new-project version was preserved (not the old one)
+        let entry = db.get_memory(&new_id).unwrap().unwrap();
+        assert_eq!(entry.title, "New version", "new project's version preserved");
+    }
+
+    #[test]
+    fn test_rename_project_dry_run() {
+        let db = test_db();
+        db.insert_memory(sample_memory("old")).unwrap();
+        db.insert_memory(sample_memory("old")).unwrap();
+
+        let (would_rename, would_merge) = db.rename_project_dry_run("old", "new").unwrap();
+        assert_eq!(would_rename, 2);
+        assert_eq!(would_merge, 0);
+        // DB unchanged
+        assert_eq!(db.count_memories("old").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_list_projects() {
+        let db = test_db();
+        db.insert_memory(sample_memory("proj-a")).unwrap();
+        db.insert_memory(sample_memory("proj-a")).unwrap();
+        db.insert_memory(sample_memory("proj-b")).unwrap();
+
+        let projects = db.list_projects().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0], ("proj-a".to_string(), 2));
+        assert_eq!(projects[1], ("proj-b".to_string(), 1));
     }
 }
