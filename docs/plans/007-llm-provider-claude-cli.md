@@ -3,7 +3,7 @@ id: "007"
 title: "BL-005 — LLM Provider Trait + Claude CLI Implementation"
 type: plan
 created: 2026-04-16
-status: reviewed
+status: done
 discussion: "docs/discussions/016-dreaming-evolution/"
 ---
 
