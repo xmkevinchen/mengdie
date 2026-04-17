@@ -22,3 +22,26 @@
 Note: use explicit file paths (not `git add -A`) on future commits to avoid scope bleed.
 
 **Allow-audit baseline**: `rg '#\[allow' src/ tests/` returns 0 matches. Clean starting point for Step 4's monitor.
+
+## Step 2 — Local pre-commit hook (commit: 2a86080)
+**Decisions**:
+- Shell script at `.githooks/pre-commit` + `git config core.hooksPath .githooks` one-time install. Zero dependencies. README at `.githooks/README.md` explains rationale + bypass policy.
+- Hook sources `~/.cargo/env` so it picks up rustup-managed toolchain automatically (matches release.yml's pattern).
+- Warm runtime: 0.19s (codex-proxy-2 predicted <5s; actual is ~25× faster). No workflow friction.
+
+**Rejected**:
+- Pre-commit framework (husky / pre-commit.com / lefthook): explicit non-goal from plan. Shell script is reviewable + zero-dep.
+- Running `cargo test` in the hook: would trigger fastembed ONNX download on cold cache → commit latency unbearable. Tests remain CI-only.
+
+**Cross-step deps**:
+- Step 3 (ci.yml) runs the SAME `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` commands plus `cargo test` (the one the hook skips). Local + CI checks are identical for fmt/clippy so "green locally → green in CI" holds.
+- `#[allow]` policy baked into hook failure message: "`#[allow]` is LAST RESORT" surfaces right at the point of attempted bypass.
+
+**Actual files**: .githooks/pre-commit, .githooks/README.md, CLAUDE.md
+
+**Manual verification record** (required by AC2):
+- Installed hook: `git config core.hooksPath .githooks` ✓
+- Introduced `v.len() > 0` in a scratch module + staged → `git commit` REJECTED at fmt step first (due to mod ordering)
+- Ran `cargo fmt --all`, re-staged → `git commit` REJECTED at clippy step with file:line + "`#[allow]` is LAST RESORT" message ✓
+- Unstaged + removed scratch module → repo clean ✓
+- Hook also ran on its own commit (2a86080) and passed: **meta-validation** ✓

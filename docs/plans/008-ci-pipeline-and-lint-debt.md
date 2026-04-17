@@ -41,22 +41,22 @@ Fix all 10 clippy items surveyed by rust-archaeologist during discussion 017. On
 
 Expected files: `src/core/embeddings.rs`, `src/core/db.rs`, `src/core/schema.rs`, `src/core/search.rs`, `src/core/project.rs`, `src/bin/cli.rs`
 
-### Step 2: Local pre-commit hook (AC2)
+### Step 2: Local pre-commit hook (AC2) — DONE 2a86080
 
 Add a committed hook script + one-line setup. Hook runs the fast checks only (fmt + clippy). Test is CI's job — pre-commit must not take >10s warm.
 
-- [ ] Create `.githooks/pre-commit` (executable shell script, `chmod +x`):
+- [x] Create `.githooks/pre-commit` (executable shell script, `chmod +x`):
   - Run `cargo fmt --all -- --check` — fail with clear message on format drift
   - Run `cargo clippy --all-targets --quiet -- -D warnings` — fail on any warning
   - Do NOT run `cargo test` (fastembed cold start would make commits unbearable; CI covers test)
   - Exit non-zero on any failure so the commit is rejected
-- [ ] Create `.githooks/README.md` (one paragraph):
+- [x] Create `.githooks/README.md` (one paragraph):
   - Explains the hook purpose
   - Install command: `git config core.hooksPath .githooks`
   - Note: this is a one-time per clone; not auto-applied by `git clone`
   - Note: per project CLAUDE.md, `--no-verify` is NOT a normal escape hatch — fix the issue, don't skip
-- [ ] Update project CLAUDE.md "Development" section to mention running `git config core.hooksPath .githooks` once after clone.
-- [ ] Verification: after running `git config core.hooksPath .githooks`, introduce a deliberate clippy violation (e.g., `.len() > 0` somewhere), attempt `git commit`, confirm commit is rejected with the clippy output. Revert the test violation.
+- [x] Update project CLAUDE.md "Development" section to mention running `git config core.hooksPath .githooks` once after clone.
+- [x] Verification: after running `git config core.hooksPath .githooks`, introduce a deliberate clippy violation (e.g., `.len() > 0` somewhere), attempt `git commit`, confirm commit is rejected with the clippy output. Revert the test violation.
 
 Expected files: `.githooks/pre-commit`, `.githooks/README.md`, `CLAUDE.md`
 
