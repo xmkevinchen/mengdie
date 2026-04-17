@@ -8,7 +8,7 @@ pipeline:
   discuss: done
   plan: done
   work: pending
-plan: "docs/plans/006-dream-mvp.md"
+plan: "docs/plans/007-llm-provider-claude-cli.md"
 tags: [dreaming, entity-extraction, memory-lint, synthesis, compilation]
 ---
 
