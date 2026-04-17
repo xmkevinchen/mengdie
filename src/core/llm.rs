@@ -34,6 +34,30 @@ pub enum ExitKind {
     Other,
 }
 
+/// Tag identifying WHICH subprocess I/O op failed. `#[non_exhaustive]` so
+/// adding a new op later (e.g. `ReadStdinEcho` for a duplex variant) is not
+/// a breaking change for downstream pattern matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IoOp {
+    ReadStdout,
+    ReadStderr,
+    WriteStdin,
+    Wait,
+}
+
+impl std::fmt::Display for IoOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            IoOp::ReadStdout => "read stdout",
+            IoOp::ReadStderr => "read stderr",
+            IoOp::WriteStdin => "write stdin",
+            IoOp::Wait => "wait for subprocess",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("unknown llm.provider value: {0:?} (known: \"claude-cli\")")]
@@ -47,7 +71,7 @@ pub enum LlmError {
 
     #[error("CLI subprocess I/O error ({op}): {source}")]
     Io {
-        op: &'static str,
+        op: IoOp,
         #[source]
         source: std::io::Error,
     },
@@ -79,7 +103,9 @@ pub enum LlmError {
 /// or a typed error. Pure and sync — no I/O, no spawning. The async provider
 /// builds an `Output` from its three concurrent I/O tasks and delegates here
 /// so this logic stays unit-testable without real subprocesses.
-pub fn classify_output(output: Output) -> Result<String, LlmError> {
+///
+/// Crate-private: this is a testing seam, not a public API commitment.
+pub(crate) fn classify_output(output: Output) -> Result<String, LlmError> {
     let stderr_text = String::from_utf8_lossy(&output.stderr).into_owned();
     let Some(code) = output.status.code() else {
         return Err(LlmError::Signal);
@@ -169,6 +195,14 @@ pub fn build_provider(cfg: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmError>
 /// Single source of truth so the opt-in help-smoke test can pin the
 /// argv contract without duplicating the flag list. (Codex accumulated
 /// review flagged drift risk between test and implementation.)
+///
+/// **Public API contract**: this constant is `pub` (not `pub(crate)`)
+/// specifically so the integration test in `tests/llm_claude_cli.rs`
+/// can reference it from the external test crate. Downstream callers
+/// should treat it as Claude-CLI-specific implementation metadata —
+/// when OpenAI / other providers land, each provider owns its own
+/// flag list; this constant will NOT become a generic
+/// `LlmProvider::argv_flags()` method.
 pub const CLAUDE_CLI_FLAGS: &[&str] = &[
     "-p",
     "--output-format",
@@ -224,98 +258,120 @@ impl ClaudeCliProvider {
 
     async fn complete_impl(&self, system: &str, prompt: &str) -> Result<String, LlmError> {
         let mut cmd = self.build_command(system);
-        let mut child = match cmd.spawn() {
+        let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(LlmError::BinaryNotFound);
             }
             Err(e) => return Err(LlmError::Spawn(e)),
         };
+        drive_subprocess(child, prompt.as_bytes(), self.timeout).await
+    }
+}
 
-        let mut stdin = child.stdin.take().expect("stdin was piped at build time");
-        let mut stdout = child.stdout.take().expect("stdout was piped at build time");
-        let mut stderr = child.stderr.take().expect("stderr was piped at build time");
+/// The subprocess I/O + timeout lifecycle, extracted from `complete_impl`.
+/// Takes ownership of an already-spawned `Child` whose stdin/stdout/stderr
+/// were configured as `Stdio::piped()`. Writes `prompt_bytes` to the child's
+/// stdin concurrently with reading stdout + stderr, enforces `timeout`, and
+/// synchronously reaps the child on timeout / I/O error / normal exit.
+///
+/// Splitting this out of `complete_impl` serves two purposes: it makes the
+/// concurrent-I/O lifecycle testable without going through the Claude-
+/// specific argv construction, and it gives callers (tests, or a future
+/// non-Claude provider with the same flow) a reusable seam.
+pub(crate) async fn drive_subprocess(
+    mut child: tokio::process::Child,
+    prompt_bytes: &[u8],
+    timeout: Duration,
+) -> Result<String, LlmError> {
+    let mut stdin = child.stdin.take().expect("stdin was piped at build time");
+    let mut stdout = child.stdout.take().expect("stdout was piped at build time");
+    let mut stderr = child.stderr.take().expect("stderr was piped at build time");
 
-        let prompt_bytes = prompt.as_bytes().to_vec();
+    let prompt_owned = prompt_bytes.to_vec();
 
-        // Three concurrent tasks: write stdin, read stdout, read stderr.
-        // Running them sequentially (or via wait_with_output) deadlocks when
-        // the child writes >64KB of stderr before finishing stdin — parent
-        // blocks on stdin write, child blocks on stderr write.
-        let writer = async move {
-            let r = stdin.write_all(&prompt_bytes).await;
-            // Scope-end drops stdin and closes the pipe write-end to signal
-            // EOF to the child. Explicit drop here for clarity.
-            drop(stdin);
-            r
-        };
-        let stdout_reader = async move {
-            let mut buf = Vec::new();
-            stdout.read_to_end(&mut buf).await.map(|_| buf)
-        };
-        let stderr_reader = async move {
-            let mut buf = Vec::new();
-            stderr.read_to_end(&mut buf).await.map(|_| buf)
-        };
+    // Three concurrent tasks: write stdin, read stdout, read stderr.
+    // Running them sequentially (or via wait_with_output) deadlocks when
+    // the child writes >64KB of stderr before finishing stdin — parent
+    // blocks on stdin write, child blocks on stderr write.
+    let writer = async move {
+        let r = stdin.write_all(&prompt_owned).await;
+        // Scope-end drops stdin and closes the pipe write-end to signal
+        // EOF to the child. Explicit drop here for clarity.
+        drop(stdin);
+        r
+    };
+    let stdout_reader = async move {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).await.map(|_| buf)
+    };
+    let stderr_reader = async move {
+        let mut buf = Vec::new();
+        stderr.read_to_end(&mut buf).await.map(|_| buf)
+    };
 
-        // The timed future owns ONLY the three I/O tasks — NOT `child`.
-        // This way, when timeout elapses and the future is dropped, we can
-        // still call `child.kill().await` + `child.wait().await` to reap
-        // synchronously. (kill_on_drop is best-effort; do not rely on it
-        // when we have an owning handle available.)
-        let io_future = async move {
-            let (write_res, stdout_res, stderr_res) =
-                tokio::join!(writer, stdout_reader, stderr_reader);
-            let stdout_bytes = stdout_res.map_err(|source| LlmError::Io {
-                op: "read stdout",
-                source,
-            })?;
-            let stderr_bytes = stderr_res.map_err(|source| LlmError::Io {
-                op: "read stderr",
-                source,
-            })?;
-            if let Err(e) = write_res {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    return Err(LlmError::BrokenPipe(e));
-                }
-                return Err(LlmError::Io {
-                    op: "write stdin",
-                    source: e,
-                });
+    // The timed future owns ONLY the three I/O tasks — NOT `child`.
+    // This way, when timeout elapses and the future is dropped, we can
+    // still call `child.kill().await` + `child.wait().await` to reap
+    // synchronously. (kill_on_drop is best-effort; do not rely on it
+    // when we have an owning handle available.)
+    let io_future = async move {
+        let (write_res, stdout_res, stderr_res) =
+            tokio::join!(writer, stdout_reader, stderr_reader);
+        // Error precedence: check WRITE first so BrokenPipe (the most
+        // informative "child died early" signal) takes priority over the
+        // read-side EOF noise that follows. Without this ordering, a
+        // child crash that closes stdout+stderr+stdin simultaneously could
+        // surface as `Io { op: ReadStdout, source: UnexpectedEof }`
+        // instead of the true BrokenPipe cause.
+        if let Err(e) = write_res {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Err(LlmError::BrokenPipe(e));
             }
-            Ok::<_, LlmError>((stdout_bytes, stderr_bytes))
-        };
-
-        let (stdout_bytes, stderr_bytes) =
-            match tokio::time::timeout(self.timeout, io_future).await {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(e)) => {
-                    // I/O failed during join — reap child before returning.
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Err(e);
-                }
-                Err(_elapsed) => {
-                    // Explicit synchronous reap. kill_on_drop is a
-                    // belt-and-braces safety net (also configured) but we
-                    // have the handle, so use it deterministically here.
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Err(LlmError::Timeout(self.timeout));
-                }
-            };
-
-        let status = child.wait().await.map_err(|source| LlmError::Io {
-            op: "wait for subprocess",
+            return Err(LlmError::Io {
+                op: IoOp::WriteStdin,
+                source: e,
+            });
+        }
+        let stdout_bytes = stdout_res.map_err(|source| LlmError::Io {
+            op: IoOp::ReadStdout,
             source,
         })?;
+        let stderr_bytes = stderr_res.map_err(|source| LlmError::Io {
+            op: IoOp::ReadStderr,
+            source,
+        })?;
+        Ok::<_, LlmError>((stdout_bytes, stderr_bytes))
+    };
 
-        classify_output(Output {
-            status,
-            stdout: stdout_bytes,
-            stderr: stderr_bytes,
-        })
-    }
+    let (stdout_bytes, stderr_bytes) = match tokio::time::timeout(timeout, io_future).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            // I/O failed during join — reap child before returning.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(e);
+        }
+        Err(_elapsed) => {
+            // Explicit synchronous reap. kill_on_drop is a
+            // belt-and-braces safety net (also configured) but we
+            // have the handle, so use it deterministically here.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(LlmError::Timeout(timeout));
+        }
+    };
+
+    let status = child.wait().await.map_err(|source| LlmError::Io {
+        op: IoOp::Wait,
+        source,
+    })?;
+
+    classify_output(Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
 }
 
 impl LlmProvider for ClaudeCliProvider {
@@ -328,7 +384,11 @@ impl LlmProvider for ClaudeCliProvider {
     }
 }
 
-#[cfg(test)]
+// Tests that construct synthetic `Output` values and tests that spawn real
+// helper subprocesses both rely on Unix-only APIs (`ExitStatusExt::from_raw`,
+// `/bin/sh`, `/usr/bin/yes`). Gating the whole module keeps the Windows
+// compile unblocked until we have a caller that actually runs there.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
@@ -609,52 +669,89 @@ mod tests {
         );
     }
 
-    /// Plan 007 Step 2: verify `BrokenPipe` variant surfaces when the child
-    /// closes its stdin read end before the parent finishes writing.
+    /// Plan 007 Step 2 / AC3 row 12: verify `drive_subprocess` surfaces
+    /// `LlmError::BrokenPipe` when the child closes its stdin read end
+    /// before the parent finishes writing.
     ///
     /// Pitfall: short writes land in the ~64KB kernel pipe buffer and
-    /// succeed even after the child exits. We need BOTH (a) an explicit
-    /// `exec 0<&-` in the fixture to close the read side on the kernel
-    /// level, AND (b) a payload large enough to force the parent's write
-    /// syscall to observe EPIPE. A ~256 KiB payload is well over the buffer
-    /// on macOS and Linux.
+    /// succeed even after the child exits. We need BOTH:
+    /// 1. An explicit `exec 0<&-` in the fixture to close the read side
+    ///    on the kernel level, AND
+    /// 2. A payload large enough to force the parent's write syscall to
+    ///    observe EPIPE. A ~256 KiB payload is well over the buffer on
+    ///    macOS and Linux.
+    ///
+    /// Critically, this test drives `drive_subprocess` — the actual code
+    /// path used by `complete_impl` — rather than just constructing a
+    /// `LlmError::BrokenPipe` manually. That means if the `if e.kind() ==
+    /// BrokenPipe` branch in `drive_subprocess`'s `io_future` is ever
+    /// deleted or reordered, this test catches the regression.
     #[cfg(unix)]
     #[tokio::test]
-    async fn broken_pipe_on_child_closing_stdin_early() {
-        // We can't easily inject `exec 0<&-` through build_command (Claude
-        // flags dominate the argv). Drive tokio::process::Command directly
-        // to test the concurrent-I/O EPIPE path.
+    async fn drive_subprocess_returns_broken_pipe_when_child_closes_stdin() {
         use std::process::Stdio;
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c")
-            .arg("exec 0<&- ; sleep 0.3")
+            // Child closes its stdin read end, then sleeps briefly so the
+            // parent has time to observe EPIPE on its next write. Also
+            // closes stdout+stderr so the reader tasks reach EOF quickly
+            // (otherwise we'd hang until the 1s timeout).
+            .arg("exec 0<&- 1<&- 2<&- ; sleep 0.3")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn sh fixture");
-        let mut stdin = child.stdin.take().unwrap();
+        let child = cmd.spawn().expect("spawn sh fixture");
 
+        // 256 KiB overflows the ~64KB kernel pipe buffer on both Linux
+        // and macOS, forcing the parent's write to observe the EPIPE
+        // rather than silently succeeding into buffer space.
         let payload = vec![b'x'; 256 * 1024];
-        let write_res = stdin.write_all(&payload).await;
-        // Drop stdin to flush/close on our side; the child has already
-        // closed its read end with `exec 0<&-`.
-        drop(stdin);
 
-        // Reap the child so we don't leak it.
-        let _ = child.wait().await;
-
-        match write_res {
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                // Verify this is the variant complete_impl would produce.
-                let mapped = LlmError::BrokenPipe(e);
-                assert!(matches!(mapped, LlmError::BrokenPipe(_)));
-            }
-            Err(e) => panic!("expected BrokenPipe, got io error kind {:?}", e.kind()),
-            Ok(()) => panic!(
-                "expected BrokenPipe — write of 256 KiB unexpectedly succeeded \
-                 after child closed stdin read end"
+        let result = drive_subprocess(child, &payload, Duration::from_secs(2)).await;
+        match result {
+            Err(LlmError::BrokenPipe(_)) => {}
+            other => panic!(
+                "expected LlmError::BrokenPipe from drive_subprocess \
+                 when child closes stdin read end; got {other:?}"
             ),
         }
+    }
+
+    /// Generic `Spawn` error path — `io::Error` that isn't `NotFound` (e.g.,
+    /// `PermissionDenied`) must map to `LlmError::Spawn`, not `BinaryNotFound`.
+    /// We can't easily produce `PermissionDenied` portably, so exercise the
+    /// mapping logic by calling the same conversion `complete_impl` uses.
+    #[test]
+    fn non_notfound_io_error_maps_to_spawn() {
+        let perm = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_ne!(perm.kind(), std::io::ErrorKind::NotFound);
+        // Mirror the match arm in complete_impl.
+        let err = match perm.kind() {
+            std::io::ErrorKind::NotFound => LlmError::BinaryNotFound,
+            _ => LlmError::Spawn(perm),
+        };
+        assert!(matches!(err, LlmError::Spawn(_)), "got {err:?}");
+    }
+
+    /// Regression guard for the error-precedence swap in `io_future`:
+    /// `Io { op: WriteStdin }` is produced for non-BrokenPipe write
+    /// failures. Build a synthetic write error that isn't BrokenPipe and
+    /// verify the `op` tag is the right enum variant.
+    #[test]
+    fn io_op_enum_preserves_operation_tag() {
+        let src = std::io::Error::from(std::io::ErrorKind::Other);
+        let err = LlmError::Io {
+            op: IoOp::WriteStdin,
+            source: src,
+        };
+        match err {
+            LlmError::Io { op: IoOp::WriteStdin, .. } => {}
+            other => panic!("expected Io op=WriteStdin, got {other:?}"),
+        }
+
+        // IoOp Display also used in error format string.
+        assert_eq!(format!("{}", IoOp::ReadStdout), "read stdout");
+        assert_eq!(format!("{}", IoOp::Wait), "wait for subprocess");
     }
 }

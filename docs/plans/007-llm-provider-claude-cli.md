@@ -81,7 +81,7 @@ Target: Claude Code CLI **2.1.x**. The flags used (`-p`, `--output-format text`,
   - `ClaudeCliConfig { cli_path: String }` — defaults `cli_path = "claude"`
   - Defaults at `[llm]` level: `provider = "claude-cli"`, `model = "claude-sonnet-4-6"`, `timeout_secs = 120`
 - [x] `MengdieConfig::load()` — reads `~/.mengdie/config.toml` if present; missing file → defaults; parse error → `anyhow::Error` whose `Display` includes the file path
-- [x] `MengdieConfig::load_with_env(env: &HashMap<String, String>) -> Result<Self>` — takes an explicit env map (not `std::env::vars()`) so tests never mutate process env. Env overrides applied after file load:
+- [x] `MengdieConfig::load_with_env(base: Self, env: &HashMap<String, String>) -> Result<Self>` — applies env overrides to a pre-loaded `base` config. Takes an explicit env map (not `std::env::vars()`) so tests never mutate process env. Kept file loading and env overlay in SEPARATE functions for testability: `load_from_process_env()` composes them for production callers. Env overrides applied:
   - `MENGDIE_LLM_PROVIDER` → `llm.provider`
   - `MENGDIE_LLM_MODEL` → `llm.model`
   - `MENGDIE_LLM_TIMEOUT_SECS` → `llm.timeout_secs`
@@ -201,7 +201,7 @@ Expected files: `src/core/llm.rs`, `src/core/mod.rs`, `Cargo.toml`
   - One `#[tokio::test] #[ignore]` **help smoke test** that shells `claude --help` and asserts each flag the provider emits is present as a substring (`"-p"`, `"--output-format"`, `"--no-session-persistence"`, `"--permission-mode"`, `"--tools"`, `"--model"`, `"--system-prompt"`). Catches CLI flag-removal as a contract break.
 - [x] Document at the top of the test file why `#[ignore]` is used: these tests require an authenticated `claude` CLI on PATH, incur LLM usage, and are skipped in default `cargo test` runs.
 - [x] Run `cargo build`, `cargo clippy`, `cargo test` — all must pass (covers the Step 2 Unix-only integration tests automatically)
-- [ ] Manually run `cargo test -- --ignored llm_claude_cli` once locally with `claude` authenticated. Record outcome (PASS / FAIL + first line of output) in the step's completion commit message.
+- [x] Manually run `cargo test -- --ignored llm_claude_cli` once locally with `claude` authenticated. Record outcome (PASS / FAIL + first line of output) in the step's completion commit message. _(Ran against claude 2.1.112; 2 passed in 7.12s — recorded in commit 8385d4d.)_
 
 Expected files: `tests/llm_claude_cli.rs`
 
