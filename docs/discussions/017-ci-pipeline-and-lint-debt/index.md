@@ -6,9 +6,9 @@ created: 2026-04-17
 pipeline:
   analyze: skipped
   discuss: done
-  plan: pending
+  plan: done
   work: pending
-plan: ""
+plan: "docs/plans/008-ci-pipeline-and-lint-debt.md"
 tags: [ci, forgejo, clippy, lint-debt, project-hygiene]
 ---
 

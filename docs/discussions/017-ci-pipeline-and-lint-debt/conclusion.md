@@ -55,9 +55,32 @@ Gemini was unavailable this session (MCP auth failure in a prior cycle, not retr
 - Doodlestein challenges: 3 raised, 3 resolved (2 adopted as plan refinements, 1 accepted with mitigation + risk monitor)
 - Deferred resolved in Sweep: 0 (no deferred items)
 
+## Addendum (2026-04-17, post-conclusion revision)
+
+Two decisions were revised by the user after this conclusion was written. The revisions are incorporated directly into the downstream plan; both amount to "TL missed these during scoring, user caught them."
+
+### Revision 1: Add local pre-commit hook
+**Original**: "Pre-commit hooks: out of scope for this discussion. That's a local developer ergonomics choice, not a CI concern." (topic-01)
+
+**Revised**: Add `.githooks/pre-commit` shell script running `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. `cargo test` NOT in the hook (fastembed cold-start too slow). Install via `git config core.hooksPath .githooks` (one-time per clone). Rationale: AI-agent commit velocity is high; relying only on CI for lint means every red commit enters the graph and pollutes history. CLAUDE.md already says "NEVER skip hooks (--no-verify)" — the codebase ethos treats hooks as hard gates, not advisory. The "local ergonomics" framing was wrong for this workflow.
+
+### Revision 2: Drop `rust-toolchain.toml` pin AND `rust-version` MSRV
+**Original**: "Pin `rust-toolchain.toml` to `channel = "1.94.1"`, `profile = "minimal"`, `components = ["rustfmt", "clippy"]`." (topic-03, decided after Round 2 tension on `stable` vs exact)
+
+**Revised**: Do NOT pin the toolchain. Do NOT add `rust-version` to Cargo.toml. Rationale: (a) pinning blocks new clippy lints from firing on agent-written code, which is the one type of automated code review we most benefit from; (b) `rust-version` MSRV is meaningful only for crates published to crates.io or with downstream consumers — mengdie is a solo-dev tool with neither, so it's decorative; (c) the ~5-min-every-6-weeks cost of an unexpected CI red from a new stable release is lower than the permanent cost of staleness. When a new lint fires, **default action is to fix the code** — `#[allow(...)]` is last resort.
+
+**`#[allow(...)]` policy (clarified by user)**: `#[allow]` is LAST RESORT, not the default escape hatch. Reach order: (1) fix the code, (2) if the lint is a genuine false positive or blocked by external constraint (macro we don't own, upstream API), then `#[allow]` with a comment explaining the specific reason. Every `#[allow]` in the tree is reviewable debt; code review should question each one. Do not treat `#[allow]` as "CI is annoying, turn off the warning."
+
+Doodlestein-regret's prediction that `-D warnings` would flip turns out to be partially vindicated: the mitigation we chose (pin the version) was itself wrong, and removing it reveals the real mitigation is the `#[allow]` escape hatch, which was always there.
+
+### What the plan should do
+
+1. **Big-bang clippy cleanup** — fix all 10 items. Keep `cargo test` green. One atomic commit.
+2. **Local pre-commit hook** — add `.githooks/pre-commit` + one-line install instructions; runs `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. User runs `git config core.hooksPath .githooks` once.
+3. **CI workflow** — add `.forgejo/workflows/ci.yml` triggering on push (all branches) + pull_request. Same fmt/clippy/test checks as the hook, plus `cargo test` which the hook skips. Host Rust via `source ~/.cargo/env` (pattern from release.yml). No `rust-toolchain.toml`, no `rustup show` step (only needed if pinning), no `rust-version`.
+4. **Trim release.yml** — remove the redundant `test:` job once ci.yml is green.
+5. **Verify + monitor** — first 5 runs, fastembed cache behavior, document any `#[allow]` additions.
+
 ## Next Steps
 
-→ `/ae:plan` — plan file should sequence three commits (not one monolithic):
-  1. **Big-bang clippy cleanup** — fix all 10 items. Keep `cargo test` green at each step or one atomic commit.
-  2. **Add rust-toolchain.toml + ci.yml + remove release.yml test job** (bundle tooling-additive changes; the pin is only meaningful once ci.yml actually enforces it).
-  3. **Verify + monitor** — watch first 5 CI runs, confirm fastembed cache behavior, document any `#[allow(...)]` additions.
+→ `/ae:plan` — see "What the plan should do" above. Follow the 5-step structure from the addendum, not the original 3-step proposal.
