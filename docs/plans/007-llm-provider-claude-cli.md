@@ -96,9 +96,10 @@ Target: Claude Code CLI **2.1.x**. The flags used (`-p`, `--output-format text`,
 
 Expected files: `Cargo.toml`, `src/core/config.rs`, `src/core/mod.rs`
 
-### Step 2: LLM trait + Claude CLI provider + error classification (AC1, AC3)
-- [ ] Add module declaration `pub mod llm;` to `src/core/mod.rs`
-- [ ] Create `src/core/llm.rs` with the error enum. **No `async-trait` crate** — project already uses stable Rust 1.75+ `async fn` in traits. `thiserror = "2"` already in deps; use the `2.x` derive syntax.
+### Step 2: LLM trait + Claude CLI provider + error classification (AC1, AC3) — DONE 9d404b4
+
+- [x] Add module declaration `pub mod llm;` to `src/core/mod.rs`
+- [x] Create `src/core/llm.rs` with the error enum. **No `async-trait` crate** — project already uses stable Rust 1.75+ `async fn` in traits. `thiserror = "2"` already in deps; use the `2.x` derive syntax.
   ```rust
   #[derive(Debug, thiserror::Error)]
   pub enum LlmError {
@@ -129,7 +130,7 @@ Expected files: `Cargo.toml`, `src/core/config.rs`, `src/core/mod.rs`
   - `Network`: `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `connection refused`, `connection reset`
   - `Model`: `model not found`, `unsupported model`
   - `Other`: everything else
-- [ ] Define the trait. Use boxed-future return so `Box<dyn LlmProvider>` is object-safe (BL-007 will need to store the provider behind a trait object under shared state):
+- [x] Define the trait. Use boxed-future return so `Box<dyn LlmProvider>` is object-safe (BL-007 will need to store the provider behind a trait object under shared state):
   ```rust
   use std::future::Future;
   use std::pin::Pin;
@@ -143,7 +144,7 @@ Expected files: `Cargo.toml`, `src/core/config.rs`, `src/core/mod.rs`
       fn model(&self) -> &str;
   }
   ```
-- [ ] `ClaudeCliProvider { cli_path: PathBuf, model: String, timeout: Duration }` with:
+- [x] `ClaudeCliProvider { cli_path: PathBuf, model: String, timeout: Duration }` with:
   - `pub fn from_config(cfg: &LlmConfig) -> Self` — reads `cfg.claude_cli.cli_path` for the binary path
   - `pub(crate) fn build_command(&self, system: &str, prompt_stdin: bool) -> tokio::process::Command` — returns a configured `Command` with argv and `.kill_on_drop(true)` and `.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())`. Argv (**order-sensitive**):
     ```
@@ -167,25 +168,25 @@ Expected files: `Cargo.toml`, `src/core/config.rs`, `src/core/mod.rs`
        - `Some(0)` → validate UTF-8 → empty check → `Ok(String)`
        - `Some(code)` → regex-classify stderr → `NonZeroExit { code, stderr, kind }`
        - `None` → `Signal` (Unix: process terminated by signal; on Windows, unreachable via normal flow)
-- [ ] Unit test (pure): `classify_output` happy path — exit 0, stdout = `"hello\n"` → `Ok("hello\n")`
-- [ ] Unit test (pure): `classify_output` exit 0, stdout = `""` → `EmptyOutput`
-- [ ] Unit test (pure): `classify_output` exit 0, stdout = `[0xFF, 0xFE, 0xFD]` → `InvalidUtf8`
-- [ ] Unit test (pure): `classify_output` exit 1, stderr = `"Invalid API key"` → `NonZeroExit { code: 1, kind: Auth, .. }`
-- [ ] Unit test (pure): `classify_output` exit 1, stderr = `"API Error: 429 rate_limit"` → `NonZeroExit { kind: RateLimited, .. }`
-- [ ] Unit test (pure): `classify_output` exit 1, stderr = `"ECONNRESET"` → `NonZeroExit { kind: Network, .. }`
-- [ ] Unit test (pure): `classify_output` exit 1, stderr = `"model not found: claude-zzz"` → `NonZeroExit { kind: Model, .. }`
-- [ ] Unit test (pure): `classify_output` exit 1, stderr = `"weird error"` → `NonZeroExit { kind: Other, .. }`
-- [ ] Unit test (pure): `classify_output` signal exit (`status.code() = None`) → `Signal`
-- [ ] Unit test (`build_command`): argv matches the exact order above when `system = "answer in JSON"`, `model = "claude-sonnet-4-6"`, `cli_path = "/usr/bin/claude"`
-- [ ] Unit test (`build_command`): pathological system prompt (contains `"`, newlines, a trailing backslash — e.g. `"say \"hi\"\nworld\\"`) is passed as **one** argv element (confirm by counting argv length is identical to happy-path case). Not shell-escaped — `tokio::process::Command` bypasses the shell.
-- [ ] Unit test (trait object-safety, compile-only): `let _: Box<dyn LlmProvider> = Box::new(ClaudeCliProvider::from_config(&LlmConfig::default()));`
-- [ ] Unit test (`from_config`): timeout, model, cli_path are applied correctly (including nested `claude_cli.cli_path`)
-- [ ] Unix-only integration test (behind `#[cfg(unix)]`, non-ignored — runs in CI): verify `BrokenPipe` variant surfaces when the child closes stdin before the parent finishes writing. The naive fixture `/bin/sh -c "exit 0"` is NOT reliable — short writes land in the 64KB kernel pipe buffer and succeed even after the child exits. Two-part approach:
+- [x] Unit test (pure): `classify_output` happy path — exit 0, stdout = `"hello\n"` → `Ok("hello\n")`
+- [x] Unit test (pure): `classify_output` exit 0, stdout = `""` → `EmptyOutput`
+- [x] Unit test (pure): `classify_output` exit 0, stdout = `[0xFF, 0xFE, 0xFD]` → `InvalidUtf8`
+- [x] Unit test (pure): `classify_output` exit 1, stderr = `"Invalid API key"` → `NonZeroExit { code: 1, kind: Auth, .. }`
+- [x] Unit test (pure): `classify_output` exit 1, stderr = `"API Error: 429 rate_limit"` → `NonZeroExit { kind: RateLimited, .. }`
+- [x] Unit test (pure): `classify_output` exit 1, stderr = `"ECONNRESET"` → `NonZeroExit { kind: Network, .. }`
+- [x] Unit test (pure): `classify_output` exit 1, stderr = `"model not found: claude-zzz"` → `NonZeroExit { kind: Model, .. }`
+- [x] Unit test (pure): `classify_output` exit 1, stderr = `"weird error"` → `NonZeroExit { kind: Other, .. }`
+- [x] Unit test (pure): `classify_output` signal exit (`status.code() = None`) → `Signal`
+- [x] Unit test (`build_command`): argv matches the exact order above when `system = "answer in JSON"`, `model = "claude-sonnet-4-6"`, `cli_path = "/usr/bin/claude"`
+- [x] Unit test (`build_command`): pathological system prompt (contains `"`, newlines, a trailing backslash — e.g. `"say \"hi\"\nworld\\"`) is passed as **one** argv element (confirm by counting argv length is identical to happy-path case). Not shell-escaped — `tokio::process::Command` bypasses the shell.
+- [x] Unit test (trait object-safety, compile-only): `let _: Box<dyn LlmProvider> = Box::new(ClaudeCliProvider::from_config(&LlmConfig::default()));`
+- [x] Unit test (`from_config`): timeout, model, cli_path are applied correctly (including nested `claude_cli.cli_path`)
+- [x] Unix-only integration test (behind `#[cfg(unix)]`, non-ignored — runs in CI): verify `BrokenPipe` variant surfaces when the child closes stdin before the parent finishes writing. The naive fixture `/bin/sh -c "exit 0"` is NOT reliable — short writes land in the 64KB kernel pipe buffer and succeed even after the child exits. Two-part approach:
   1. Fixture: `/bin/sh -c "exec 0<&- ; sleep 0.2"` — child explicitly closes its read end of the pipe, then sleeps. Any subsequent write to that pipe will get `EPIPE` on the next syscall once the kernel notices.
   2. Write a large-enough payload (≥128 KiB of bytes — generate with `"x".repeat(128 * 1024)`) in a loop, not a single call. Short writes that fit in the kernel buffer silently succeed; the payload must exceed the buffer OR the syscall must happen after the kernel has delivered the close.
   3. Assert the error is `LlmError::BrokenPipe(_)`.
   If a deterministic reproduction still proves flaky on macOS across runs, demote this test to `#[ignore]` and keep AC3 row 12 as an opt-in check rather than CI-enforced. Do not leave the test passing by accident — either it reliably hits `BrokenPipe` or it's explicitly opt-in.
-- [ ] Unix-only integration test (non-ignored): spawn `/bin/sh -c "sleep 5"` with 100ms timeout → verify `Timeout` returned AND that `child.wait()` is called (no zombie — check by completing the test without hanging).
+- [x] Unix-only integration test (non-ignored): spawn `/bin/sh -c "sleep 5"` with 100ms timeout → verify `Timeout` returned AND that `child.wait()` is called (no zombie — check by completing the test without hanging).
 
 Expected files: `src/core/llm.rs`, `src/core/mod.rs`, `Cargo.toml`
 
