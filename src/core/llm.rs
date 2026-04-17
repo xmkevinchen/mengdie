@@ -36,6 +36,9 @@ pub enum ExitKind {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
+    #[error("unknown llm.provider value: {0:?} (known: \"claude-cli\")")]
+    UnknownProvider(String),
+
     #[error("claude CLI binary not found at configured path")]
     BinaryNotFound,
 
@@ -149,6 +152,32 @@ pub trait LlmProvider: Send + Sync {
     fn complete<'a>(&'a self, system: &'a str, prompt: &'a str) -> LlmFuture<'a>;
     fn model(&self) -> &str;
 }
+
+/// The canonical entry point for Phase 2 callers. Dispatches on
+/// `cfg.llm.provider` and returns a boxed provider. Today only
+/// `"claude-cli"` is supported; other provider strings yield
+/// `LlmError::UnknownProvider` so misconfiguration surfaces at startup
+/// rather than silently building a Claude provider.
+pub fn build_provider(cfg: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
+    match cfg.provider.as_str() {
+        "claude-cli" => Ok(Box::new(ClaudeCliProvider::from_config(cfg))),
+        other => Err(LlmError::UnknownProvider(other.to_string())),
+    }
+}
+
+/// Canonical list of flags `ClaudeCliProvider::build_command` emits.
+/// Single source of truth so the opt-in help-smoke test can pin the
+/// argv contract without duplicating the flag list. (Codex accumulated
+/// review flagged drift risk between test and implementation.)
+pub const CLAUDE_CLI_FLAGS: &[&str] = &[
+    "-p",
+    "--output-format",
+    "--no-session-persistence",
+    "--permission-mode",
+    "--tools",
+    "--model",
+    "--system-prompt",
+];
 
 pub struct ClaudeCliProvider {
     cli_path: PathBuf,
@@ -488,6 +517,43 @@ mod tests {
     fn trait_is_object_safe() {
         let _: Box<dyn LlmProvider> =
             Box::new(ClaudeCliProvider::from_config(&LlmConfig::default()));
+    }
+
+    #[test]
+    fn build_provider_claude_cli_returns_provider() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.provider, "claude-cli");
+        let provider = build_provider(&cfg).expect("claude-cli should resolve");
+        assert_eq!(provider.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn build_provider_rejects_unknown_provider() {
+        let cfg = LlmConfig {
+            provider: "openai".into(),
+            ..LlmConfig::default()
+        };
+        // Can't use unwrap_err — Box<dyn LlmProvider> is not Debug.
+        match build_provider(&cfg) {
+            Err(LlmError::UnknownProvider(name)) => assert_eq!(name, "openai"),
+            Err(other) => panic!("expected UnknownProvider, got {other:?}"),
+            Ok(_) => panic!("expected UnknownProvider, got Ok"),
+        }
+    }
+
+    #[test]
+    fn claude_cli_flags_constant_matches_build_command_argv() {
+        // Guard against flag drift: every entry in CLAUDE_CLI_FLAGS must
+        // appear (exactly) as an argv element produced by build_command.
+        let p = provider_for("claude", "claude-sonnet-4-6");
+        let argv = argv_of(&p.build_command("sys"));
+        for flag in CLAUDE_CLI_FLAGS {
+            assert!(
+                argv.iter().any(|a| a == flag),
+                "CLAUDE_CLI_FLAGS contains {flag:?} but build_command argv does not — \
+                 update either the constant or build_command. argv was: {argv:?}"
+            );
+        }
     }
 
     // ---- subprocess lifecycle (Unix-only integration) ----

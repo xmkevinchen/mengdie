@@ -19,7 +19,7 @@
 use tokio::process::Command;
 
 use mengdie::core::config::{ClaudeCliConfig, LlmConfig};
-use mengdie::core::llm::{ClaudeCliProvider, LlmProvider};
+use mengdie::core::llm::{ClaudeCliProvider, LlmProvider, CLAUDE_CLI_FLAGS};
 
 /// Returns true if `claude` binary is discoverable on PATH.
 async fn claude_on_path() -> bool {
@@ -90,15 +90,10 @@ async fn help_output_contains_all_flags_we_emit() {
     let help_text = String::from_utf8_lossy(&output.stdout).into_owned()
         + &String::from_utf8_lossy(&output.stderr);
 
-    for flag in [
-        "-p",
-        "--output-format",
-        "--no-session-persistence",
-        "--permission-mode",
-        "--tools",
-        "--model",
-        "--system-prompt",
-    ] {
+    // Single source of truth: src/core/llm.rs::CLAUDE_CLI_FLAGS. If
+    // build_command ever drops or renames a flag, update that constant
+    // in one place and this test stays in sync.
+    for flag in CLAUDE_CLI_FLAGS {
         assert!(
             help_text.contains(flag),
             "`claude --help` output does not contain flag {flag:?} — \
