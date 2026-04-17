@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# mengdie pre-commit hook — see .githooks/README.md
+#
+# Blocks commits that fail `cargo fmt --check` or `cargo clippy -D warnings`.
+# Does NOT run `cargo test` — cold fastembed download would make commits
+# unbearable; `cargo test` is CI's job.
+#
+# To bypass: fix the issue. `--no-verify` is NOT a normal escape hatch per
+# project CLAUDE.md.
+
+set -e
+
+# Use rustup env if present so the hook picks up the user's active toolchain.
+if [[ -f "${HOME}/.cargo/env" ]]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/.cargo/env"
+fi
+
+echo "[pre-commit] cargo fmt --check..."
+if ! cargo fmt --all -- --check; then
+    echo
+    echo "[pre-commit] ✗ formatting drift. Run \`cargo fmt --all\` and re-stage."
+    exit 1
+fi
+
+echo "[pre-commit] cargo clippy --all-targets -- -D warnings..."
+if ! cargo clippy --all-targets --quiet -- -D warnings; then
+    echo
+    echo "[pre-commit] ✗ clippy violations. Fix the warnings above — \`#[allow]\` is LAST RESORT."
+    exit 1
+fi
+
+echo "[pre-commit] ✓ clean"

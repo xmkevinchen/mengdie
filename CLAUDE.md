@@ -80,6 +80,14 @@ cargo test               # Run all tests
 cargo clippy             # Lint
 ```
 
+**After every fresh clone**, enable project git hooks once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The `.githooks/pre-commit` hook runs `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` (not `cargo test` — that's CI's job). See `.githooks/README.md` for details. `--no-verify` is NOT a normal escape hatch — fix the issue, don't skip.
+
 Key conventions:
 - All logging via `tracing` → stderr (never stdout — stdio is MCP transport)
 - fastembed inference is sync/blocking — wrap in `tokio::task::spawn_blocking`
