@@ -4,6 +4,7 @@ pub mod db;
 pub mod dreaming;
 pub mod embeddings;
 pub mod ingest;
+pub mod llm;
 pub mod mcp_tools;
 pub mod metrics;
 pub mod parser;

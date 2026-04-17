@@ -1334,6 +1334,7 @@ dependencies = [
  "fastembed",
  "notify",
  "notify-debouncer-mini",
+ "regex",
  "rmcp",
  "rusqlite",
  "serde",
