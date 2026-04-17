@@ -63,9 +63,9 @@ Target: Claude Code CLI **2.1.x**. The flags used (`-p`, `--output-format text`,
 
 ## Steps
 
-### Step 1: Nested config scaffolding (AC2)
-- [ ] Add `toml = "0.8"` to `Cargo.toml` dependencies
-- [ ] Create `src/core/config.rs` with nested shape — generic defaults in `[llm]`, provider-specific overrides in `[llm.<provider>]`:
+### Step 1: Nested config scaffolding (AC2) — DONE b19e61e
+- [x] Add `toml = "0.8"` to `Cargo.toml` dependencies
+- [x] Create `src/core/config.rs` with nested shape — generic defaults in `[llm]`, provider-specific overrides in `[llm.<provider>]`:
   ```toml
   [llm]
   provider = "claude-cli"
@@ -80,19 +80,19 @@ Target: Claude Code CLI **2.1.x**. The flags used (`-p`, `--output-format text`,
   - `LlmConfig { provider: String, model: String, timeout_secs: u64, claude_cli: ClaudeCliConfig }` — all fields `#[serde(default)]` so partial TOML works
   - `ClaudeCliConfig { cli_path: String }` — defaults `cli_path = "claude"`
   - Defaults at `[llm]` level: `provider = "claude-cli"`, `model = "claude-sonnet-4-6"`, `timeout_secs = 120`
-- [ ] `MengdieConfig::load()` — reads `~/.mengdie/config.toml` if present; missing file → defaults; parse error → `anyhow::Error` whose `Display` includes the file path
-- [ ] `MengdieConfig::load_with_env(env: &HashMap<String, String>) -> Result<Self>` — takes an explicit env map (not `std::env::vars()`) so tests never mutate process env. Env overrides applied after file load:
+- [x] `MengdieConfig::load()` — reads `~/.mengdie/config.toml` if present; missing file → defaults; parse error → `anyhow::Error` whose `Display` includes the file path
+- [x] `MengdieConfig::load_with_env(env: &HashMap<String, String>) -> Result<Self>` — takes an explicit env map (not `std::env::vars()`) so tests never mutate process env. Env overrides applied after file load:
   - `MENGDIE_LLM_PROVIDER` → `llm.provider`
   - `MENGDIE_LLM_MODEL` → `llm.model`
   - `MENGDIE_LLM_TIMEOUT_SECS` → `llm.timeout_secs`
   - `MENGDIE_LLM_CLAUDE_CLI_PATH` → `llm.claude_cli.cli_path` (provider-namespaced; no bare `CLAUDE_CLI_PATH`)
-- [ ] Thin wrapper `MengdieConfig::load_from_process_env()` collects `std::env::vars()` into the map and calls `load_with_env` (callers in production use this).
-- [ ] Register module: add `pub mod config;` to `src/core/mod.rs`
-- [ ] Unit test: missing file → all defaults
-- [ ] Unit test: TOML with only `[llm] model = "claude-haiku-4-5"` returns that model, all other fields default, `claude_cli.cli_path = "claude"`
-- [ ] Unit test: TOML with `[llm.claude_cli] cli_path = "/opt/bin/claude"` applies
-- [ ] Unit test: env map override wins over file value (no `std::env::set_var` — use the explicit-env API)
-- [ ] Unit test: malformed TOML → `Err` whose `Display` contains the file path
+- [x] Thin wrapper `MengdieConfig::load_from_process_env()` collects `std::env::vars()` into the map and calls `load_with_env` (callers in production use this).
+- [x] Register module: add `pub mod config;` to `src/core/mod.rs`
+- [x] Unit test: missing file → all defaults
+- [x] Unit test: TOML with only `[llm] model = "claude-haiku-4-5"` returns that model, all other fields default, `claude_cli.cli_path = "claude"`
+- [x] Unit test: TOML with `[llm.claude_cli] cli_path = "/opt/bin/claude"` applies
+- [x] Unit test: env map override wins over file value (no `std::env::set_var` — use the explicit-env API)
+- [x] Unit test: malformed TOML → `Err` whose `Display` contains the file path
 
 Expected files: `Cargo.toml`, `src/core/config.rs`, `src/core/mod.rs`
 
