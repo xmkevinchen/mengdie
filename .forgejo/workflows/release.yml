@@ -11,6 +11,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Belt-and-braces gate: ci.yml already runs fmt/clippy/test on every
+      # push, so the commit this tag points to WAS tested. But release.yml
+      # can fire independently of ci.yml (tag push races, forgejo queue
+      # reordering, manually-created tags), so we re-validate here too.
+      # Removing the standalone `test:` job alone would leave the
+      # build-linux flow unguarded if ci.yml didn't run — this inline gate
+      # closes that window.
+      - name: Ensure rustfmt + clippy components
+        run: |
+          source ~/.cargo/env
+          rustup component add rustfmt clippy
+
+      - name: Format check
+        run: |
+          source ~/.cargo/env
+          cargo fmt --all -- --check
+
+      - name: Clippy
+        run: |
+          source ~/.cargo/env
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: |
+          source ~/.cargo/env
+          cargo test
+
       - name: Build release binaries
         run: |
           source ~/.cargo/env
@@ -47,13 +74,3 @@ jobs:
               -H "Content-Type: application/octet-stream" \
               --data-binary @"${file}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  -> {d.get(\"name\",\"?\")} ({d.get(\"size\",0)} bytes)')"
           done
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run tests
-        run: |
-          source ~/.cargo/env
-          cargo test 2>&1

@@ -1,0 +1,63 @@
+name: CI
+
+# Fires on every push (all branches — tag refs inherently excluded because
+# `branches:` filters branch refs only) and on pull_request events. The
+# tag-release path is handled by release.yml, not here.
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo + fastembed model
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.cache/fastembed
+          key: rust-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-cache-${{ runner.os }}-
+
+      - name: Ensure rustfmt + clippy components
+        # Idempotent component install — we don't pin a toolchain version
+        # (no rust-toolchain.toml) but we DO need these two components to
+        # be present on the runner. rustup noops if they're already there.
+        run: |
+          source ~/.cargo/env
+          rustup component add rustfmt clippy
+
+      - name: Toolchain version log
+        # Sanity log only — not a guard. Helps debug CI-vs-local mismatches.
+        run: |
+          source ~/.cargo/env
+          rustc --version
+          cargo fmt --version
+          cargo clippy --version
+
+      - name: Format check
+        run: |
+          source ~/.cargo/env
+          cargo fmt --all -- --check
+
+      - name: Clippy
+        run: |
+          source ~/.cargo/env
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: |
+          source ~/.cargo/env
+          cargo test
