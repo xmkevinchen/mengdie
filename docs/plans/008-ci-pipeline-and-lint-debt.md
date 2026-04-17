@@ -21,23 +21,23 @@ Close the "commits land untested" gap: clean the pre-existing clippy debt, insta
 
 ## Steps
 
-### Step 1: Big-bang clippy cleanup (AC1)
+### Step 1: Big-bang clippy cleanup (AC1) — DONE 0adfe37
 
 Fix all 10 clippy items surveyed by rust-archaeologist during discussion 017. One atomic commit. Tests must stay green throughout. **Zero new `#[allow(...)]` attributes** — every item gets a real fix.
 
-- [ ] **Hard error** — `src/core/embeddings.rs:116`: replace `3.14159` literal with `std::f32::consts::PI` in the test vec.
-- [ ] **Trivial** — `src/core/embeddings.rs:75`: `blob.len() % 4 == 0` → `blob.len().is_multiple_of(4)`.
-- [ ] **Trivial** — `src/core/db.rs:146`: remove redundant closure `|row| row_to_entry(row)` → `row_to_entry`.
-- [ ] **Trivial** — `src/core/db.rs:296`: same redundant closure pattern → remove.
-- [ ] **Trivial** — `src/core/schema.rs:122`: collapse nested `if current_version < 3 { if !column_exists(...) {` into `&&` form.
-- [ ] **Trivial** — `src/core/search.rs:141`: `.min(1.0).max(0.0)` → `.clamp(0.0, 1.0)`.
-- [ ] **Trivial** — `src/core/search.rs:270`: `results[0].id.len() > 0` → `!results[0].id.is_empty()`.
-- [ ] **Trivial** — `src/bin/cli.rs:309`: `println!("... {}", "Source")` with empty format string → inline `"Source"` literal.
-- [ ] **Needs-thought** — `src/core/project.rs:58/60/61/62`: 4 × `manual_strip`. Current code: `if val.starts_with('"')` then slice `val[1..]` + scan ahead for closing quote. Clippy's direct suggestion (`strip_prefix('"')`) is NOT a drop-in — it removes the leading quote but doesn't find the closing quote. Dependency-analyst verified: the correct refactor is `strip_prefix('"').and_then(|s| s.find('"').map(|end| &s[..end]))` (analogously for `'`). Must preserve behavior exactly.
-- [ ] **New unit test (required, not optional)**: Add a test covering the TOML-ish quoted-value parse path in `project.rs` with at least one input containing an escaped quote inside the value (e.g., `name = "foo\"bar"`) and one Unicode input. Write the test BEFORE the refactor, capture current output, run AFTER the refactor, assert identical output. This test is load-bearing for the `manual_strip` change — do not skip.
-- [ ] **Needs-thought** — `src/bin/cli.rs:403/404`: 2 × `collapsible_match`. Nested `if let Some(rusqlite_err) = ... { if let SqliteFailure(...) = rusqlite_err {`. Collapsing flattens the intermediate binding. Confirm the merged pattern reads clearly; if not, add `#[allow(clippy::collapsible_match)]` with comment only as last resort.
-- [ ] Run `cargo fmt --all` to normalize formatting across touched files.
-- [ ] Verification: `cargo clippy --all-targets -- -D warnings` exits 0. `cargo test` still passes (128+ tests). No new `#[allow(...)]` in the diff.
+- [x] **Hard error** — `src/core/embeddings.rs:116`: replace `3.14159` literal with `std::f32::consts::PI` in the test vec.
+- [x] **Trivial** — `src/core/embeddings.rs:75`: `blob.len() % 4 == 0` → `blob.len().is_multiple_of(4)`.
+- [x] **Trivial** — `src/core/db.rs:146`: remove redundant closure `|row| row_to_entry(row)` → `row_to_entry`.
+- [x] **Trivial** — `src/core/db.rs:296`: same redundant closure pattern → remove.
+- [x] **Trivial** — `src/core/schema.rs:122`: collapse nested `if current_version < 3 { if !column_exists(...) {` into `&&` form.
+- [x] **Trivial** — `src/core/search.rs:141`: `.min(1.0).max(0.0)` → `.clamp(0.0, 1.0)`.
+- [x] **Trivial** — `src/core/search.rs:270`: `results[0].id.len() > 0` → `!results[0].id.is_empty()`.
+- [x] **Trivial** — `src/bin/cli.rs:309`: `println!("... {}", "Source")` with empty format string → inline `"Source"` literal.
+- [x] **Needs-thought** — `src/core/project.rs:58/60/61/62`: 4 × `manual_strip`. Current code: `if val.starts_with('"')` then slice `val[1..]` + scan ahead for closing quote. Clippy's direct suggestion (`strip_prefix('"')`) is NOT a drop-in — it removes the leading quote but doesn't find the closing quote. Dependency-analyst verified: the correct refactor is `strip_prefix('"').and_then(|s| s.find('"').map(|end| &s[..end]))` (analogously for `'`). Must preserve behavior exactly.
+- [x] **New unit test (required, not optional)**: Add a test covering the TOML-ish quoted-value parse path in `project.rs` with at least one input containing an escaped quote inside the value (e.g., `name = "foo\"bar"`) and one Unicode input. Write the test BEFORE the refactor, capture current output, run AFTER the refactor, assert identical output. This test is load-bearing for the `manual_strip` change — do not skip.
+- [x] **Needs-thought** — `src/bin/cli.rs:403/404`: 2 × `collapsible_match`. Nested `if let Some(rusqlite_err) = ... { if let SqliteFailure(...) = rusqlite_err {`. Collapsing flattens the intermediate binding. Confirm the merged pattern reads clearly; if not, add `#[allow(clippy::collapsible_match)]` with comment only as last resort.
+- [x] Run `cargo fmt --all` to normalize formatting across touched files.
+- [x] Verification: `cargo clippy --all-targets -- -D warnings` exits 0. `cargo test` still passes (128+ tests). No new `#[allow(...)]` in the diff.
 
 Expected files: `src/core/embeddings.rs`, `src/core/db.rs`, `src/core/schema.rs`, `src/core/search.rs`, `src/core/project.rs`, `src/bin/cli.rs`
 
