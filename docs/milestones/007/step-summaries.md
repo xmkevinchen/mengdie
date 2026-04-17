@@ -36,3 +36,20 @@
 - `classify_output` behavior is covered by unit tests in Step 2; Step 3 tests only exercise `complete()` end-to-end.
 
 **Actual files**: Cargo.toml, Cargo.lock, src/core/mod.rs, src/core/llm.rs
+
+## Step 3 — Opt-in end-to-end + help-smoke tests (commit: 8385d4d)
+**Decisions**:
+- Two `#[ignore]` tests in `tests/llm_claude_cli.rs`: real-LLM e2e call + CLI flag contract pin.
+- Help-smoke test pins the argv contract — if a future Claude Code CLI release drops any flag `build_command` emits, this test fails loudly rather than producing a confusing runtime error inside `complete()`.
+- Both tests early-return (not fail) when `claude` is not on PATH — CI-safe.
+
+**Rejected**:
+- `#[cfg(feature = "integration")]` over `#[ignore]` — would add Cargo feature churn for a single-file concern. `#[ignore]` is idiomatic and matches the repo's existing conventions.
+- Testing actual output content beyond "contains 'ok'" — LLM output is non-deterministic; tighter assertions would flake. The loose check is sufficient to prove the subprocess pipeline works end-to-end.
+
+**Cross-step deps**:
+- Locks in `ClaudeCliProvider::from_config` + `LlmProvider::complete` + argv from `build_command`. Any future refactor of those surfaces must keep the two opt-in tests passing.
+
+**Actual files**: tests/llm_claude_cli.rs
+
+**Local run**: `cargo test --test llm_claude_cli -- --ignored` → `2 passed` in 7.12s against Claude CLI 2.1.112.

@@ -190,16 +190,17 @@ Expected files: `Cargo.toml`, `src/core/config.rs`, `src/core/mod.rs`
 
 Expected files: `src/core/llm.rs`, `src/core/mod.rs`, `Cargo.toml`
 
-### Step 3: End-to-end integration test (AC1)
-- [ ] Add `tests/llm_claude_cli.rs` with:
+### Step 3: End-to-end integration test (AC1) — DONE 8385d4d
+
+- [x] Add `tests/llm_claude_cli.rs` with:
   - One `#[tokio::test] #[ignore]` end-to-end test that:
     - Checks for `claude` binary via `tokio::process::Command::new("which").arg("claude").status()`. Missing → early `return` with `eprintln!` marker, not a failure.
     - Builds `ClaudeCliProvider::from_config(&LlmConfig::default())` with `timeout_secs = 60`
     - Calls `complete(system = "Respond with exactly the word OK.", prompt = "ping")`
     - Asserts: `Ok(s)`, `!s.trim().is_empty()`, `s.to_lowercase().contains("ok")` within first 40 chars
   - One `#[tokio::test] #[ignore]` **help smoke test** that shells `claude --help` and asserts each flag the provider emits is present as a substring (`"-p"`, `"--output-format"`, `"--no-session-persistence"`, `"--permission-mode"`, `"--tools"`, `"--model"`, `"--system-prompt"`). Catches CLI flag-removal as a contract break.
-- [ ] Document at the top of the test file why `#[ignore]` is used: these tests require an authenticated `claude` CLI on PATH, incur LLM usage, and are skipped in default `cargo test` runs.
-- [ ] Run `cargo build`, `cargo clippy`, `cargo test` — all must pass (covers the Step 2 Unix-only integration tests automatically)
+- [x] Document at the top of the test file why `#[ignore]` is used: these tests require an authenticated `claude` CLI on PATH, incur LLM usage, and are skipped in default `cargo test` runs.
+- [x] Run `cargo build`, `cargo clippy`, `cargo test` — all must pass (covers the Step 2 Unix-only integration tests automatically)
 - [ ] Manually run `cargo test -- --ignored llm_claude_cli` once locally with `claude` authenticated. Record outcome (PASS / FAIL + first line of output) in the step's completion commit message.
 
 Expected files: `tests/llm_claude_cli.rs`
