@@ -138,7 +138,7 @@ impl Db {
         let mut results = Vec::new();
         for (id, score) in &top_ids {
             if let Some(entry) = self.get_memory(id)? {
-                let normalized = (*score / RRF_MAX).min(1.0).max(0.0);
+                let normalized = (*score / RRF_MAX).clamp(0.0, 1.0);
                 let boosted = if entry.is_longterm {
                     (normalized * LONGTERM_BOOST).min(1.0)
                 } else {
@@ -156,7 +156,11 @@ impl Db {
         }
 
         // Re-sort after boost may have changed ordering
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(results)
     }
@@ -199,24 +203,36 @@ mod tests {
         Db::open_in_memory().unwrap()
     }
 
-    fn insert_test_memory(db: &Db, project: &str, title: &str, content: &str, entities: &str, embedding: &[f32]) -> String {
-        let id = db.insert_memory(NewMemory {
-            project_id: project.to_string(),
-            source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: title.to_string(),
-            content: content.to_string(),
-            entities: entities.to_string(),
-            embedding: Some(embedding_to_blob(embedding)),
-            embedding_dim: Some(embedding.len() as i64),
-        }).unwrap();
+    fn insert_test_memory(
+        db: &Db,
+        project: &str,
+        title: &str,
+        content: &str,
+        entities: &str,
+        embedding: &[f32],
+    ) -> String {
+        let id = db
+            .insert_memory(NewMemory {
+                project_id: project.to_string(),
+                source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: title.to_string(),
+                content: content.to_string(),
+                entities: entities.to_string(),
+                embedding: Some(embedding_to_blob(embedding)),
+                embedding_dim: Some(embedding.len() as i64),
+            })
+            .unwrap();
         id
     }
 
     #[test]
     fn test_sanitize_fts_query_multi_word() {
-        assert_eq!(sanitize_fts_query("JWT authentication"), "JWT AND authentication");
+        assert_eq!(
+            sanitize_fts_query("JWT authentication"),
+            "JWT AND authentication"
+        );
     }
 
     #[test]
@@ -226,7 +242,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts_query_with_operators() {
-        assert_eq!(sanitize_fts_query("JWT AND authentication"), "JWT AND authentication");
+        assert_eq!(
+            sanitize_fts_query("JWT AND authentication"),
+            "JWT AND authentication"
+        );
         assert_eq!(sanitize_fts_query("JWT OR auth"), "JWT AND auth");
         assert_eq!(sanitize_fts_query("NOT bad"), "bad");
     }
@@ -235,8 +254,14 @@ mod tests {
     fn test_sanitize_fts_query_special_chars() {
         assert_eq!(sanitize_fts_query("rust *** memory"), "rust AND memory");
         // Splits on non-alnum boundaries (aligns with FTS5 unicode61 tokenizer)
-        assert_eq!(sanitize_fts_query("rust-lang (systems)"), "rust AND lang AND systems");
-        assert_eq!(sanitize_fts_query("title:rust ^fast"), "title AND rust AND fast");
+        assert_eq!(
+            sanitize_fts_query("rust-lang (systems)"),
+            "rust AND lang AND systems"
+        );
+        assert_eq!(
+            sanitize_fts_query("title:rust ^fast"),
+            "title AND rust AND fast"
+        );
         assert_eq!(sanitize_fts_query("NEAR/5 test"), "5 AND test");
     }
 
@@ -250,7 +275,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts_query_consecutive_spaces() {
-        assert_eq!(sanitize_fts_query("JWT    authentication"), "JWT AND authentication");
+        assert_eq!(
+            sanitize_fts_query("JWT    authentication"),
+            "JWT AND authentication"
+        );
     }
 
     #[test]
@@ -262,12 +290,26 @@ mod tests {
     #[test]
     fn test_fts5_search_keyword() {
         let db = test_db();
-        insert_test_memory(&db, "proj", "JWT Auth Decision", "Use JWT tokens for authentication", "auth,jwt", &[1.0, 0.0, 0.0]);
-        insert_test_memory(&db, "proj", "Database Choice", "Use PostgreSQL for persistence", "database,postgresql", &[0.0, 1.0, 0.0]);
+        insert_test_memory(
+            &db,
+            "proj",
+            "JWT Auth Decision",
+            "Use JWT tokens for authentication",
+            "auth,jwt",
+            &[1.0, 0.0, 0.0],
+        );
+        insert_test_memory(
+            &db,
+            "proj",
+            "Database Choice",
+            "Use PostgreSQL for persistence",
+            "database,postgresql",
+            &[0.0, 1.0, 0.0],
+        );
 
         let results = db.search_fts("JWT", Some("proj"), 10).unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].id.len() > 0);
+        assert!(!results[0].id.is_empty());
     }
 
     #[test]
@@ -281,8 +323,22 @@ mod tests {
     #[test]
     fn test_fts5_search_respects_project() {
         let db = test_db();
-        insert_test_memory(&db, "proj-a", "Auth Decision", "Use JWT tokens", "auth", &[1.0, 0.0, 0.0]);
-        insert_test_memory(&db, "proj-b", "Auth Decision", "Use OAuth tokens", "auth", &[1.0, 0.0, 0.0]);
+        insert_test_memory(
+            &db,
+            "proj-a",
+            "Auth Decision",
+            "Use JWT tokens",
+            "auth",
+            &[1.0, 0.0, 0.0],
+        );
+        insert_test_memory(
+            &db,
+            "proj-b",
+            "Auth Decision",
+            "Use OAuth tokens",
+            "auth",
+            &[1.0, 0.0, 0.0],
+        );
 
         let results = db.search_fts("tokens", Some("proj-a"), 10).unwrap();
         assert_eq!(results.len(), 1);
@@ -294,7 +350,14 @@ mod tests {
     #[test]
     fn test_fts5_search_skips_expired() {
         let db = test_db();
-        let id = insert_test_memory(&db, "proj", "Old Decision", "Use Redis for caching", "redis", &[1.0, 0.0, 0.0]);
+        let id = insert_test_memory(
+            &db,
+            "proj",
+            "Old Decision",
+            "Use Redis for caching",
+            "redis",
+            &[1.0, 0.0, 0.0],
+        );
         db.invalidate_memory(&id, None, None).unwrap();
 
         let results = db.search_fts("Redis", Some("proj"), 10).unwrap();
@@ -304,12 +367,24 @@ mod tests {
     #[test]
     fn test_rrf_merge_combines_rankers() {
         let fts = vec![
-            FtsResult { id: "a".to_string(), bm25_score: -5.0 },
-            FtsResult { id: "b".to_string(), bm25_score: -3.0 },
+            FtsResult {
+                id: "a".to_string(),
+                bm25_score: -5.0,
+            },
+            FtsResult {
+                id: "b".to_string(),
+                bm25_score: -3.0,
+            },
         ];
         let vec = vec![
-            VectorResult { id: "b".to_string(), score: 0.9 },
-            VectorResult { id: "c".to_string(), score: 0.8 },
+            VectorResult {
+                id: "b".to_string(),
+                score: 0.9,
+            },
+            VectorResult {
+                id: "c".to_string(),
+                score: 0.8,
+            },
         ];
 
         let merged = rrf_merge(&fts, &vec, 60.0);
@@ -325,12 +400,14 @@ mod tests {
 
     #[test]
     fn test_rrf_merge_raw_scores() {
-        let fts = vec![
-            FtsResult { id: "a".to_string(), bm25_score: -5.0 },
-        ];
-        let vec = vec![
-            VectorResult { id: "a".to_string(), score: 0.9 },
-        ];
+        let fts = vec![FtsResult {
+            id: "a".to_string(),
+            bm25_score: -5.0,
+        }];
+        let vec = vec![VectorResult {
+            id: "a".to_string(),
+            score: 0.9,
+        }];
 
         let merged = rrf_merge(&fts, &vec, 60.0);
         // "a" in both rankers at rank 1 → score = 2 * 1/(60+1) ≈ 0.0328
@@ -344,12 +421,18 @@ mod tests {
         // "a" matches keyword only (high BM25, low vector)
         // "b" matches meaning only (low BM25, high vector)
         let fts = vec![
-            FtsResult { id: "a".to_string(), bm25_score: -10.0 }, // rank 1
-            // "b" not in FTS results
+            FtsResult {
+                id: "a".to_string(),
+                bm25_score: -10.0,
+            }, // rank 1
+               // "b" not in FTS results
         ];
         let vec = vec![
-            VectorResult { id: "b".to_string(), score: 0.95 }, // rank 1
-            // "a" not in vector results (or very low)
+            VectorResult {
+                id: "b".to_string(),
+                score: 0.95,
+            }, // rank 1
+               // "a" not in vector results (or very low)
         ];
 
         let merged = rrf_merge(&fts, &vec, 60.0);
@@ -362,9 +445,18 @@ mod tests {
     #[test]
     fn test_memory_search_updates_recall() {
         let db = test_db();
-        let id = insert_test_memory(&db, "proj", "JWT Auth", "Use JWT tokens for auth", "auth,jwt", &[1.0, 0.0, 0.0]);
+        let id = insert_test_memory(
+            &db,
+            "proj",
+            "JWT Auth",
+            "Use JWT tokens for auth",
+            "auth,jwt",
+            &[1.0, 0.0, 0.0],
+        );
 
-        let results = db.memory_search("JWT", &[0.9, 0.1, 0.0], Some("proj"), 10).unwrap();
+        let results = db
+            .memory_search("JWT", &[0.9, 0.1, 0.0], Some("proj"), 10)
+            .unwrap();
         assert!(!results.is_empty());
 
         // Check recall was updated
@@ -377,8 +469,22 @@ mod tests {
     #[test]
     fn test_memory_search_global_scope() {
         let db = test_db();
-        insert_test_memory(&db, "proj-a", "Auth A", "JWT tokens for A", "auth", &[1.0, 0.0, 0.0]);
-        insert_test_memory(&db, "proj-b", "Auth B", "JWT tokens for B", "auth", &[0.9, 0.1, 0.0]);
+        insert_test_memory(
+            &db,
+            "proj-a",
+            "Auth A",
+            "JWT tokens for A",
+            "auth",
+            &[1.0, 0.0, 0.0],
+        );
+        insert_test_memory(
+            &db,
+            "proj-b",
+            "Auth B",
+            "JWT tokens for B",
+            "auth",
+            &[0.9, 0.1, 0.0],
+        );
 
         let results = db.memory_search("JWT", &[1.0, 0.0, 0.0], None, 10).unwrap();
         assert_eq!(results.len(), 2);
@@ -388,16 +494,36 @@ mod tests {
     fn test_memory_search_scores_normalized() {
         let db = test_db();
         // Insert entry that matches both FTS and vector — should get highest possible RRF score
-        insert_test_memory(&db, "proj", "JWT Auth", "Use JWT tokens for auth", "auth,jwt", &[1.0, 0.0, 0.0]);
-        insert_test_memory(&db, "proj", "DB Choice", "Use PostgreSQL for persistence", "db", &[0.0, 1.0, 0.0]);
+        insert_test_memory(
+            &db,
+            "proj",
+            "JWT Auth",
+            "Use JWT tokens for auth",
+            "auth,jwt",
+            &[1.0, 0.0, 0.0],
+        );
+        insert_test_memory(
+            &db,
+            "proj",
+            "DB Choice",
+            "Use PostgreSQL for persistence",
+            "db",
+            &[0.0, 1.0, 0.0],
+        );
 
         // "JWT auth tokens" now uses AND-term matching: "JWT AND auth AND tokens"
         // FTS5 should match the JWT Auth entry (contains "JWT", "auth", "tokens")
         // Both FTS and vector match → dual-ranker → score should be > 0.5
-        let results = db.memory_search("JWT auth tokens", &[0.9, 0.1, 0.0], Some("proj"), 10).unwrap();
+        let results = db
+            .memory_search("JWT auth tokens", &[0.9, 0.1, 0.0], Some("proj"), 10)
+            .unwrap();
         assert!(!results.is_empty());
         // Dual-ranker hits produce scores > 0.5 (confirming FTS5 is now contributing)
-        assert!(results[0].score > 0.5, "dual-ranker normalized score should be > 0.5, got {}", results[0].score);
+        assert!(
+            results[0].score > 0.5,
+            "dual-ranker normalized score should be > 0.5, got {}",
+            results[0].score
+        );
         for r in &results {
             assert!(r.score >= 0.0, "score should be >= 0.0, got {}", r.score);
             assert!(r.score <= 1.0, "score should be <= 1.0, got {}", r.score);
@@ -408,10 +534,22 @@ mod tests {
     fn test_fts5_multi_word_non_adjacent_match() {
         let db = test_db();
         // "JWT" in title, "authentication" in content — NOT adjacent
-        insert_test_memory(&db, "proj", "JWT tokens", "for authentication and authorization", "auth,jwt", &[1.0, 0.0, 0.0]);
+        insert_test_memory(
+            &db,
+            "proj",
+            "JWT tokens",
+            "for authentication and authorization",
+            "auth,jwt",
+            &[1.0, 0.0, 0.0],
+        );
 
         // AND-term matching: "JWT AND authentication" should match even though terms are non-adjacent
-        let results = db.search_fts("JWT authentication", Some("proj"), 10).unwrap();
-        assert!(!results.is_empty(), "FTS5 AND-term should match non-adjacent terms across title and content");
+        let results = db
+            .search_fts("JWT authentication", Some("proj"), 10)
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "FTS5 AND-term should match non-adjacent terms across title and content"
+        );
     }
 }

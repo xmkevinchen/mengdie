@@ -211,8 +211,7 @@ mod tests {
 
     #[test]
     fn test_extract_tags_string() {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str("tags: \"auth, middleware\"").unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str("tags: \"auth, middleware\"").unwrap();
         let tags = extract_tags(&yaml);
         assert_eq!(tags, vec!["auth", "middleware"]);
     }
@@ -229,7 +228,10 @@ mod tests {
         assert_eq!(infer_source_type(Path::new("conclusion.md")), "conclusion");
         assert_eq!(infer_source_type(Path::new("code-review.md")), "review");
         assert_eq!(infer_source_type(Path::new("001-mvp-plan.md")), "plan");
-        assert_eq!(infer_source_type(Path::new("retrospect-q1.md")), "retrospect");
+        assert_eq!(
+            infer_source_type(Path::new("retrospect-q1.md")),
+            "retrospect"
+        );
         assert_eq!(infer_source_type(Path::new("random.md")), "unknown");
     }
 

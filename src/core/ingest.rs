@@ -4,7 +4,7 @@ use anyhow::Context;
 
 use super::contradiction::Conflict;
 use super::db::{Db, NewMemory};
-use super::embeddings::{embedding_to_blob, EmbeddingContext, Embedder};
+use super::embeddings::{embedding_to_blob, Embedder, EmbeddingContext};
 use super::parser::{parse_ae_file, ParsedDocument};
 
 /// Result of ingesting a document, including any detected contradictions.
@@ -37,7 +37,12 @@ pub fn ingest_document(
 
     // Check contradictions BEFORE insert (so we don't match against ourselves)
     let conflicts = db
-        .check_contradictions(&normalized_entities, Some(&embedding), &doc.knowledge_type, project_id)
+        .check_contradictions(
+            &normalized_entities,
+            Some(&embedding),
+            &doc.knowledge_type,
+            project_id,
+        )
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "contradiction check failed during ingestion");
             vec![]
@@ -56,7 +61,10 @@ pub fn ingest_document(
     };
 
     let entry_id = db.insert_memory(mem)?;
-    Ok(IngestResult { entry_id, conflicts })
+    Ok(IngestResult {
+        entry_id,
+        conflicts,
+    })
 }
 
 /// Parse and ingest a file from disk.

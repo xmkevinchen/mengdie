@@ -154,7 +154,10 @@ fn classify_exit_kind(stderr: &str) -> ExitKind {
         .unwrap()
     });
     let model = MODEL.get_or_init(|| {
-        Regex::new(r"(?i)model\s+not\s+found|unsupported\s+model|issue\s+with\s+the\s+selected\s+model").unwrap()
+        Regex::new(
+            r"(?i)model\s+not\s+found|unsupported\s+model|issue\s+with\s+the\s+selected\s+model",
+        )
+        .unwrap()
     });
 
     if auth.is_match(stderr) {
@@ -448,7 +451,10 @@ mod tests {
     fn classify_exit1_rate_limited_kind() {
         let out = mk_output(1, b"", b"API Error: 429 rate_limit_error\n");
         match classify_output(out) {
-            Err(LlmError::NonZeroExit { kind: ExitKind::RateLimited, .. }) => {}
+            Err(LlmError::NonZeroExit {
+                kind: ExitKind::RateLimited,
+                ..
+            }) => {}
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -457,7 +463,10 @@ mod tests {
     fn classify_exit1_network_kind() {
         let out = mk_output(1, b"", b"fetch error: ECONNRESET\n");
         match classify_output(out) {
-            Err(LlmError::NonZeroExit { kind: ExitKind::Network, .. }) => {}
+            Err(LlmError::NonZeroExit {
+                kind: ExitKind::Network,
+                ..
+            }) => {}
             other => panic!("expected Network, got {other:?}"),
         }
     }
@@ -466,7 +475,10 @@ mod tests {
     fn classify_exit1_model_kind() {
         let out = mk_output(1, b"", b"model not found: claude-zzz\n");
         match classify_output(out) {
-            Err(LlmError::NonZeroExit { kind: ExitKind::Model, .. }) => {}
+            Err(LlmError::NonZeroExit {
+                kind: ExitKind::Model,
+                ..
+            }) => {}
             other => panic!("expected Model, got {other:?}"),
         }
     }
@@ -475,7 +487,10 @@ mod tests {
     fn classify_exit1_other_kind() {
         let out = mk_output(1, b"", b"weird error nobody has seen\n");
         match classify_output(out) {
-            Err(LlmError::NonZeroExit { kind: ExitKind::Other, .. }) => {}
+            Err(LlmError::NonZeroExit {
+                kind: ExitKind::Other,
+                ..
+            }) => {}
             other => panic!("expected Other, got {other:?}"),
         }
     }
@@ -504,11 +519,7 @@ mod tests {
     fn argv_of(cmd: &tokio::process::Command) -> Vec<String> {
         let std_cmd = cmd.as_std();
         let mut v = vec![std_cmd.get_program().to_string_lossy().into_owned()];
-        v.extend(
-            std_cmd
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned()),
-        );
+        v.extend(std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
         v
     }
 
@@ -746,7 +757,10 @@ mod tests {
             source: src,
         };
         match err {
-            LlmError::Io { op: IoOp::WriteStdin, .. } => {}
+            LlmError::Io {
+                op: IoOp::WriteStdin,
+                ..
+            } => {}
             other => panic!("expected Io op=WriteStdin, got {other:?}"),
         }
 

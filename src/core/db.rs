@@ -143,7 +143,7 @@ impl Db {
                         embedding, embedding_dim, is_longterm, created_at
                  FROM memory_entries WHERE id = ?1",
                 params![id],
-                |row| row_to_entry(row),
+                row_to_entry,
             )
             .optional()?;
         Ok(entry)
@@ -251,9 +251,7 @@ impl Db {
 
     /// Access the underlying connection lock. Crate-internal only to prevent
     /// external callers from holding the guard while calling other Db methods (deadlock).
-    pub(crate) fn lock_conn(
-        &self,
-    ) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock_conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))
     }
 
@@ -261,10 +259,27 @@ impl Db {
     pub fn stats(&self) -> anyhow::Result<DbStats> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |r| r.get(0))?;
-        let valid: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries WHERE valid_until IS NULL", [], |r| r.get(0))?;
-        let longterm: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries WHERE is_longterm = 1", [], |r| r.get(0))?;
-        let recalled: i64 = conn.query_row("SELECT COUNT(*) FROM memory_entries WHERE recall_count > 0", [], |r| r.get(0))?;
-        Ok(DbStats { total, valid, longterm, recalled })
+        let valid: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_entries WHERE valid_until IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let longterm: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_entries WHERE is_longterm = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        let recalled: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_entries WHERE recall_count > 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(DbStats {
+            total,
+            valid,
+            longterm,
+            recalled,
+        })
     }
 
     /// List all memories, optionally filtered by project.
@@ -277,7 +292,8 @@ impl Db {
                         superseded_by, recall_count, avg_relevance, last_recalled, \
                         embedding, embedding_dim, is_longterm, created_at \
                  FROM memory_entries WHERE project_id = ?1 \
-                 ORDER BY created_at DESC".to_string(),
+                 ORDER BY created_at DESC"
+                    .to_string(),
                 vec![Box::new(pid.to_string()) as Box<dyn rusqlite::types::ToSql>],
             ),
             None => (
@@ -286,14 +302,15 @@ impl Db {
                         superseded_by, recall_count, avg_relevance, last_recalled, \
                         embedding, embedding_dim, is_longterm, created_at \
                  FROM memory_entries \
-                 ORDER BY created_at DESC".to_string(),
+                 ORDER BY created_at DESC"
+                    .to_string(),
                 vec![],
             ),
         };
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_entry(row))?;
+        let rows = stmt.query_map(param_refs.as_slice(), row_to_entry)?;
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row?);
@@ -314,7 +331,7 @@ impl Db {
                 "SELECT old.id, old.title FROM memory_entries old
                  INNER JOIN memory_entries new
                    ON old.content_hash = new.content_hash
-                 WHERE old.project_id = ?1 AND new.project_id = ?2"
+                 WHERE old.project_id = ?1 AND new.project_id = ?2",
             )?;
             let rows = stmt.query_map(params![old_id, new_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -341,7 +358,11 @@ impl Db {
     }
 
     /// Dry-run rename: returns (would_rename, would_merge) without modifying the database.
-    pub fn rename_project_dry_run(&self, old_id: &str, new_id: &str) -> anyhow::Result<(usize, usize)> {
+    pub fn rename_project_dry_run(
+        &self,
+        old_id: &str,
+        new_id: &str,
+    ) -> anyhow::Result<(usize, usize)> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
 
         let collision_count: i64 = conn.query_row(
@@ -460,7 +481,9 @@ mod tests {
     fn test_invalidate() {
         let db = test_db();
         let id = db.insert_memory(sample_memory("test-project")).unwrap();
-        let updated = db.invalidate_memory(&id, Some("new-id"), Some("test reason")).unwrap();
+        let updated = db
+            .invalidate_memory(&id, Some("new-id"), Some("test reason"))
+            .unwrap();
         assert!(updated);
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert!(entry.valid_until.is_some());
@@ -537,30 +560,34 @@ mod tests {
         let content = "Use JWT tokens with Redis session store";
 
         // Insert first memory
-        let id_a = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: "file-a.md".to_string(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: "Auth decision v1".to_string(),
-            content: content.to_string(),
-            entities: "auth".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id_a = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: "file-a.md".to_string(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "Auth decision v1".to_string(),
+                content: content.to_string(),
+                entities: "auth".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         // Insert same content with different source_file → should upsert (return same id)
-        let id_b = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: "file-b.md".to_string(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: "Auth decision v2".to_string(),
-            content: content.to_string(),
-            entities: "auth,jwt".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id_b = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: "file-b.md".to_string(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "Auth decision v2".to_string(),
+                content: content.to_string(),
+                entities: "auth,jwt".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         assert_eq!(id_a, id_b, "same content should upsert, returning same ID");
 
@@ -570,17 +597,19 @@ mod tests {
         assert_eq!(entry.entities, "auth,jwt");
 
         // Insert different content → should create new entry
-        let id_c = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: "file-c.md".to_string(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: "DB decision".to_string(),
-            content: "Use PostgreSQL for persistence".to_string(),
-            entities: "database".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id_c = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: "file-c.md".to_string(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "DB decision".to_string(),
+                content: "Use PostgreSQL for persistence".to_string(),
+                entities: "database".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         assert_ne!(id_a, id_c, "different content should create new entry");
         assert_eq!(db.count_memories("proj").unwrap(), 2);
@@ -591,36 +620,43 @@ mod tests {
         let db = test_db();
 
         // Insert with empty source_file (simulating MCP call without source_file)
-        let id = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: String::new(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "factual".to_string(),
-            title: "Finding A".to_string(),
-            content: "Some factual finding".to_string(),
-            entities: "topic".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: String::new(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "factual".to_string(),
+                title: "Finding A".to_string(),
+                content: "Some factual finding".to_string(),
+                entities: "topic".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert_eq!(entry.source_file, "");
         assert_eq!(entry.title, "Finding A");
 
         // Insert another with empty source_file but different content → new entry
-        let id2 = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: String::new(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "factual".to_string(),
-            title: "Finding B".to_string(),
-            content: "Different factual finding".to_string(),
-            entities: "other".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id2 = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: String::new(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "factual".to_string(),
+                title: "Finding B".to_string(),
+                content: "Different factual finding".to_string(),
+                entities: "other".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
-        assert_ne!(id, id2, "different content with empty source_file should create separate entries");
+        assert_ne!(
+            id, id2,
+            "different content with empty source_file should create separate entries"
+        );
     }
 
     #[test]
@@ -639,7 +675,8 @@ mod tests {
             entities: "auth".to_string(),
             embedding: None,
             embedding_dim: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         // Upsert same content with title "v2" and different entities
         db.insert_memory(NewMemory {
@@ -652,23 +689,32 @@ mod tests {
             entities: "auth,jwt,redis".to_string(),
             embedding: None,
             embedding_dim: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         // FTS should find "redis" (from updated entities) but NOT find "v1" in title
         let conn = db.conn.lock().unwrap();
-        let count_redis: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'redis'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(count_redis, 1, "FTS should find updated entities after upsert");
+        let count_redis: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'redis'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_redis, 1,
+            "FTS should find updated entities after upsert"
+        );
 
         // Search for old title should not match (FTS was updated)
         // Note: "v1" is too short for FTS5 default tokenizer, so search for the full title token
-        let count_total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memory_fts",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(count_total, 1, "FTS should have exactly 1 entry after upsert (not 2)");
+        let count_total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count_total, 1,
+            "FTS should have exactly 1 entry after upsert (not 2)"
+        );
     }
 
     #[test]
@@ -676,38 +722,45 @@ mod tests {
         let db = test_db();
         let content = "Shared decision content";
 
-        let id = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: "original.md".to_string(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: "Decision v1".to_string(),
-            content: content.to_string(),
-            entities: "tag".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: "original.md".to_string(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "Decision v1".to_string(),
+                content: content.to_string(),
+                entities: "tag".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         // Simulate recall
         db.record_recall(&id, 0.8).unwrap();
         db.record_recall(&id, 0.6).unwrap();
 
         // Upsert same content → should preserve recall stats
-        let id2 = db.insert_memory(NewMemory {
-            project_id: "proj".to_string(),
-            source_file: "updated.md".to_string(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: "Decision v2".to_string(),
-            content: content.to_string(),
-            entities: "tag,new".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let id2 = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: "updated.md".to_string(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "Decision v2".to_string(),
+                content: content.to_string(),
+                entities: "tag,new".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         assert_eq!(id, id2);
         let entry = db.get_memory(&id).unwrap().unwrap();
-        assert_eq!(entry.recall_count, 2, "recall stats should be preserved on upsert");
+        assert_eq!(
+            entry.recall_count, 2,
+            "recall stats should be preserved on upsert"
+        );
         assert!((entry.avg_relevance - 0.7).abs() < 0.01);
         assert_eq!(entry.title, "Decision v2", "title should be updated");
     }
@@ -742,20 +795,23 @@ mod tests {
             entities: "test".to_string(),
             embedding: None,
             embedding_dim: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         // Insert same content under new project (will collide)
-        let new_id = db.insert_memory(NewMemory {
-            project_id: "new".to_string(),
-            source_file: "b.md".to_string(),
-            source_type: "conclusion".to_string(),
-            knowledge_type: "decisional".to_string(),
-            title: "New version".to_string(),
-            content: shared_content.to_string(),
-            entities: "test".to_string(),
-            embedding: None,
-            embedding_dim: None,
-        }).unwrap();
+        let new_id = db
+            .insert_memory(NewMemory {
+                project_id: "new".to_string(),
+                source_file: "b.md".to_string(),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "New version".to_string(),
+                content: shared_content.to_string(),
+                entities: "test".to_string(),
+                embedding: None,
+                embedding_dim: None,
+            })
+            .unwrap();
 
         // Also insert a non-colliding memory under old
         db.insert_memory(NewMemory {
@@ -768,17 +824,29 @@ mod tests {
             entities: "unique".to_string(),
             embedding: None,
             embedding_dim: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         let (renamed, merged) = db.rename_project("old", "new").unwrap();
         assert_eq!(merged, 1, "one collision should be merged");
         assert_eq!(renamed, 1, "one non-colliding row should be renamed");
-        assert_eq!(db.count_memories("old").unwrap(), 0, "no rows left under old");
-        assert_eq!(db.count_memories("new").unwrap(), 2, "new has original + renamed");
+        assert_eq!(
+            db.count_memories("old").unwrap(),
+            0,
+            "no rows left under old"
+        );
+        assert_eq!(
+            db.count_memories("new").unwrap(),
+            2,
+            "new has original + renamed"
+        );
 
         // Verify the new-project version was preserved (not the old one)
         let entry = db.get_memory(&new_id).unwrap().unwrap();
-        assert_eq!(entry.title, "New version", "new project's version preserved");
+        assert_eq!(
+            entry.title, "New version",
+            "new project's version preserved"
+        );
     }
 
     #[test]

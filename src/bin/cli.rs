@@ -116,11 +116,26 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to open database at {}", db_path.display()))?;
 
     match cli.command {
-        Commands::Dream { min_recall, min_relevance, window_days } => cmd_dream(&db, min_recall, min_relevance, window_days),
+        Commands::Dream {
+            min_recall,
+            min_relevance,
+            window_days,
+        } => cmd_dream(&db, min_recall, min_relevance, window_days),
         Commands::Import { dir, dry_run } => cmd_import(&db, &dir, dry_run),
-        Commands::Rename { from, to, list, dry_run, yes } => cmd_rename(&db, from, to, list, dry_run, yes),
+        Commands::Rename {
+            from,
+            to,
+            list,
+            dry_run,
+            yes,
+        } => cmd_rename(&db, from, to, list, dry_run, yes),
         Commands::List { global, format } => cmd_list(&db, global, &format),
-        Commands::Search { query, global, limit, min_score } => cmd_search(&db, &query, global, limit, min_score),
+        Commands::Search {
+            query,
+            global,
+            limit,
+            min_score,
+        } => cmd_search(&db, &query, global, limit, min_score),
         Commands::Stats => cmd_stats(&db),
     }
 }
@@ -128,7 +143,11 @@ fn main() -> anyhow::Result<()> {
 fn cmd_dream(db: &Db, min_recall: i64, min_relevance: f64, window_days: i64) -> anyhow::Result<()> {
     use mengdie::core::dreaming::DreamingConfig;
 
-    let config = DreamingConfig { min_recall, min_relevance, window_days };
+    let config = DreamingConfig {
+        min_recall,
+        min_relevance,
+        window_days,
+    };
     // Run globally (all projects) — per-project scoping can be added via CLI flag later
     let result = db.run_dreaming_with_config(None, &config)?;
     println!(
@@ -176,7 +195,10 @@ fn cmd_import(db: &Db, dir: &PathBuf, dry_run: bool) -> anyhow::Result<()> {
             Ok(result) => {
                 println!("  + {} -> {}", path.display(), result.entry_id);
                 for conflict in &result.conflicts {
-                    println!("    ! conflict: \"{}\" -- {}", conflict.existing_title, conflict.reason);
+                    println!(
+                        "    ! conflict: \"{}\" -- {}",
+                        conflict.existing_title, conflict.reason
+                    );
                     conflicts_found += 1;
                 }
                 imported += 1;
@@ -222,7 +244,9 @@ fn cmd_rename(
         return Ok(());
     }
 
-    let from = from.ok_or_else(|| anyhow::anyhow!("missing <from> argument (use --list to see project_ids)"))?;
+    let from = from.ok_or_else(|| {
+        anyhow::anyhow!("missing <from> argument (use --list to see project_ids)")
+    })?;
     let to = to.ok_or_else(|| anyhow::anyhow!("missing <to> argument"))?;
 
     if from == to {
@@ -234,9 +258,15 @@ fn cmd_rename(
         if would_rename == 0 && would_merge == 0 {
             println!("No memories found under '{}'.", from);
         } else {
-            println!("Dry run: would rename {} memories from '{}' to '{}'", would_rename, from, to);
+            println!(
+                "Dry run: would rename {} memories from '{}' to '{}'",
+                would_rename, from, to
+            );
             if would_merge > 0 {
-                println!("         would merge {} duplicates (same content already under '{}')", would_merge, to);
+                println!(
+                    "         would merge {} duplicates (same content already under '{}')",
+                    would_merge, to
+                );
             }
         }
         return Ok(());
@@ -253,10 +283,16 @@ fn cmd_rename(
         if would_merge > 0 {
             eprint!(
                 "Rename {} memories from '{}' to '{}' ({} duplicates will be merged)? [y/N] ",
-                would_rename + would_merge, from, to, would_merge
+                would_rename + would_merge,
+                from,
+                to,
+                would_merge
             );
         } else {
-            eprint!("Rename {} memories from '{}' to '{}'? [y/N] ", would_rename, from, to);
+            eprint!(
+                "Rename {} memories from '{}' to '{}'? [y/N] ",
+                would_rename, from, to
+            );
         }
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -269,7 +305,10 @@ fn cmd_rename(
     let (renamed, merged) = db.rename_project(&from, &to)?;
     println!("Renamed {} memories from '{}' to '{}'.", renamed, from, to);
     if merged > 0 {
-        println!("Merged {} duplicates (deleted from '{}', kept under '{}').", merged, from, to);
+        println!(
+            "Merged {} duplicates (deleted from '{}', kept under '{}').",
+            merged, from, to
+        );
     }
     eprintln!("\nNote: restart mengdie-mcp if it's running — cached project_id is now stale.");
 
@@ -279,7 +318,11 @@ fn cmd_rename(
 fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let project_id = infer_project_id(&cwd);
-    let scope = if global { None } else { Some(project_id.as_str()) };
+    let scope = if global {
+        None
+    } else {
+        Some(project_id.as_str())
+    };
 
     let entries = db.list_memories(scope)?;
 
@@ -289,50 +332,80 @@ fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
     }
 
     if format == "json" {
-        let items: Vec<serde_json::Value> = entries.iter().map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "project_id": e.project_id,
-                "title": e.title,
-                "knowledge_type": e.knowledge_type,
-                "source_file": e.source_file,
-                "entities": e.entities,
-                "recall_count": e.recall_count,
-                "is_longterm": e.is_longterm,
-                "valid_from": e.valid_from,
+        let items: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "project_id": e.project_id,
+                    "title": e.title,
+                    "knowledge_type": e.knowledge_type,
+                    "source_file": e.source_file,
+                    "entities": e.entities,
+                    "recall_count": e.recall_count,
+                    "is_longterm": e.is_longterm,
+                    "valid_from": e.valid_from,
+                })
             })
-        }).collect();
+            .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
     } else {
         // Table format
-        println!("{:<8} {:<40} {:<12} {:>6} {:<4} {}",
-            "ID", "Title", "Type", "Recall", "LT", "Source");
+        println!(
+            "{:<8} {:<40} {:<12} {:>6} {:<4} Source",
+            "ID", "Title", "Type", "Recall", "LT"
+        );
         println!("{}", "-".repeat(90));
         for e in &entries {
             let short_id = if e.id.len() > 8 { &e.id[..8] } else { &e.id };
-            let title = if e.title.len() > 40 { format!("{}...", &e.title[..37]) } else { e.title.clone() };
+            let title = if e.title.len() > 40 {
+                format!("{}...", &e.title[..37])
+            } else {
+                e.title.clone()
+            };
             let lt = if e.is_longterm { "Y" } else { "N" };
-            let source = if e.source_file.is_empty() { "-" } else { &e.source_file };
-            let source_short = if source.len() > 30 { &source[source.len()-30..] } else { source };
-            println!("{:<8} {:<40} {:<12} {:>6} {:<4} {}",
-                short_id, title, e.knowledge_type, e.recall_count, lt, source_short);
+            let source = if e.source_file.is_empty() {
+                "-"
+            } else {
+                &e.source_file
+            };
+            let source_short = if source.len() > 30 {
+                &source[source.len() - 30..]
+            } else {
+                source
+            };
+            println!(
+                "{:<8} {:<40} {:<12} {:>6} {:<4} {}",
+                short_id, title, e.knowledge_type, e.recall_count, lt, source_short
+            );
         }
         println!("\n{} memories total", entries.len());
     }
     Ok(())
 }
 
-fn cmd_search(db: &Db, query: &str, global: bool, limit: usize, min_score: Option<f64>) -> anyhow::Result<()> {
+fn cmd_search(
+    db: &Db,
+    query: &str,
+    global: bool,
+    limit: usize,
+    min_score: Option<f64>,
+) -> anyhow::Result<()> {
     eprintln!("Loading embedding model...");
     let mut embedder = Embedder::new().context("failed to initialize embedding model")?;
     eprintln!("Model loaded.");
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_id = infer_project_id(&cwd);
-    let scope = if global { None } else { Some(project_id.as_str()) };
+    let scope = if global {
+        None
+    } else {
+        Some(project_id.as_str())
+    };
 
     let query_embedding = embedder.embed_text(query)?;
-    let results: Vec<_> = db.memory_search(query, &query_embedding, scope, limit)?
+    let results: Vec<_> = db
+        .memory_search(query, &query_embedding, scope, limit)?
         .into_iter()
         .filter(|r| min_score.is_none_or(|ms| r.score >= ms))
         .collect();
@@ -372,7 +445,11 @@ fn cmd_stats(db: &Db) -> anyhow::Result<()> {
 
     let metrics = db.list_metrics()?;
     let get = |key: &str| -> i64 {
-        metrics.iter().find(|(k, _)| k == key).map(|(_, v)| *v).unwrap_or(0)
+        metrics
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
     };
 
     let search_count = get("search_count");
@@ -400,12 +477,12 @@ fn cmd_stats(db: &Db) -> anyhow::Result<()> {
 fn is_unique_violation(err: &anyhow::Error) -> bool {
     // Walk the error chain looking for rusqlite constraint violation
     for cause in err.chain() {
-        if let Some(rusqlite_err) = cause.downcast_ref::<rusqlite::Error>() {
-            if let rusqlite::Error::SqliteFailure(ffi_err, _) = rusqlite_err {
-                // SQLITE_CONSTRAINT = 19, extended code SQLITE_CONSTRAINT_UNIQUE = 2067
-                if ffi_err.code == rusqlite::ffi::ErrorCode::ConstraintViolation {
-                    return true;
-                }
+        if let Some(rusqlite::Error::SqliteFailure(ffi_err, _)) =
+            cause.downcast_ref::<rusqlite::Error>()
+        {
+            // SQLITE_CONSTRAINT = 19, extended code SQLITE_CONSTRAINT_UNIQUE = 2067
+            if ffi_err.code == rusqlite::ffi::ErrorCode::ConstraintViolation {
+                return true;
             }
         }
     }

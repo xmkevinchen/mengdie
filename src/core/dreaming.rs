@@ -48,17 +48,17 @@ impl Db {
     }
 
     /// Run the Dreaming promotion pass with configurable thresholds.
-    pub fn run_dreaming_with_config(&self, project_id: Option<&str>, config: &DreamingConfig) -> anyhow::Result<DreamingResult> {
+    pub fn run_dreaming_with_config(
+        &self,
+        project_id: Option<&str>,
+        config: &DreamingConfig,
+    ) -> anyhow::Result<DreamingResult> {
         let conn = self.lock_conn()?;
         let now = chrono::Utc::now();
         let cutoff = (now - chrono::Duration::days(config.window_days)).to_rfc3339();
 
-        let project_filter_simple = project_id
-            .map(|_| "AND project_id = ?1")
-            .unwrap_or("");
-        let project_filter = project_id
-            .map(|_| "AND project_id = ?4")
-            .unwrap_or("");
+        let project_filter_simple = project_id.map(|_| "AND project_id = ?1").unwrap_or("");
+        let project_filter = project_id.map(|_| "AND project_id = ?4").unwrap_or("");
 
         // Count total non-longterm valid memories BEFORE promotion
         let count_sql = format!(
@@ -66,8 +66,12 @@ impl Db {
              WHERE is_longterm = 0 AND valid_until IS NULL {project_filter_simple}"
         );
         let total_valid: usize = match project_id {
-            Some(pid) => conn.query_row(&count_sql, params![pid], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
-            None => conn.query_row(&count_sql, [], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
+            Some(pid) => conn.query_row(&count_sql, params![pid], |row| {
+                row.get::<_, i64>(0).map(|v| v as usize)
+            })?,
+            None => conn.query_row(&count_sql, [], |row| {
+                row.get::<_, i64>(0).map(|v| v as usize)
+            })?,
         };
 
         // Threshold query used for both count and promote
@@ -83,15 +87,29 @@ impl Db {
         // Count candidates that meet thresholds
         let sql = format!("SELECT COUNT(*) FROM memory_entries {threshold_where}");
         let total_checked: usize = match project_id {
-            Some(pid) => conn.query_row(&sql, params![config.min_recall, config.min_relevance, cutoff, pid], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
-            None => conn.query_row(&sql, params![config.min_recall, config.min_relevance, cutoff], |row| row.get::<_, i64>(0).map(|v| v as usize))?,
+            Some(pid) => conn.query_row(
+                &sql,
+                params![config.min_recall, config.min_relevance, cutoff, pid],
+                |row| row.get::<_, i64>(0).map(|v| v as usize),
+            )?,
+            None => conn.query_row(
+                &sql,
+                params![config.min_recall, config.min_relevance, cutoff],
+                |row| row.get::<_, i64>(0).map(|v| v as usize),
+            )?,
         };
 
         // Promote qualifying memories
         let sql = format!("UPDATE memory_entries SET is_longterm = 1 {threshold_where}");
         let promoted = match project_id {
-            Some(pid) => conn.execute(&sql, params![config.min_recall, config.min_relevance, cutoff, pid])?,
-            None => conn.execute(&sql, params![config.min_recall, config.min_relevance, cutoff])?,
+            Some(pid) => conn.execute(
+                &sql,
+                params![config.min_recall, config.min_relevance, cutoff, pid],
+            )?,
+            None => conn.execute(
+                &sql,
+                params![config.min_recall, config.min_relevance, cutoff],
+            )?,
         };
 
         Ok(DreamingResult {

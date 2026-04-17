@@ -16,7 +16,8 @@ use mengdie::core::parser::is_ingestable;
 fn test_full_pipeline() {
     // Setup
     let db = Db::open_in_memory().unwrap();
-    let mut embedder = Embedder::new().expect("failed to load embedding model (first run downloads ~90MB)");
+    let mut embedder =
+        Embedder::new().expect("failed to load embedding model (first run downloads ~90MB)");
     let project_id = "test-e2e-project";
 
     // 1. Create a test conclusion file
@@ -32,7 +33,11 @@ fn test_full_pipeline() {
         writeln!(f).unwrap();
         writeln!(f, "# Auth Middleware Decision").unwrap();
         writeln!(f).unwrap();
-        writeln!(f, "Use JWT tokens with Redis session store for authentication.").unwrap();
+        writeln!(
+            f,
+            "Use JWT tokens with Redis session store for authentication."
+        )
+        .unwrap();
         writeln!(f, "Session tokens expire after 24 hours.").unwrap();
     }
     assert!(is_ingestable(&path));
@@ -58,7 +63,10 @@ fn test_full_pipeline() {
     let results = db
         .memory_search(query, &query_embedding, Some(project_id), 10)
         .unwrap();
-    assert!(!results.is_empty(), "search should return the ingested memory");
+    assert!(
+        !results.is_empty(),
+        "search should return the ingested memory"
+    );
     assert_eq!(results[0].entry.id, entry_id);
 
     // 5. Verify recall was updated
@@ -74,7 +82,11 @@ fn test_full_pipeline() {
     }
     let entry = db.get_memory(&entry_id).unwrap().unwrap();
     assert_eq!(entry.recall_count, 10); // 1 from search + 9 manual
-    assert!(entry.avg_relevance > 0.45, "avg_relevance should be above dreaming threshold: {}", entry.avg_relevance);
+    assert!(
+        entry.avg_relevance > 0.45,
+        "avg_relevance should be above dreaming threshold: {}",
+        entry.avg_relevance
+    );
 
     // 7. Run Dreaming
     let dream_result = db.run_dreaming(None).unwrap();

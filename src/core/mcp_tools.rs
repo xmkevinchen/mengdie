@@ -6,8 +6,8 @@ use rmcp::{tool, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
 
 use super::db::Db;
-use super::metrics;
 use super::embeddings::Embedder;
+use super::metrics;
 use std::sync::{Arc, Mutex};
 
 /// MCP server with 3 tools: memory_search, memory_ingest, memory_invalidate.
@@ -223,7 +223,10 @@ impl MengdieServer {
                                 });
                             }
                         }
-                        (results, Some("degraded: embedding unavailable, FTS-only".into()))
+                        (
+                            results,
+                            Some("degraded: embedding unavailable, FTS-only".into()),
+                        )
                     }
                     Err(e2) => {
                         tracing::error!(error = %e2, "FTS fallback also failed");
@@ -257,7 +260,10 @@ impl MengdieServer {
             let _ = self.db.increment_metric(metrics::METRIC_SEARCH_NONEMPTY);
         }
 
-        Json(SearchOutput { results: items, degraded })
+        Json(SearchOutput {
+            results: items,
+            degraded,
+        })
     }
 
     #[tool(
@@ -319,7 +325,8 @@ impl MengdieServer {
         };
 
         // Capture for contradiction check before move into NewMemory
-        let entities_for_check: Vec<String> = params.entities
+        let entities_for_check: Vec<String> = params
+            .entities
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -458,7 +465,10 @@ mod tests {
             "entities": "test"
         });
         let result = serde_json::from_value::<IngestParams>(json);
-        assert!(result.is_err(), "should reject 'decision' (valid is 'decisional' or source types)");
+        assert!(
+            result.is_err(),
+            "should reject 'decision' (valid is 'decisional' or source types)"
+        );
     }
 
     #[test]
@@ -471,7 +481,10 @@ mod tests {
             "entities": "test"
         });
         let result = serde_json::from_value::<IngestParams>(json);
-        assert!(result.is_ok(), "should accept valid source_type 'conclusion'");
+        assert!(
+            result.is_ok(),
+            "should accept valid source_type 'conclusion'"
+        );
         let params = result.unwrap();
         assert_eq!(params.source_type.to_string(), "conclusion");
         assert_eq!(params.knowledge_type.to_string(), "decisional");
@@ -487,6 +500,9 @@ mod tests {
             "entities": "test"
         });
         let result = serde_json::from_value::<IngestParams>(json);
-        assert!(result.is_err(), "should reject 'decision' as knowledge_type");
+        assert!(
+            result.is_err(),
+            "should reject 'decision' as knowledge_type"
+        );
     }
 }

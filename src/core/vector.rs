@@ -2,7 +2,9 @@ use anyhow::Context;
 use rusqlite::params;
 
 use super::db::Db;
-use super::embeddings::{blob_to_embedding, cosine_similarity, embedding_to_blob, validate_embedding};
+use super::embeddings::{
+    blob_to_embedding, cosine_similarity, embedding_to_blob, validate_embedding,
+};
 
 /// A scored search result from vector similarity search.
 #[derive(Debug, Clone)]
@@ -100,7 +102,11 @@ impl Db {
         }
 
         // Sort descending by score
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
 
         Ok(results)
@@ -117,7 +123,11 @@ mod tests {
         Db::open_in_memory().unwrap()
     }
 
-    fn mem_with_embedding(project_id: &str, title: &str, embedding: &[f32]) -> (NewMemory, Vec<u8>) {
+    fn mem_with_embedding(
+        project_id: &str,
+        title: &str,
+        embedding: &[f32],
+    ) -> (NewMemory, Vec<u8>) {
         let mem = NewMemory {
             project_id: project_id.to_string(),
             source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
@@ -195,9 +205,14 @@ mod tests {
         db.insert_memory(m3).unwrap();
 
         // Query closest to [1, 0, 0] → should be "auth decision"
-        let results = db.search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10).unwrap();
+        let results = db
+            .search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10)
+            .unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].id, db.search_vector(&[1.0, 0.0, 0.0], Some("proj"), 1).unwrap()[0].id);
+        assert_eq!(
+            results[0].id,
+            db.search_vector(&[1.0, 0.0, 0.0], Some("proj"), 1).unwrap()[0].id
+        );
         assert!((results[0].score - 1.0).abs() < 0.001); // exact match
     }
 
@@ -211,7 +226,9 @@ mod tests {
         db.insert_memory(m1).unwrap();
         db.insert_memory(m2).unwrap();
 
-        let results_a = db.search_vector(&[1.0, 0.0, 0.0], Some("proj-a"), 10).unwrap();
+        let results_a = db
+            .search_vector(&[1.0, 0.0, 0.0], Some("proj-a"), 10)
+            .unwrap();
         assert_eq!(results_a.len(), 1);
 
         // Global search (no project filter)
@@ -227,14 +244,18 @@ mod tests {
         let id = db.insert_memory(m1).unwrap();
 
         // Should find it
-        let results = db.search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10).unwrap();
+        let results = db
+            .search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10)
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         // Invalidate it
         db.invalidate_memory(&id, None, None).unwrap();
 
         // Should no longer find it
-        let results = db.search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10).unwrap();
+        let results = db
+            .search_vector(&[1.0, 0.0, 0.0], Some("proj"), 10)
+            .unwrap();
         assert_eq!(results.len(), 0);
     }
 }

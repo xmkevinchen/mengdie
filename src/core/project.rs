@@ -54,12 +54,14 @@ fn read_project_name(dir: &Path) -> Option<String> {
                             let rest = rest.trim_start();
                             if let Some(rest) = rest.strip_prefix('=') {
                                 let val = rest.trim();
-                                // Extract quoted string properly (handle inline comments)
-                                let val = if val.starts_with('"') {
-                                    // Find matching close quote
-                                    val[1..].find('"').map(|end| &val[1..1 + end])
-                                } else if val.starts_with('\'') {
-                                    val[1..].find('\'').map(|end| &val[1..1 + end])
+                                // Extract quoted string properly (handle inline comments).
+                                // NOTE: intentionally NOT escape-aware — `"foo\"bar"` terminates
+                                // at the first unescaped `"` after the opening. See
+                                // test_read_project_name_quote_in_value_terminates_early.
+                                let val = if let Some(rest) = val.strip_prefix('"') {
+                                    rest.find('"').map(|end| &rest[..end])
+                                } else if let Some(rest) = val.strip_prefix('\'') {
+                                    rest.find('\'').map(|end| &rest[..end])
                                 } else {
                                     // Unquoted: take until whitespace or comment
                                     Some(val.split_once('#').map(|(v, _)| v.trim()).unwrap_or(val))
@@ -207,8 +209,12 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[project]\nname = \"my-project\"\n",
-        ).unwrap();
-        assert_eq!(read_project_name(dir.path()), Some("my-project".to_string()));
+        )
+        .unwrap();
+        assert_eq!(
+            read_project_name(dir.path()),
+            Some("my-project".to_string())
+        );
     }
 
     #[test]
@@ -218,10 +224,14 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[project]\nname = \"parent-project\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         let subdir = dir.path().join("subdir");
         std::fs::create_dir(&subdir).unwrap();
-        assert_eq!(read_project_name(&subdir), Some("parent-project".to_string()));
+        assert_eq!(
+            read_project_name(&subdir),
+            Some("parent-project".to_string())
+        );
     }
 
     #[test]
@@ -237,10 +247,7 @@ mod tests {
     #[test]
     fn test_read_project_name_empty_name_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".mengdie.toml"),
-            "[project]\nname = \"\"\n",
-        ).unwrap();
+        std::fs::write(dir.path().join(".mengdie.toml"), "[project]\nname = \"\"\n").unwrap();
         // Empty name should be treated as absent
         assert_eq!(read_project_name(dir.path()), None);
     }
@@ -249,10 +256,7 @@ mod tests {
     fn test_read_project_name_malformed_toml() {
         let dir = tempfile::tempdir().unwrap();
         // No [project] section
-        std::fs::write(
-            dir.path().join(".mengdie.toml"),
-            "name = \"no-section\"\n",
-        ).unwrap();
+        std::fs::write(dir.path().join(".mengdie.toml"), "name = \"no-section\"\n").unwrap();
         assert_eq!(read_project_name(dir.path()), None);
     }
 
@@ -262,7 +266,8 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[other]\nname = \"wrong\"\n[project]\nname = \"right\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(read_project_name(dir.path()), Some("right".to_string()));
     }
 
@@ -272,8 +277,12 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[project]\nname = 'single-quoted'\n",
-        ).unwrap();
-        assert_eq!(read_project_name(dir.path()), Some("single-quoted".to_string()));
+        )
+        .unwrap();
+        assert_eq!(
+            read_project_name(dir.path()),
+            Some("single-quoted".to_string())
+        );
     }
 
     #[test]
@@ -282,7 +291,8 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[project]\nname = \"test-project\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         // Should return the name directly, not a hash
         assert_eq!(infer_project_id(dir.path()), "test-project");
     }
@@ -293,8 +303,12 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[project]\nname = \"my-project\"  # set by CI\n",
-        ).unwrap();
-        assert_eq!(read_project_name(dir.path()), Some("my-project".to_string()));
+        )
+        .unwrap();
+        assert_eq!(
+            read_project_name(dir.path()),
+            Some("my-project".to_string())
+        );
     }
 
     #[test]
@@ -303,7 +317,8 @@ mod tests {
         std::fs::write(
             dir.path().join(".mengdie.toml"),
             "[project]\n# name = \"commented-out\"\nname = \"active\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(read_project_name(dir.path()), Some("active".to_string()));
     }
 
@@ -318,5 +333,50 @@ mod tests {
         std::fs::create_dir(&subdir).unwrap();
         // No .mengdie.toml anywhere in the tree
         assert_eq!(read_project_name(&subdir), None);
+    }
+
+    /// Regression guard for plan 008 Step 1 `manual_strip` refactor in
+    /// `read_project_name`. The refactor switches `val[1..].find('"')`-style
+    /// indexing to `strip_prefix('"')` + `find`, which MUST preserve the
+    /// exact current behavior including:
+    ///   (a) our TOML-ish parser is NOT escape-aware — a `\"` inside a
+    ///       quoted value terminates the string at the `"` following the
+    ///       backslash; the `\` is NOT consumed. This test captures that
+    ///       existing behavior so the clippy-style refactor cannot
+    ///       silently "fix" it into real escape handling.
+    ///   (b) multi-byte UTF-8 inside a quoted value is returned intact.
+    /// If this test ever needs to change, the refactor has altered
+    /// semantics — reject the diff.
+    #[test]
+    fn test_read_project_name_quote_in_value_terminates_early() {
+        // Input line in the file: name = "foo\"bar"
+        // Our parser stops at the first unescaped `"`, so the extracted
+        // value is "foo\" (backslash preserved, `bar"` dropped).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"foo\\\"bar\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_project_name(dir.path()),
+            Some("foo\\".to_string()),
+            "parser is intentionally not escape-aware; refactor must preserve this"
+        );
+    }
+
+    #[test]
+    fn test_read_project_name_unicode_value_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mengdie.toml"),
+            "[project]\nname = \"项目名称\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_project_name(dir.path()),
+            Some("项目名称".to_string()),
+            "multi-byte UTF-8 content must pass through unchanged"
+        );
     }
 }

@@ -6,9 +6,9 @@ const SCHEMA_VERSION: i64 = 3;
 /// Check if a column exists in a table (for crash-safe migrations).
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
-    let exists = stmt.query_map([], |row| row.get::<_, String>(1))?.any(|r| {
-        r.map(|name| name == column).unwrap_or(false)
-    });
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|r| r.map(|name| name == column).unwrap_or(false));
     Ok(exists)
 }
 
@@ -91,16 +91,18 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     // Migration v2: content_hash dedup replaces source_file dedup
     if current_version < 2 {
         if !column_exists(conn, "memory_entries", "content_hash")? {
-            conn.execute_batch(
-                "ALTER TABLE memory_entries ADD COLUMN content_hash TEXT;"
-            )?;
+            conn.execute_batch("ALTER TABLE memory_entries ADD COLUMN content_hash TEXT;")?;
         }
 
         // Backfill content_hash for any existing rows (safety net)
-        let mut stmt = conn.prepare("SELECT id, content FROM memory_entries WHERE content_hash IS NULL")?;
-        let rows: Vec<(String, String)> = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?.filter_map(|r| r.ok()).collect();
+        let mut stmt =
+            conn.prepare("SELECT id, content FROM memory_entries WHERE content_hash IS NULL")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         for (id, content) in &rows {
             let hash = compute_content_hash(content);
@@ -114,17 +116,13 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_memory_source;
              CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_content_hash
-                 ON memory_entries(project_id, content_hash);"
+                 ON memory_entries(project_id, content_hash);",
         )?;
     }
 
     // Migration v3: persist invalidation reason for audit trail
-    if current_version < 3 {
-        if !column_exists(conn, "memory_entries", "invalidation_reason")? {
-            conn.execute_batch(
-                "ALTER TABLE memory_entries ADD COLUMN invalidation_reason TEXT;"
-            )?;
-        }
+    if current_version < 3 && !column_exists(conn, "memory_entries", "invalidation_reason")? {
+        conn.execute_batch("ALTER TABLE memory_entries ADD COLUMN invalidation_reason TEXT;")?;
     }
 
     // Set schema version

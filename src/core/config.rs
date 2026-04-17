@@ -38,7 +38,9 @@ impl Default for LlmConfig {
 
 impl Default for ClaudeCliConfig {
     fn default() -> Self {
-        Self { cli_path: "claude".to_string() }
+        Self {
+            cli_path: "claude".to_string(),
+        }
     }
 }
 
@@ -187,10 +189,16 @@ model = "file-model"
     #[test]
     fn malformed_timeout_env_errors_with_value() {
         let mut env = HashMap::new();
-        env.insert("MENGDIE_LLM_TIMEOUT_SECS".to_string(), "not-a-number".to_string());
+        env.insert(
+            "MENGDIE_LLM_TIMEOUT_SECS".to_string(),
+            "not-a-number".to_string(),
+        );
         let err = MengdieConfig::load_with_env(MengdieConfig::default(), &env).unwrap_err();
         let display = format!("{err:#}");
-        assert!(display.contains("MENGDIE_LLM_TIMEOUT_SECS"), "err: {display}");
+        assert!(
+            display.contains("MENGDIE_LLM_TIMEOUT_SECS"),
+            "err: {display}"
+        );
         assert!(display.contains("not-a-number"), "err: {display}");
     }
 

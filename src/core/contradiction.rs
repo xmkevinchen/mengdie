@@ -66,17 +66,17 @@ impl Db {
              FROM memory_entries
              WHERE project_id = ?1
              AND valid_until IS NULL
-             AND entities != ''"
+             AND entities != ''",
         )?;
 
         let rows = stmt.query_map(params![project_id], |row| {
             Ok((
-                row.get::<_, String>(0)?,  // id
-                row.get::<_, String>(1)?,  // title
-                row.get::<_, String>(2)?,  // entities
-                row.get::<_, String>(3)?,  // knowledge_type
+                row.get::<_, String>(0)?,          // id
+                row.get::<_, String>(1)?,          // title
+                row.get::<_, String>(2)?,          // entities
+                row.get::<_, String>(3)?,          // knowledge_type
                 row.get::<_, Option<Vec<u8>>>(4)?, // embedding
-                row.get::<_, String>(5)?,  // created_at
+                row.get::<_, String>(5)?,          // created_at
             ))
         })?;
 
@@ -121,16 +121,15 @@ impl Db {
             // Entity overlap + created within 30 days + minimum semantic similarity
             // (without similarity floor, common tags like "auth" would always trigger)
             if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&created_at) {
-                let days_apart = (now - created.with_timezone(&chrono::Utc))
-                    .num_days()
-                    .abs();
+                let days_apart = (now - created.with_timezone(&chrono::Utc)).num_days().abs();
                 if days_apart < RECENT_CONFLICT_WINDOW_DAYS {
                     let has_similarity = match (new_embedding, &embedding_blob) {
-                        (Some(new_emb), Some(blob)) => {
-                            blob_to_embedding(blob)
-                                .map(|existing_emb| cosine_similarity(new_emb, &existing_emb) > RECENT_CONFLICT_SIMILARITY_FLOOR)
-                                .unwrap_or(false)
-                        }
+                        (Some(new_emb), Some(blob)) => blob_to_embedding(blob)
+                            .map(|existing_emb| {
+                                cosine_similarity(new_emb, &existing_emb)
+                                    > RECENT_CONFLICT_SIMILARITY_FLOOR
+                            })
+                            .unwrap_or(false),
                         _ => false, // No embeddings → can't verify similarity, skip flagging
                     };
                     if has_similarity {
@@ -158,7 +157,14 @@ mod tests {
         Db::open_in_memory().unwrap()
     }
 
-    fn insert_mem(db: &Db, project: &str, title: &str, entities: &str, knowledge_type: &str, embedding: &[f32]) -> String {
+    fn insert_mem(
+        db: &Db,
+        project: &str,
+        title: &str,
+        entities: &str,
+        knowledge_type: &str,
+        embedding: &[f32],
+    ) -> String {
         db.insert_memory(NewMemory {
             project_id: project.to_string(),
             source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
@@ -169,13 +175,21 @@ mod tests {
             entities: entities.to_string(),
             embedding: Some(embedding_to_blob(embedding)),
             embedding_dim: Some(embedding.len() as i64),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     #[test]
     fn test_no_conflicts_empty_entities() {
         let db = test_db();
-        insert_mem(&db, "proj", "Old Decision", "auth,jwt", "decisional", &[1.0, 0.0, 0.0]);
+        insert_mem(
+            &db,
+            "proj",
+            "Old Decision",
+            "auth,jwt",
+            "decisional",
+            &[1.0, 0.0, 0.0],
+        );
 
         let conflicts = db
             .check_contradictions(&[], Some(&[1.0, 0.0, 0.0]), "decisional", "proj")
@@ -186,7 +200,14 @@ mod tests {
     #[test]
     fn test_no_conflicts_no_overlap() {
         let db = test_db();
-        insert_mem(&db, "proj", "Old Decision", "database,postgresql", "decisional", &[0.0, 1.0, 0.0]);
+        insert_mem(
+            &db,
+            "proj",
+            "Old Decision",
+            "database,postgresql",
+            "decisional",
+            &[0.0, 1.0, 0.0],
+        );
 
         let conflicts = db
             .check_contradictions(
@@ -203,7 +224,14 @@ mod tests {
     fn test_evolution_candidate() {
         let db = test_db();
         // Similar embedding + same entities + both decisional
-        insert_mem(&db, "proj", "Old Auth Decision", "auth,jwt", "decisional", &[0.9, 0.1, 0.0]);
+        insert_mem(
+            &db,
+            "proj",
+            "Old Auth Decision",
+            "auth,jwt",
+            "decisional",
+            &[0.9, 0.1, 0.0],
+        );
 
         let conflicts = db
             .check_contradictions(
@@ -214,14 +242,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(conflicts.len(), 1);
-        assert!(matches!(conflicts[0].reason, ConflictReason::EvolutionCandidate { .. }));
+        assert!(matches!(
+            conflicts[0].reason,
+            ConflictReason::EvolutionCandidate { .. }
+        ));
     }
 
     #[test]
     fn test_recent_conflict() {
         let db = test_db();
         // Same entities, created recently, somewhat similar (above 0.4 floor)
-        insert_mem(&db, "proj", "Auth Review", "auth", "experiential", &[0.7, 0.5, 0.1]);
+        insert_mem(
+            &db,
+            "proj",
+            "Auth Review",
+            "auth",
+            "experiential",
+            &[0.7, 0.5, 0.1],
+        );
 
         let conflicts = db
             .check_contradictions(
@@ -232,14 +270,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(conflicts.len(), 1);
-        assert!(matches!(conflicts[0].reason, ConflictReason::RecentConflict { .. }));
+        assert!(matches!(
+            conflicts[0].reason,
+            ConflictReason::RecentConflict { .. }
+        ));
     }
 
     #[test]
     fn test_no_recent_conflict_low_similarity() {
         let db = test_db();
         // Same entity but orthogonal embeddings — below 0.4 similarity floor
-        insert_mem(&db, "proj", "Auth Setup Guide", "auth", "factual", &[1.0, 0.0, 0.0]);
+        insert_mem(
+            &db,
+            "proj",
+            "Auth Setup Guide",
+            "auth",
+            "factual",
+            &[1.0, 0.0, 0.0],
+        );
 
         let conflicts = db
             .check_contradictions(
@@ -249,13 +297,23 @@ mod tests {
                 "proj",
             )
             .unwrap();
-        assert!(conflicts.is_empty(), "orthogonal embeddings should not trigger RecentConflict");
+        assert!(
+            conflicts.is_empty(),
+            "orthogonal embeddings should not trigger RecentConflict"
+        );
     }
 
     #[test]
     fn test_no_conflict_with_invalidated() {
         let db = test_db();
-        let id = insert_mem(&db, "proj", "Old Auth", "auth", "decisional", &[0.9, 0.1, 0.0]);
+        let id = insert_mem(
+            &db,
+            "proj",
+            "Old Auth",
+            "auth",
+            "decisional",
+            &[0.9, 0.1, 0.0],
+        );
         db.invalidate_memory(&id, None, None).unwrap();
 
         let conflicts = db
@@ -266,13 +324,23 @@ mod tests {
                 "proj",
             )
             .unwrap();
-        assert!(conflicts.is_empty(), "invalidated memories should not trigger conflicts");
+        assert!(
+            conflicts.is_empty(),
+            "invalidated memories should not trigger conflicts"
+        );
     }
 
     #[test]
     fn test_cross_project_no_conflict() {
         let db = test_db();
-        insert_mem(&db, "proj-a", "Auth Decision", "auth", "decisional", &[0.9, 0.1, 0.0]);
+        insert_mem(
+            &db,
+            "proj-a",
+            "Auth Decision",
+            "auth",
+            "decisional",
+            &[0.9, 0.1, 0.0],
+        );
 
         let conflicts = db
             .check_contradictions(

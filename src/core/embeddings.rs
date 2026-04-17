@@ -62,17 +62,14 @@ impl Embedder {
 
 /// Serialize a Vec<f32> to IEEE 754 little-endian bytes for BLOB storage.
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 /// Deserialize IEEE 754 little-endian BLOB back to Vec<f32>.
 /// Returns error if blob length is not divisible by 4 (corrupted data).
 pub fn blob_to_embedding(blob: &[u8]) -> anyhow::Result<Vec<f32>> {
     anyhow::ensure!(
-        blob.len() % 4 == 0,
+        blob.len().is_multiple_of(4),
         "invalid embedding blob: length {} not divisible by 4",
         blob.len()
     );
@@ -113,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_blob_roundtrip() {
-        let original = vec![1.0_f32, -0.5, 0.0, 3.14159];
+        let original = vec![1.0_f32, -0.5, 0.0, std::f32::consts::PI];
         let blob = embedding_to_blob(&original);
         assert_eq!(blob.len(), 16); // 4 floats * 4 bytes
         let restored = blob_to_embedding(&blob).unwrap();
