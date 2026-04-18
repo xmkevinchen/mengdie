@@ -88,7 +88,7 @@ async fn end_to_end_dream_synthesis_writes_one_row_with_six_links() {
     let llm_cfg: LlmConfig = cfg.llm;
     let provider = build_provider(&llm_cfg).expect("provider construction should succeed");
 
-    let result = run_synthesis_pass(
+    let (result, _pair_clusters_processed) = run_synthesis_pass(
         &db,
         Some("e2e-proj"),
         provider.as_ref(),

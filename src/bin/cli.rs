@@ -234,7 +234,7 @@ async fn cmd_dream(
 
     let cfg = mengdie::core::config::MengdieConfig::load_from_process_env()?;
     let provider = build_provider(&cfg.llm)?;
-    let syn = run_synthesis_pass(
+    let (syn, pair_clusters_processed) = run_synthesis_pass(
         db,
         project,
         provider.as_ref(),
@@ -245,12 +245,22 @@ async fn cmd_dream(
     )
     .await?;
 
+    let pair_skip_pct = if pair_clusters_processed == 0 {
+        0
+    } else {
+        (syn.syntheses_llm_skipped * 100) / pair_clusters_processed
+    };
     println!(
         "Synthesis: {} syntheses created from {} clusters \
-         ({} residuals skipped, {} LLM-call errors, {} parse errors, {} memories truncated)",
+         ({} residuals skipped, {} LLM-skipped ({}/{} pair-clusters = {}%), \
+         {} LLM-call errors, {} parse errors, {} memories truncated)",
         syn.syntheses_created,
         syn.clusters_processed,
         syn.residuals_skipped,
+        syn.syntheses_llm_skipped,
+        syn.syntheses_llm_skipped,
+        pair_clusters_processed,
+        pair_skip_pct,
         syn.llm_call_errors,
         syn.parse_errors,
         syn.memories_truncated

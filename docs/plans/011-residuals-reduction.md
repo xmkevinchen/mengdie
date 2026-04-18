@@ -95,10 +95,10 @@ mengdie dream [--synthesize]
 
 ## Steps
 
-### Step 1: Flip `DEFAULT_MIN_SIZE` 3→2 + backlog trigger rewording (AC1)
+### Step 1: Flip `DEFAULT_MIN_SIZE` 3→2 + backlog trigger rewording (AC1) — commit 2c25470
 
-- [ ] Change `DEFAULT_MIN_SIZE: usize = 3` → `2` in `src/core/clustering.rs:23`.
-- [ ] Add a doc comment on the constant (alongside the existing `DEFAULT_THRESHOLD` justification):
+- [x] Change `DEFAULT_MIN_SIZE: usize = 3` → `2` in `src/core/clustering.rs:23`.
+- [x] Add a doc comment on the constant (alongside the existing `DEFAULT_THRESHOLD` justification):
   ```rust
   /// DEFAULT_MIN_SIZE = 2: lowered from 3 (discussion 018) based on
   /// empirical spot-check — ~60% of pair-clusters in a solo-dev AE
@@ -114,24 +114,24 @@ mengdie dream [--synthesize]
   /// validation first.
   pub const DEFAULT_MIN_SIZE: usize = 2;
   ```
-- [ ] Update `docs/backlog/BL-clustering-validation.md` trigger #2 wording:
+- [x] Update `docs/backlog/BL-clustering-validation.md` trigger #2 wording:
   - Old: ">50% residuals = signal"
   - New: ">50% residuals AND synthesis_hit_rate < 10% = signal
     (synthesis_hit_rate instrumentation deferred; use residual-%
     only until search logging exists)"
-- [ ] Verify: `cargo test --lib clustering::` passes. `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
+- [x] Verify: `cargo test --lib clustering::` passes. `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
 
 Expected files: `src/core/clustering.rs`, `docs/backlog/BL-clustering-validation.md`
 
-### Step 2: Null-escape-hatch — SYSTEM_PROMPT + SynthesisOutcome + counter + CLI (AC2, AC3, AC4, AC5-stub)
+### Step 2: Null-escape-hatch — SYSTEM_PROMPT + SynthesisOutcome + counter + CLI (AC2, AC3, AC4, AC5-stub) — commit PENDING
 
-- [ ] Update `SYSTEM_PROMPT` in `src/core/synthesis.rs:4` (literal new text, keep as a single `const`):
+- [x] Update `SYSTEM_PROMPT` in `src/core/synthesis.rs:4` (literal new text, keep as a single `const`):
   ```rust
   const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Most clusters have a genuine common thread; when they do, output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON. If the memories do NOT share a meaningful common thread (they are merely adjacent topics or share vocabulary without shared intent), output exactly the JSON object {\"skip\": true, \"reason\": \"<one short sentence>\"} instead. Do not invent a consolidation when none exists.";
   ```
-- [ ] Update the regression-guard `const EXPECTED_SYSTEM_PROMPT` at `src/core/synthesis.rs:166` (inside `#[cfg(test)] mod tests`) to match byte-for-byte. Referenced by two test assertions at `synthesis.rs:204` and `synthesis.rs:253`; both tests will fail loudly if the prod prompt and test const drift out of sync, which is the intended regression guard.
+- [x] Update the regression-guard `const EXPECTED_SYSTEM_PROMPT` at `src/core/synthesis.rs:166` (inside `#[cfg(test)] mod tests`) to match byte-for-byte. Referenced by two test assertions at `synthesis.rs:204` and `synthesis.rs:253`; both tests will fail loudly if the prod prompt and test const drift out of sync, which is the intended regression guard.
 
-- [ ] Introduce `SynthesisOutcome` enum in `synthesis.rs`, replacing `SynthesisDraft` as the return type of `parse_synthesis_response`:
+- [x] Introduce `SynthesisOutcome` enum in `synthesis.rs`, replacing `SynthesisDraft` as the return type of `parse_synthesis_response`:
   ```rust
   pub enum SynthesisOutcome {
       Synthesized(SynthesisDraft),
@@ -149,13 +149,13 @@ Expected files: `src/core/clustering.rs`, `docs/backlog/BL-clustering-validation
   3. If `skip == Some(true)` → return `Ok(SynthesisOutcome::Skipped { reason: reason.unwrap_or_default() })` (empty reason is allowed; parser never hard-errors on missing reason).
   4. Else: validate title+content+entities as today and return `Ok(Synthesized(draft))`.
 
-- [ ] In `src/core/dreaming.rs`: extend `SynthesisResult` with `pub syntheses_llm_skipped: usize`. Keep existing fields (`clusters_processed`, `syntheses_created`, `llm_call_errors`, `parse_errors`, `residuals_skipped`, `memories_truncated`).
+- [x] In `src/core/dreaming.rs`: extend `SynthesisResult` with `pub syntheses_llm_skipped: usize`. Keep existing fields (`clusters_processed`, `syntheses_created`, `llm_call_errors`, `parse_errors`, `residuals_skipped`, `memories_truncated`).
 
-- [ ] In `run_synthesis_pass` (`src/core/dreaming.rs`), handle the new Skipped variant from `parse_synthesis_response`:
+- [x] In `run_synthesis_pass` (`src/core/dreaming.rs`), handle the new Skipped variant from `parse_synthesis_response`:
   - Match on `SynthesisOutcome`: `Synthesized(draft)` → existing insert-row path; `Skipped { reason }` → log at `info` level with `cluster_ids` + `reason` + cluster_size (so `reason` is observable per-run, not only aggregated). Increment `syntheses_llm_skipped`. Do NOT insert memory row. Do NOT insert link rows.
   - Pair-cluster attribution: track `pair_clusters_processed: usize` as a **local variable** inside `run_synthesis_pass` (not a new field on `SynthesisResult`; it's a derived display value with no external caller). Count by `trimmed_ids.len() == 2` **pre-DB-load**, not by `memories.len()` post-load (architect must-fix: a 2-member cluster where DB bulk-load returns fewer than 2 rows falls through the `if memories.len() < min_size` continue and would silently miss both `syntheses_llm_skipped` and the pair-cluster denominator — count pre-load so the denominator is consistent with `clusters_processed`, which is also pre-loop, pre-load). Pass the local count to the CLI printer via a return tuple or small helper; do not promote to a public struct field.
 
-- [ ] Update the `cmd_dream` CLI output in `src/bin/cli.rs` to the new format. `pair_clusters_processed` is returned from `run_synthesis_pass` as a local-variable tuple component (not on `SynthesisResult`; see pair-cluster attribution note above):
+- [x] Update the `cmd_dream` CLI output in `src/bin/cli.rs` to the new format. `pair_clusters_processed` is returned from `run_synthesis_pass` as a local-variable tuple component (not on `SynthesisResult`; see pair-cluster attribution note above):
   ```rust
   let (syn, pair_clusters_processed) = run_synthesis_pass(...).await?;
   let pair_skip_pct = if pair_clusters_processed == 0 {
@@ -180,19 +180,19 @@ Expected files: `src/core/clustering.rs`, `docs/backlog/BL-clustering-validation
   ```
   The line now shows both absolute counts AND the percentage (ai-engineer Consider: denominator disambiguation — "50%" alone could be 1/2 or 50/100; the absolute pair denominator resolves this).
 
-- [ ] **API migration (Step 2 drift surface)**: every existing test or internal caller that destructures `SynthesisDraft` directly now needs to pattern-match `SynthesisOutcome::Synthesized(draft)`. Grep `SynthesisDraft {` across `src/` + `tests/` — expected hits: ~10 test assertions in `src/core/synthesis.rs` tests module + usage inside `run_synthesis_pass`'s happy path + e2e test in `tests/dream_synthesis.rs`. This is mechanical; batch-edit with a single sweep.
+- [x] **API migration (Step 2 drift surface)**: every existing test or internal caller that destructures `SynthesisDraft` directly now needs to pattern-match `SynthesisOutcome::Synthesized(draft)`. Grep `SynthesisDraft {` across `src/` + `tests/` — expected hits: ~10 test assertions in `src/core/synthesis.rs` tests module + usage inside `run_synthesis_pass`'s happy path + e2e test in `tests/dream_synthesis.rs`. This is mechanical; batch-edit with a single sweep.
 
-- [ ] New unit tests in `src/core/synthesis.rs`:
+- [x] New unit tests in `src/core/synthesis.rs`:
   1. `parser_skip_happy_path` — `{"skip": true, "reason": "unrelated"}` → `Ok(SynthesisOutcome::Skipped { reason: "unrelated" })`.
   2. `parser_skip_missing_reason` — `{"skip": true}` → `Ok(SynthesisOutcome::Skipped { reason: "" })`.
   3. `parser_skip_with_llm_preamble` — `"Here you go:\n\n{\"skip\":true,\"reason\":\"...\"}"` → parses cleanly (brace-depth extractor still works).
   4. `parser_skip_false_is_synthesis` — `{"skip": false, "title": "T", "content": "...", "entities": []}` → `Synthesized(_)` (belt-and-suspenders: explicit false means "do synthesize").
 
-- [ ] New unit tests in `src/core/dreaming.rs`:
+- [x] New unit tests in `src/core/dreaming.rs`:
   1. `test_synthesis_skip_increments_counter_no_db_write` — stub provider returns the skip JSON for one cluster → `syntheses_llm_skipped == 1`, `syntheses_created == 0`, no row in `memory_entries`, no rows in `memory_synthesis_links`.
   2. `test_synthesis_pair_skip_percentage_computed_against_pairs` — 4 clusters (2 pair, 2 triple), stub skips 1 pair cluster only → printed/returned pair_skip_pct = 50 (1 skip / 2 pair-clusters), NOT 25 (1 skip / 4 total).
 
-- [ ] **AC5 stub** — commit a placeholder `## BL-residuals-reduction empirical results` section to `docs/backlog/BL-clustering-validation.md` with literal `TODO` fields:
+- [x] **AC5 stub** — commit a placeholder `## BL-residuals-reduction empirical results` section to `docs/backlog/BL-clustering-validation.md` with literal `TODO` fields:
   ```markdown
   ## BL-residuals-reduction empirical results
 
@@ -207,7 +207,7 @@ Expected files: `src/core/clustering.rs`, `docs/backlog/BL-clustering-validation
   ```
   This makes AC5 verifiable at `/ae:review` time (the stub exists and grep for `TODO` succeeds); the live audit itself is a post-ship follow-up task outside the plan cycle.
 
-- [ ] Verify: `cargo test` passes (all existing + new). `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
+- [x] Verify: `cargo test` passes (all existing + new). `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
 
 Expected files: `src/core/synthesis.rs`, `src/core/dreaming.rs`, `src/bin/cli.rs`, `tests/dream_synthesis.rs` (mechanical `SynthesisOutcome::Synthesized` wrapping), `docs/backlog/BL-clustering-validation.md` (AC5 stub)
 

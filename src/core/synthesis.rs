@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use crate::core::db::MemoryEntry;
 
-const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON.";
+const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Most clusters have a genuine common thread; when they do, output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON. If the memories do NOT share a meaningful common thread (they are merely adjacent topics or share vocabulary without shared intent), output exactly the JSON object {\"skip\": true, \"reason\": \"<one short sentence>\"} instead. Do not invent a consolidation when none exists.";
 
 pub const CONTENT_CHAR_LIMIT: usize = 4000;
 const TITLE_HARD_CAP: usize = 200;
@@ -19,6 +19,18 @@ pub struct SynthesisDraft {
     pub content: String,
     pub entities: String,
     pub source_memory_ids: Vec<String>,
+}
+
+/// Result of parsing an LLM response. BL-residuals-reduction (plan 011):
+/// the LLM is instructed to return `{"skip": true, "reason": "..."}` when a
+/// cluster lacks a meaningful common thread (topically-adjacent pairs,
+/// shared-vocabulary-but-distinct-intent pairs). The orchestration pass
+/// counts `Skipped` as a separate outcome from successful synthesis or
+/// parse errors, so the skip rate can be inspected per run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SynthesisOutcome {
+    Synthesized(SynthesisDraft),
+    Skipped { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,17 +92,28 @@ pub fn build_synthesis_prompt(input: &SynthesisInput) -> (String, String) {
 pub fn parse_synthesis_response(
     raw: &str,
     source_ids: &[String],
-) -> Result<SynthesisDraft, SynthesisError> {
+) -> Result<SynthesisOutcome, SynthesisError> {
     let json_slice = extract_first_json_object(raw).ok_or(SynthesisError::NoJsonObject)?;
 
     #[derive(Deserialize)]
-    struct RawJson {
+    struct RawEnvelope {
+        skip: Option<bool>,
+        reason: Option<String>,
         title: Option<String>,
         content: Option<String>,
         entities: Option<Vec<String>>,
     }
 
-    let parsed: RawJson = serde_json::from_str(json_slice)?;
+    let parsed: RawEnvelope = serde_json::from_str(json_slice)?;
+
+    // Null-escape-hatch: LLM returned `{"skip": true, ...}` signaling the
+    // cluster lacks a meaningful common thread. Return Skipped without
+    // validating title/content (they may be absent).
+    if parsed.skip == Some(true) {
+        return Ok(SynthesisOutcome::Skipped {
+            reason: parsed.reason.unwrap_or_default(),
+        });
+    }
 
     let title = parsed
         .title
@@ -113,12 +136,12 @@ pub fn parse_synthesis_response(
         title
     };
 
-    Ok(SynthesisDraft {
+    Ok(SynthesisOutcome::Synthesized(SynthesisDraft {
         title,
         content,
         entities: entities.join(","),
         source_memory_ids: source_ids.to_vec(),
-    })
+    }))
 }
 
 /// Extract the first complete top-level JSON object from `raw`, ignoring
@@ -163,7 +186,20 @@ fn extract_first_json_object(raw: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    const EXPECTED_SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON.";
+    const EXPECTED_SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Most clusters have a genuine common thread; when they do, output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON. If the memories do NOT share a meaningful common thread (they are merely adjacent topics or share vocabulary without shared intent), output exactly the JSON object {\"skip\": true, \"reason\": \"<one short sentence>\"} instead. Do not invent a consolidation when none exists.";
+
+    // Test helper: unwrap SynthesisOutcome::Synthesized variant; panic otherwise.
+    // Used by the tests that existed pre-SynthesisOutcome migration and still
+    // expect the synthesis (not skip) path. Skip-path tests pattern-match
+    // directly.
+    fn unwrap_synthesized(outcome: SynthesisOutcome) -> SynthesisDraft {
+        match outcome {
+            SynthesisOutcome::Synthesized(draft) => draft,
+            SynthesisOutcome::Skipped { reason } => {
+                panic!("expected Synthesized, got Skipped: {reason}")
+            }
+        }
+    }
 
     fn mk_memory(id: &str, title: &str, entities: &str, content: &str) -> MemoryEntry {
         MemoryEntry {
@@ -257,7 +293,7 @@ mod tests {
     fn parser_happy_path() {
         let raw = r#"{"title":"X","content":"Y.","entities":["a","b"]}"#;
         let ids = vec!["m1".to_string(), "m2".to_string()];
-        let draft = parse_synthesis_response(raw, &ids).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &ids).unwrap());
         assert_eq!(draft.title, "X");
         assert_eq!(draft.content, "Y.");
         assert_eq!(draft.entities, "a,b");
@@ -267,7 +303,7 @@ mod tests {
     #[test]
     fn parser_tolerates_preamble() {
         let raw = "Sure! Here:\n\n{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}";
-        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
         assert_eq!(draft.title, "X");
         assert_eq!(draft.entities, "a");
     }
@@ -275,14 +311,14 @@ mod tests {
     #[test]
     fn parser_tolerates_postamble() {
         let raw = "{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}\n\nHope that helps!";
-        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
         assert_eq!(draft.title, "X");
     }
 
     #[test]
     fn parser_inner_braces_in_content() {
         let raw = r#"{"title":"X","content":"use Arc<Mutex<{}>>","entities":[]}"#;
-        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
         assert_eq!(draft.title, "X");
         assert_eq!(draft.content, "use Arc<Mutex<{}>>");
         assert_eq!(draft.entities, "");
@@ -339,7 +375,7 @@ mod tests {
         // would get absorbed, and then fail. With string-aware tracking, the
         // inner `{` and `}` inside JSON string values are ignored entirely.
         let raw = r#"{"title":"X","content":"quote with \"{unbalanced","entities":["a"]}"#;
-        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
         assert_eq!(draft.title, "X");
         assert_eq!(draft.content, r#"quote with "{unbalanced"#);
         assert_eq!(draft.entities, "a");
@@ -348,7 +384,7 @@ mod tests {
     #[test]
     fn parser_balanced_braces_inside_escaped_string() {
         let raw = r#"{"title":"X","content":"JSON example: \"{\"k\":1}\" end.","entities":["a"]}"#;
-        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
         assert_eq!(draft.title, "X");
         assert!(draft.content.contains("{\"k\":1}"));
     }
@@ -359,8 +395,55 @@ mod tests {
         // being told to output JSON only. The extractor should find the first
         // `{` inside the fence and parse.
         let raw = "```json\n{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}\n```";
-        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
         assert_eq!(draft.title, "X");
         assert_eq!(draft.content, "Y.");
+    }
+
+    // Plan 011 — null-escape-hatch parser tests
+
+    #[test]
+    fn parser_skip_happy_path() {
+        let raw = r#"{"skip": true, "reason": "unrelated topics"}"#;
+        let outcome = parse_synthesis_response(raw, &["a".to_string(), "b".to_string()]).unwrap();
+        match outcome {
+            SynthesisOutcome::Skipped { reason } => assert_eq!(reason, "unrelated topics"),
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parser_skip_missing_reason_returns_empty_string() {
+        let raw = r#"{"skip": true}"#;
+        let outcome = parse_synthesis_response(raw, &[]).unwrap();
+        match outcome {
+            SynthesisOutcome::Skipped { reason } => assert_eq!(reason, ""),
+            other => panic!("expected Skipped with empty reason, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parser_skip_with_llm_preamble_still_parses() {
+        // LLMs sometimes prepend narration despite the prompt.
+        let raw = "Sure, here you go:\n\n{\"skip\": true, \"reason\": \"topically adjacent\"}";
+        let outcome = parse_synthesis_response(raw, &[]).unwrap();
+        assert!(matches!(outcome, SynthesisOutcome::Skipped { .. }));
+    }
+
+    #[test]
+    fn parser_skip_false_is_treated_as_synthesis() {
+        // Belt-and-suspenders: explicit skip=false should fall through to
+        // synthesis validation, not be treated as a skip signal.
+        let raw = r#"{"skip": false, "title": "X", "content": "Y.", "entities": ["a"]}"#;
+        let outcome = parse_synthesis_response(raw, &[]).unwrap();
+        match outcome {
+            SynthesisOutcome::Synthesized(draft) => {
+                assert_eq!(draft.title, "X");
+                assert_eq!(draft.content, "Y.");
+            }
+            SynthesisOutcome::Skipped { reason } => {
+                panic!("skip=false should NOT be treated as Skipped (got reason={reason:?})")
+            }
+        }
     }
 }

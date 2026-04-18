@@ -148,3 +148,17 @@ Additional observations (not in original backlog triggers):
 residuals at looser threshold, or reduced min_size, or both. Document
 as a BL-residuals-reduction entry first, then plan when validated
 against a second dream run.
+
+## BL-residuals-reduction empirical results
+
+_Populated after the first real `mengdie dream --synthesize` run at the new defaults
+(min_size=2 + null-escape-hatch, plan 011). Do NOT delete this section; either fill
+it in with live data, or explicitly mark "insufficient data, re-run" and schedule
+another pass._
+
+- **Run date**: TODO
+- **Corpus size at run**: TODO memories
+- **Skip rate**: TODO % of pair-clusters (target < 25% hatch working, 25-40% monitor, > 40% revisit min_size)
+- **Skip classification (N skips audited)**: CORRECT-SKIP: TODO, FALSE-NEGATIVE: TODO, UNCLEAR: TODO
+- **Non-skipped synthesis quality (3 spot-checked)**: good / mixed / poor — TODO
+- **Decision**: keep new defaults / revert min_size / revert prompt only / tune further — TODO
