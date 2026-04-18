@@ -16,14 +16,6 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    env:
-      # The runner inherits the host user's shell env which includes a
-      # macOS Xcode SDKROOT (set locally for native macOS builds per
-      # project_infra memory). On the Linux runner `ring`'s C build
-      # blindly consumes SDKROOT and hands it to cc as -isysroot, which
-      # then fails because the Xcode path doesn't exist on Linux. Blank
-      # it out job-wide so no subprocess inherits a stale macOS value.
-      SDKROOT: ''
     steps:
       - uses: actions/checkout@v4
 
@@ -40,12 +32,14 @@ jobs:
         # (no rust-toolchain.toml) but we DO need these two components to
         # be present on the runner. rustup noops if they're already there.
         run: |
+          unset SDKROOT
           source ~/.cargo/env
           rustup component add rustfmt clippy
 
       - name: Toolchain version log
         # Sanity log only — not a guard. Helps debug CI-vs-local mismatches.
         run: |
+          unset SDKROOT
           source ~/.cargo/env
           rustc --version
           cargo fmt --version
@@ -53,15 +47,18 @@ jobs:
 
       - name: Format check
         run: |
+          unset SDKROOT
           source ~/.cargo/env
           cargo fmt --all -- --check
 
       - name: Clippy
         run: |
+          unset SDKROOT
           source ~/.cargo/env
           cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         run: |
+          unset SDKROOT
           source ~/.cargo/env
           cargo test
