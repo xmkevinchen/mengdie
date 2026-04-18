@@ -12,7 +12,8 @@ Core loop: AI tools produce knowledge → Mengdie ingests and filters → feeds 
 - **Storage**: `~/.mengdie/db.sqlite` (global, per-project search via git-inferred project_id)
 - **Ingestion**: AE pipeline file watcher library (conclusion.md, review.md, plan.md, retrospect.md) — library ready, daemon integration deferred to Phase 2
 - **Feedback**: ae:analyze post-research injection (Round 0 with provenance)
-- **Filtering**: Dreaming (frequency + relevance scoring, daily promotion pass)
+- **Filtering**: Dreaming — (1) frequency + relevance scoring with daily promotion pass, and (2) LLM-driven synthesis that clusters related memories and asks the model (via the claude CLI) to consolidate each cluster into a single synthesis memory
+- **LLM provider**: Trait-based abstraction with a claude-CLI-subprocess implementation (shells out to `claude -p` and streams stdout); credentials delegated to the CLI (mengdie never touches secrets)
 - **Contradiction**: Entity-tag directed comparison + temporal validity (valid_from/valid_until)
 - **Search**: Hybrid FTS5 + vector similarity, merged via Reciprocal Rank Fusion (RRF)
 
@@ -57,7 +58,11 @@ src/
     watcher.rs       # notify-based AE file watcher
     ingest.rs        # Watcher → parser → embed → store pipeline
     contradiction.rs # Entity-tag overlap + temporal validity checks
-    dreaming.rs      # Promotion logic (recall_count + avg_relevance)
+    dreaming.rs      # Promotion logic (recall_count + avg_relevance) + async LLM synthesis pass
+    clustering.rs    # Seed-neighborhood cosine clustering (BL-006; feeds dream synthesis)
+    synthesis.rs     # Pure prompt builder + brace-depth JSON parser for dream synthesis (BL-007)
+    llm.rs           # LlmProvider trait + ClaudeCliProvider subprocess impl (BL-005)
+    config.rs        # MengdieConfig — nested [llm] + [llm.claude_cli] TOML loader
     mcp_tools.rs     # MCP tool implementations (search, ingest, invalidate)
     metrics.rs       # Observability counters
     mod.rs
@@ -163,17 +168,42 @@ Backlog items always have: what to do, why it matters, when to revisit (trigger)
 
 ## Project Status
 
-Phase 1 complete — MVP built, validated, and iterating. At validation gate (2-week forced-use scorecard pending).
+Phase 1 complete, Phase 2 in progress. The intelligence layer (LLM synthesis
+built on a clustering + provider primitive) shipped mid-April 2026; first
+real `mengdie dream --synthesize` pass landed 13 syntheses against the
+production DB (empirical results in `docs/backlog/BL-clustering-validation.md`).
 
-**Completed plan cycles** (all reviewed PASS):
+**Completed plan cycles** (all reviewed PASS unless noted):
+
 1. `docs/plans/001-mvp-phase1.md` — Core MVP (MCP server, search, ingest, dreaming, contradiction)
 2. `docs/plans/002-close-the-loop.md` — AE integration (knowledge capture, watcher library, ae:analyze injection)
 3. `docs/plans/003-phase-1.1.md` — API contract correctness + skill wiring (enums, Phase C capture)
 4. `docs/plans/004-search-quality-fixes.md` — Dreaming threshold + FTS5 tokenization
+5. `docs/plans/005-project-naming.md` — Human-readable project_id (survives git remote changes)
+6. `docs/plans/007-llm-provider-claude-cli.md` (BL-005) — LlmProvider trait + ClaudeCliProvider (first of the Phase 2 intelligence primitives)
+7. `docs/plans/008-ci-pipeline-and-lint-debt.md` — Clippy cleanup + local pre-commit hooks + Forgejo CI (shipped as fmt-only; clippy+test deferred via `BL-ci-full-clippy-test`)
+8. `docs/plans/009-embedding-clustering.md` (BL-006) — Seed-neighborhood cosine clustering
+9. `docs/plans/010-dream-synthesis.md` (BL-007) — `mengdie dream --synthesize`, the first caller of BL-005 + BL-006; first real run produced 13 syntheses
 
-**Next step**: 2-week forced-use validation scorecard (from discussion 013) — not more features.
+Plan 006 (dream MVP) was superseded by the 007/009/010 split and is `status: cancelled`.
 
-**Deferred discussions** (findings in `docs/backlog/004-analyze-findings.md` with trigger conditions):
-006 (SQLite concurrency), 007 (embedding models), 009 (dreaming tuning), 010 (cross-project), 011 (MCP API design)
+**Next step (current)**: address the 67% residuals rate observed in the first
+real dream run (signal that clustering threshold or min_size is too strict
+for our corpus) — draft `BL-residuals-reduction` with a second-pass strategy.
+Sibling options: resume BL-008 (power-law decay), run `/ae:roadmap` over the
+growing backlog, or start the 2-week forced-use validation scorecard from
+discussion 013 (still unstarted).
 
-**Backlog**: `docs/backlog/` (4 files — review deferred items, analyze findings, qmd learnings)
+**Advisory rule for closing plans**: when `/ae:work` completes all plan
+checkboxes, the completion commit must also update the parent discussion's
+`status:` and `pipeline.work:` frontmatter — otherwise the dashboard and
+`/ae:next` see phantom-active discussions. See
+`docs/backlog/BL-ae-work-closes-parent-discussion.md` for the upstream
+(AE plugin skill) fix.
+
+**Backlog**: `docs/backlog/` — see the directory for the canonical,
+trigger-annotated list. Formerly-deferred discussions (006 SQLite
+concurrency, 007 embedding model tradeoffs, 009 dreaming tuning, 010
+cross-project, 011 MCP API design) remain `status: deferred` in
+`docs/discussions/`; their findings are already captured in
+`docs/backlog/004-analyze-findings.md` with trigger conditions.
