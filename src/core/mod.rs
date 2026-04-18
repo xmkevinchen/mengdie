@@ -1,3 +1,4 @@
+pub mod clustering;
 pub mod config;
 pub mod contradiction;
 pub mod db;
