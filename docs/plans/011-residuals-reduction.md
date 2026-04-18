@@ -123,7 +123,7 @@ mengdie dream [--synthesize]
 
 Expected files: `src/core/clustering.rs`, `docs/backlog/BL-clustering-validation.md`
 
-### Step 2: Null-escape-hatch — SYSTEM_PROMPT + SynthesisOutcome + counter + CLI (AC2, AC3, AC4, AC5-stub) — commit PENDING
+### Step 2: Null-escape-hatch — SYSTEM_PROMPT + SynthesisOutcome + counter + CLI (AC2, AC3, AC4, AC5-stub) — commit 1601ac5
 
 - [x] Update `SYSTEM_PROMPT` in `src/core/synthesis.rs:4` (literal new text, keep as a single `const`):
   ```rust

@@ -7,7 +7,7 @@ pipeline:
   analyze: done
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/011-residuals-reduction.md"
 tags: [clustering, residuals, dream-synthesis, parameter-tuning, bl-residuals-reduction]
 ---
