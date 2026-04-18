@@ -36,6 +36,33 @@ enum Commands {
         /// Recency window in days — last_recalled must be within this window
         #[arg(long, default_value_t = mengdie::core::dreaming::DEFAULT_WINDOW_DAYS)]
         window_days: i64,
+
+        /// Run LLM synthesis after promotion (opt-in: makes network calls + writes synthesis rows).
+        #[arg(long)]
+        synthesize: bool,
+
+        /// Cluster threshold override. Default tracks clustering::DEFAULT_THRESHOLD;
+        /// see docs/backlog/BL-clustering-validation.md for why 0.75.
+        #[arg(long, default_value_t = mengdie::core::clustering::DEFAULT_THRESHOLD)]
+        threshold: f32,
+
+        /// Minimum cluster size for synthesis.
+        #[arg(long, default_value_t = mengdie::core::clustering::DEFAULT_MIN_SIZE)]
+        min_cluster_size: usize,
+
+        /// Maximum cluster size — oversized clusters are truncated to this many members
+        /// before prompt building (bounds the LLM token budget).
+        #[arg(long, default_value_t = 20)]
+        max_cluster_size: usize,
+
+        /// Show what would be sent to the LLM without making calls (implies --synthesize;
+        /// no rows written, no LLM invoked).
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Project scope for synthesis (default: all projects).
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Batch import AE discussion files
@@ -103,7 +130,8 @@ enum Commands {
     Stats,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
     // Logging to stderr
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -120,7 +148,27 @@ fn main() -> anyhow::Result<()> {
             min_recall,
             min_relevance,
             window_days,
-        } => cmd_dream(&db, min_recall, min_relevance, window_days),
+            synthesize,
+            threshold,
+            min_cluster_size,
+            max_cluster_size,
+            dry_run,
+            project,
+        } => {
+            cmd_dream(
+                &db,
+                min_recall,
+                min_relevance,
+                window_days,
+                synthesize,
+                threshold,
+                min_cluster_size,
+                max_cluster_size,
+                dry_run,
+                project.as_deref(),
+            )
+            .await
+        }
         Commands::Import { dir, dry_run } => cmd_import(&db, &dir, dry_run),
         Commands::Rename {
             from,
@@ -140,19 +188,57 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn cmd_dream(db: &Db, min_recall: i64, min_relevance: f64, window_days: i64) -> anyhow::Result<()> {
-    use mengdie::core::dreaming::DreamingConfig;
+#[allow(clippy::too_many_arguments)]
+async fn cmd_dream(
+    db: &Db,
+    min_recall: i64,
+    min_relevance: f64,
+    window_days: i64,
+    synthesize: bool,
+    threshold: f32,
+    min_cluster_size: usize,
+    max_cluster_size: usize,
+    dry_run: bool,
+    project: Option<&str>,
+) -> anyhow::Result<()> {
+    use mengdie::core::dreaming::{run_synthesis_pass, DreamingConfig};
+    use mengdie::core::llm::build_provider;
 
     let config = DreamingConfig {
         min_recall,
         min_relevance,
         window_days,
     };
-    // Run globally (all projects) — per-project scoping can be added via CLI flag later
+    // Promotion pass (unchanged semantics: all projects).
     let result = db.run_dreaming_with_config(None, &config)?;
     println!(
         "Dreaming complete: {} promoted out of {} eligible memories (thresholds: recall≥{}, relevance≥{:.2}, window={}d)",
         result.promoted, result.total_eligible, min_recall, min_relevance, window_days
+    );
+
+    // dry_run implies synthesize (documented in --help): we still want the
+    // cluster prompts printed even if --synthesize was not explicitly passed.
+    let want_synthesis = synthesize || dry_run;
+    if !want_synthesis {
+        return Ok(());
+    }
+
+    let cfg = mengdie::core::config::MengdieConfig::load_from_process_env()?;
+    let provider = build_provider(&cfg.llm)?;
+    let syn = run_synthesis_pass(
+        db,
+        project,
+        provider.as_ref(),
+        threshold,
+        min_cluster_size,
+        max_cluster_size,
+        dry_run,
+    )
+    .await?;
+
+    println!(
+        "Synthesis: {} syntheses created from {} clusters ({} residuals skipped, {} LLM errors)",
+        syn.syntheses_created, syn.clusters_processed, syn.residuals_skipped, syn.llm_errors
     );
     Ok(())
 }

@@ -1,6 +1,9 @@
 use rusqlite::params;
 
-use super::db::Db;
+use super::clustering::cluster_memories;
+use super::db::{Db, NewMemory};
+use super::llm::LlmProvider;
+use super::synthesis::{build_synthesis_prompt, parse_synthesis_response, SynthesisInput};
 
 // -- Default thresholds --
 // See BL-002-8: overridable via CLI flags.
@@ -120,6 +123,144 @@ impl Db {
     }
 }
 
+// ============================================================================
+// BL-007 — Dream Synthesis (first caller of clustering + LlmProvider)
+// ============================================================================
+
+/// Result of a single synthesis pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SynthesisResult {
+    /// Clusters seen (including ones that failed the LLM call).
+    pub clusters_processed: usize,
+    /// Synthesis rows written (≤ clusters_processed; dry_run → always 0).
+    pub syntheses_created: usize,
+    /// Clusters where the LLM call or response parsing failed.
+    pub llm_errors: usize,
+    /// Memories that didn't reach `min_size` and were logged + skipped.
+    pub residuals_skipped: usize,
+}
+
+/// Cluster the given project's memories then either log the prompts (dry_run)
+/// or feed each cluster to the LLM provider and store the resulting synthesis.
+/// One LLM error per cluster increments `llm_errors` and does NOT abort the
+/// pass — recovery is to re-run (content_hash dedup makes that idempotent).
+pub async fn run_synthesis_pass(
+    db: &Db,
+    project_id: Option<&str>,
+    provider: &dyn LlmProvider,
+    threshold: f32,
+    min_size: usize,
+    max_cluster_size: usize,
+    dry_run: bool,
+) -> anyhow::Result<SynthesisResult> {
+    let clustering = cluster_memories(db, project_id, threshold, min_size)?;
+
+    let mut result = SynthesisResult {
+        clusters_processed: clustering.clusters.len(),
+        residuals_skipped: clustering.residuals.len(),
+        ..Default::default()
+    };
+
+    if !clustering.residuals.is_empty() {
+        tracing::info!(
+            residuals = clustering.residuals.len(),
+            "synthesis: skipping residuals (MVP policy)"
+        );
+    }
+
+    for cluster in &clustering.clusters {
+        let trimmed_ids: Vec<String> = cluster
+            .memory_ids
+            .iter()
+            .take(max_cluster_size)
+            .cloned()
+            .collect();
+        if trimmed_ids.len() < min_size {
+            // Truncation pushed this cluster below min_size — skip (counted
+            // under `residuals_skipped` would be wrong since these memories
+            // WERE cluster-eligible; count the cluster as processed but
+            // produce no synthesis).
+            continue;
+        }
+
+        let memories = db.get_memories_by_ids(&trimmed_ids)?;
+        if memories.len() < min_size {
+            tracing::warn!(
+                cluster_ids = ?trimmed_ids,
+                loaded = memories.len(),
+                "synthesis: loaded fewer rows than expected, skipping cluster"
+            );
+            continue;
+        }
+
+        let proj = memories[0].project_id.clone();
+        let input = SynthesisInput {
+            cluster_memories: &memories,
+            cluster_centroid: &cluster.centroid,
+            project_id: &proj,
+        };
+        let (system, user) = build_synthesis_prompt(&input);
+
+        if dry_run {
+            tracing::info!(
+                cluster_size = memories.len(),
+                system_len = system.len(),
+                user_len = user.len(),
+                "synthesis: dry-run, prompt built, skipping LLM + write"
+            );
+            println!(
+                "DRY-RUN cluster ({} memories):\nSYSTEM:\n{system}\n\nUSER:\n{user}\n---",
+                memories.len()
+            );
+            continue;
+        }
+
+        let raw = match provider.complete(&system, &user).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    cluster_ids = ?trimmed_ids,
+                    error = %e,
+                    "synthesis: LLM call failed, skipping cluster"
+                );
+                result.llm_errors += 1;
+                continue;
+            }
+        };
+
+        let draft = match parse_synthesis_response(&raw, &trimmed_ids) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    cluster_ids = ?trimmed_ids,
+                    error = %e,
+                    "synthesis: parse failed, skipping cluster"
+                );
+                result.llm_errors += 1;
+                continue;
+            }
+        };
+
+        let new_mem = NewMemory {
+            project_id: proj.clone(),
+            source_file: format!("synthesis/{}.md", uuid::Uuid::new_v4()),
+            source_type: "synthesis".to_string(),
+            knowledge_type: "factual".to_string(),
+            title: draft.title,
+            content: draft.content,
+            entities: draft.entities,
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false, // syntheses earn long-term via dreaming, not by construction
+        };
+
+        db.insert_synthesis_with_links(new_mem, &draft.source_memory_ids)?;
+        result.syntheses_created += 1;
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +362,280 @@ mod tests {
 
         let result = db.run_dreaming(None).unwrap();
         assert_eq!(result.promoted, 0);
+    }
+
+    // ========================================================================
+    // BL-007 — synthesis pass tests (stub LlmProvider)
+    // ========================================================================
+
+    use crate::core::embeddings::embedding_to_blob;
+    use crate::core::llm::{LlmError, LlmFuture, LlmProvider};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FixedProvider {
+        payload: String,
+        call_count: AtomicUsize,
+    }
+
+    impl FixedProvider {
+        fn new(payload: impl Into<String>) -> Self {
+            Self {
+                payload: payload.into(),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl LlmProvider for FixedProvider {
+        fn complete<'a>(&'a self, _system: &'a str, _prompt: &'a str) -> LlmFuture<'a> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let payload = self.payload.clone();
+            Box::pin(async move { Ok(payload) })
+        }
+        fn model(&self) -> &str {
+            "stub-fixed"
+        }
+    }
+
+    struct PanicProvider;
+    impl LlmProvider for PanicProvider {
+        fn complete<'a>(&'a self, _system: &'a str, _prompt: &'a str) -> LlmFuture<'a> {
+            Box::pin(async { panic!("PanicProvider::complete must not be called in dry_run") })
+        }
+        fn model(&self) -> &str {
+            "stub-panic"
+        }
+    }
+
+    struct TimeoutOnFirst {
+        counter: AtomicUsize,
+        ok_payload: String,
+    }
+    impl LlmProvider for TimeoutOnFirst {
+        fn complete<'a>(&'a self, _system: &'a str, _prompt: &'a str) -> LlmFuture<'a> {
+            let n = self.counter.fetch_add(1, Ordering::SeqCst);
+            let payload = self.ok_payload.clone();
+            Box::pin(async move {
+                if n == 0 {
+                    Err(LlmError::Timeout(std::time::Duration::from_millis(1)))
+                } else {
+                    Ok(payload)
+                }
+            })
+        }
+        fn model(&self) -> &str {
+            "stub-timeout-first"
+        }
+    }
+
+    fn make_384d(base: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0_f32; 384];
+        for (i, &b) in base.iter().enumerate() {
+            v[i] = b;
+        }
+        v
+    }
+
+    fn insert_with_emb(db: &Db, project_id: &str, title: &str, base: &[f32], nudge: f32) -> String {
+        let mut e = make_384d(base);
+        e[3] = nudge;
+        db.insert_memory(NewMemory {
+            project_id: project_id.to_string(),
+            source_file: format!("{title}-{}.md", uuid::Uuid::new_v4()),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: title.to_string(),
+            content: format!("content for {title} {}", uuid::Uuid::new_v4()),
+            entities: "test".to_string(),
+            embedding: Some(embedding_to_blob(&e)),
+            embedding_dim: Some(e.len() as i64),
+            is_longterm: false,
+        })
+        .unwrap()
+    }
+
+    fn seed_tight_cluster(db: &Db, project: &str, n: usize, base: &[f32]) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                insert_with_emb(
+                    db,
+                    project,
+                    &format!("{project}-{i}"),
+                    base,
+                    0.001 * i as f32,
+                )
+            })
+            .collect()
+    }
+
+    const OK_JSON: &str = r#"{"title":"Consolidated","content":"This synthesis consolidates the cluster.","entities":["x","y"]}"#;
+
+    #[tokio::test]
+    async fn test_synthesis_dry_run_makes_no_llm_calls_no_writes() {
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
+
+        let provider = PanicProvider;
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
+            .await
+            .unwrap();
+        assert_eq!(r.clusters_processed, 1);
+        assert_eq!(r.syntheses_created, 0);
+        assert_eq!(r.llm_errors, 0);
+        // No synthesis rows should exist
+        let total: i64 = {
+            let conn = db.lock_conn().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE source_type = 'synthesis'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_stub_creates_expected_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let src_ids = seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
+
+        let provider = FixedProvider::new(OK_JSON);
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+            .await
+            .unwrap();
+        assert_eq!(r.clusters_processed, 1);
+        assert_eq!(r.syntheses_created, 1);
+        assert_eq!(r.llm_errors, 0);
+        assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
+
+        // 1 synthesis row in DB with source_type = "synthesis" and is_longterm = 0
+        let (count, syn_id): (i64, String) = {
+            let conn = db.lock_conn().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id FROM memory_entries WHERE source_type = 'synthesis' AND is_longterm = 0",
+                )
+                .unwrap();
+            let ids: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            (ids.len() as i64, ids.into_iter().next().unwrap())
+        };
+        assert_eq!(count, 1);
+
+        // 3 link rows pointing at the synthesis
+        let links = db.count_synthesis_links(&syn_id).unwrap();
+        assert_eq!(links, 3);
+        // and each source is represented
+        for sid in &src_ids {
+            let present: i64 = {
+                let conn = db.lock_conn().unwrap();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM memory_synthesis_links \
+                     WHERE source_memory_id = ?1 AND synthesis_memory_id = ?2",
+                    params![sid, syn_id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(present, 1, "missing link for source {sid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_llm_error_isolated_from_other_clusters() {
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
+        seed_tight_cluster(&db, "proj", 3, &[0.0, 1.0, 0.0]);
+
+        let provider = TimeoutOnFirst {
+            counter: AtomicUsize::new(0),
+            ok_payload: OK_JSON.to_string(),
+        };
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+            .await
+            .unwrap();
+        assert_eq!(r.clusters_processed, 2);
+        assert_eq!(r.syntheses_created, 1);
+        assert_eq!(r.llm_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_rerun_is_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
+
+        let provider = FixedProvider::new(OK_JSON);
+        let r1 = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+            .await
+            .unwrap();
+        assert_eq!(r1.syntheses_created, 1);
+
+        let r2 = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+            .await
+            .unwrap();
+        // Re-run still counts the cluster as processed + "created" in-stat, but
+        // the DB write is a no-op via content_hash ON CONFLICT DO UPDATE.
+        assert_eq!(r2.syntheses_created, 1);
+
+        // Net row count: exactly one synthesis, exactly three link rows.
+        let (syn_count, link_count): (i64, i64) = {
+            let conn = db.lock_conn().unwrap();
+            let s: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_entries WHERE source_type = 'synthesis'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let l: i64 = conn
+                .query_row("SELECT COUNT(*) FROM memory_synthesis_links", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            (s, l)
+        };
+        assert_eq!(syn_count, 1);
+        assert_eq!(link_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_max_cluster_size_below_min_yields_no_synthesis() {
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 5, &[1.0, 0.0, 0.0]);
+
+        let provider = PanicProvider; // must not be called
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 2, false)
+            .await
+            .unwrap();
+        assert_eq!(r.clusters_processed, 1);
+        assert_eq!(r.syntheses_created, 0);
+        assert_eq!(r.llm_errors, 0);
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_threshold_changes_cluster_count() {
+        // 3 near-identical + 3 near-identical on a different axis.
+        // threshold 0.5 → both groups cluster (2 clusters).
+        // threshold 0.99 + small noise → same groups still cluster (2).
+        // threshold 1.5 → no clusters.
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
+        seed_tight_cluster(&db, "proj", 3, &[0.0, 1.0, 0.0]);
+
+        let provider = FixedProvider::new(OK_JSON);
+
+        let r_high = run_synthesis_pass(&db, Some("proj"), &provider, 1.5, 3, 20, true)
+            .await
+            .unwrap();
+        assert_eq!(r_high.clusters_processed, 0);
+
+        let r_low = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
+            .await
+            .unwrap();
+        assert_eq!(r_low.clusters_processed, 2);
     }
 }

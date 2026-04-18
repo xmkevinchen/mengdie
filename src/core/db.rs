@@ -244,6 +244,120 @@ impl Db {
         Ok(rows > 0)
     }
 
+    /// Bulk fetch memory rows by id, one lock acquisition.
+    /// Returns rows in input-id order; missing ids are silently skipped
+    /// (caller handles the len-mismatch policy).
+    pub fn get_memories_by_ids(&self, ids: &[String]) -> anyhow::Result<Vec<MemoryEntry>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+
+        let placeholders = (1..=ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, project_id, source_file, source_type, knowledge_type, \
+                    title, content, entities, valid_from, valid_until, \
+                    superseded_by, recall_count, avg_relevance, last_recalled, \
+                    embedding, embedding_dim, is_longterm, created_at \
+             FROM memory_entries WHERE id IN ({placeholders})"
+        );
+
+        let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = ids
+            .iter()
+            .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut by_id = std::collections::HashMap::<String, MemoryEntry>::new();
+        let rows = stmt.query_map(param_refs.as_slice(), row_to_entry)?;
+        for row in rows {
+            let entry = row?;
+            by_id.insert(entry.id.clone(), entry);
+        }
+
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
+
+    /// Insert a synthesis memory AND its source→synthesis link rows in a single
+    /// SQLite transaction. content_hash ON CONFLICT makes the memory insert
+    /// idempotent across re-runs; link rows use INSERT OR IGNORE on the
+    /// composite PK so repeat sources collapse silently.
+    pub fn insert_synthesis_with_links(
+        &self,
+        mem: NewMemory,
+        source_ids: &[String],
+    ) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let content_hash = super::schema::compute_content_hash(&mem.content);
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
+
+        let returned_id: String = tx.query_row(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, embedding, embedding_dim,
+                 is_longterm, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(project_id, content_hash) DO UPDATE SET
+                source_file = excluded.source_file,
+                source_type = excluded.source_type,
+                knowledge_type = excluded.knowledge_type,
+                title = excluded.title,
+                entities = excluded.entities,
+                embedding = excluded.embedding,
+                embedding_dim = excluded.embedding_dim,
+                is_longterm = excluded.is_longterm
+             RETURNING id",
+            params![
+                id,
+                mem.project_id,
+                mem.source_file,
+                mem.source_type,
+                mem.knowledge_type,
+                mem.title,
+                mem.content,
+                mem.entities,
+                now,
+                mem.embedding,
+                mem.embedding_dim,
+                mem.is_longterm as i64,
+                now,
+                content_hash,
+            ],
+            |row| row.get(0),
+        )?;
+
+        for src in source_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_synthesis_links \
+                     (source_memory_id, synthesis_memory_id, created_at) \
+                 VALUES (?1, ?2, ?3)",
+                params![src, returned_id, now],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(returned_id)
+    }
+
+    /// Count synthesis link rows pointing at a given synthesis memory.
+    /// Used by tests and the synthesis pass result summary.
+    pub fn count_synthesis_links(&self, synthesis_memory_id: &str) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_synthesis_links WHERE synthesis_memory_id = ?1",
+            params![synthesis_memory_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Set a memory as long-term (promoted by Dreaming). Returns false if ID not found.
     pub fn promote_to_longterm(&self, id: &str) -> anyhow::Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
