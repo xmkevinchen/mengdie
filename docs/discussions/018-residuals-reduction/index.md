@@ -6,9 +6,9 @@ created: 2026-04-18
 pipeline:
   analyze: done
   discuss: done
-  plan: pending
+  plan: done
   work: pending
-plan: ""
+plan: "docs/plans/011-residuals-reduction.md"
 tags: [clustering, residuals, dream-synthesis, parameter-tuning, bl-residuals-reduction]
 ---
 
