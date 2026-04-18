@@ -3,7 +3,7 @@ id: "010"
 title: "BL-007 — Dream Synthesis (first caller of BL-005 + BL-006)"
 type: plan
 created: 2026-04-18
-status: reviewed
+status: done
 discussion: "docs/discussions/016-dreaming-evolution/"
 ---
 
