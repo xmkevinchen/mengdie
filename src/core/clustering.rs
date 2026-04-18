@@ -396,4 +396,194 @@ mod tests {
             "expected at least one cluster from 100 identical embeddings"
         );
     }
+
+    // --- Step 2: DB-backed integration tests (AC3) ---
+
+    use crate::core::db::NewMemory;
+    use crate::core::embeddings::embedding_to_blob;
+
+    fn insert_with_embedding(db: &Db, project_id: &str, title: &str, embedding: &[f32]) -> String {
+        db.insert_memory(NewMemory {
+            project_id: project_id.to_string(),
+            source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: title.to_string(),
+            content: format!("content for {title} {}", uuid::Uuid::new_v4()),
+            entities: "test".to_string(),
+            embedding: Some(embedding_to_blob(embedding)),
+            embedding_dim: Some(embedding.len() as i64),
+        })
+        .unwrap()
+    }
+
+    /// Build a 384-dim test embedding with the supplied prefix and a tiny
+    /// per-row nudge on index 3 so embeddings differ bit-for-bit. Note:
+    /// content_hash uniqueness comes from the UUID in the content string
+    /// inside `insert_with_embedding`, not from this nudge — the nudge only
+    /// ensures distinct vectors.
+    fn make_384d(base: &[f32], nudge: f32) -> Vec<f32> {
+        let mut v = vec![0.0_f32; 384];
+        for (i, &b) in base.iter().enumerate() {
+            v[i] = b;
+        }
+        if v.len() > 3 {
+            v[3] = nudge;
+        }
+        v
+    }
+
+    #[test]
+    fn test_db_two_clusters_with_noise() {
+        let db = Db::open_in_memory().unwrap();
+        let c1_ids: Vec<String> = (0..3)
+            .map(|i| {
+                let e = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+                insert_with_embedding(&db, "proj", &format!("c1-{i}"), &e)
+            })
+            .collect();
+        let c2_ids: Vec<String> = (0..2)
+            .map(|i| {
+                let e = make_384d(&[0.0, 1.0, 0.0], 0.001 * i as f32);
+                insert_with_embedding(&db, "proj", &format!("c2-{i}"), &e)
+            })
+            .collect();
+
+        let result = cluster_memories(&db, Some("proj"), 0.9, 2).unwrap();
+        assert_eq!(result.clusters.len(), 2);
+
+        let sizes: Vec<usize> = result.clusters.iter().map(|c| c.memory_ids.len()).collect();
+        assert!(sizes.contains(&3));
+        assert!(sizes.contains(&2));
+
+        for cluster in &result.clusters {
+            let all_c1 = cluster.memory_ids.iter().all(|id| c1_ids.contains(id));
+            let all_c2 = cluster.memory_ids.iter().all(|id| c2_ids.contains(id));
+            assert!(
+                all_c1 || all_c2,
+                "cluster mixed c1/c2 members: {:?}",
+                cluster.memory_ids
+            );
+        }
+    }
+
+    #[test]
+    fn test_db_min_size_filters_smaller_cluster() {
+        let db = Db::open_in_memory().unwrap();
+        for i in 0..3 {
+            let e = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+            insert_with_embedding(&db, "proj", &format!("c1-{i}"), &e);
+        }
+        for i in 0..2 {
+            let e = make_384d(&[0.0, 1.0, 0.0], 0.001 * i as f32);
+            insert_with_embedding(&db, "proj", &format!("c2-{i}"), &e);
+        }
+
+        let result = cluster_memories(&db, Some("proj"), 0.9, 3).unwrap();
+        assert_eq!(result.clusters.len(), 1);
+        assert_eq!(result.clusters[0].memory_ids.len(), 3);
+        assert_eq!(result.residuals.len(), 2);
+    }
+
+    #[test]
+    fn test_db_project_filter_excludes_other_projects() {
+        let db = Db::open_in_memory().unwrap();
+        let proj_ids: Vec<String> = (0..3)
+            .map(|i| {
+                let e = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+                insert_with_embedding(&db, "proj", &format!("proj-{i}"), &e)
+            })
+            .collect();
+        let other_ids: Vec<String> = (0..2)
+            .map(|i| {
+                let e = make_384d(&[1.0, 0.0, 0.0], 0.001 * (100 + i) as f32);
+                insert_with_embedding(&db, "other", &format!("other-{i}"), &e)
+            })
+            .collect();
+
+        let result = cluster_memories(&db, Some("proj"), 0.9, 2).unwrap();
+        assert_eq!(result.clusters.len(), 1);
+        let got = result.clusters[0].memory_ids.clone();
+        assert_eq!(got.len(), 3);
+        for id in &got {
+            assert!(
+                proj_ids.contains(id),
+                "leaked memory from other project: {id}"
+            );
+        }
+
+        // Codex review: also assert "other"-project ids appear in neither
+        // clusters nor residuals — a broken project filter could silently
+        // leak them into residuals and the cluster-only check would miss it.
+        let mut all_returned: Vec<String> = Vec::new();
+        all_returned.extend(result.clusters.iter().flat_map(|c| c.memory_ids.clone()));
+        all_returned.extend(result.residuals.clone());
+        for id in &other_ids {
+            assert!(
+                !all_returned.contains(id),
+                "other-project id leaked into clustering result: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_db_invalidated_memory_excluded() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<String> = (0..3)
+            .map(|i| {
+                let e = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+                insert_with_embedding(&db, "proj", &format!("c-{i}"), &e)
+            })
+            .collect();
+
+        db.invalidate_memory(&ids[0], None, Some("test")).unwrap();
+
+        let result = cluster_memories(&db, Some("proj"), 0.9, 2).unwrap();
+        assert_eq!(result.clusters.len(), 1);
+        assert_eq!(result.clusters[0].memory_ids.len(), 2);
+        assert!(!result.clusters[0].memory_ids.contains(&ids[0]));
+    }
+
+    #[test]
+    fn test_db_null_embedding_excluded() {
+        let db = Db::open_in_memory().unwrap();
+        for i in 0..3 {
+            let e = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+            insert_with_embedding(&db, "proj", &format!("c-{i}"), &e);
+        }
+        // Insert a memory with NO embedding — must not appear anywhere in
+        // the clustering result.
+        db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "no-embedding".to_string(),
+            content: "orphan".to_string(),
+            entities: "test".to_string(),
+            embedding: None,
+            embedding_dim: None,
+        })
+        .unwrap();
+
+        let result = cluster_memories(&db, Some("proj"), 0.9, 2).unwrap();
+        let total: usize = result
+            .clusters
+            .iter()
+            .map(|c| c.memory_ids.len())
+            .sum::<usize>()
+            + result.residuals.len();
+        assert_eq!(
+            total, 3,
+            "null-embedding row must not appear in cluster or residuals"
+        );
+    }
+
+    #[test]
+    fn test_db_empty_project_returns_ok_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let result = cluster_memories(&db, Some("nonexistent"), 0.9, 2).unwrap();
+        assert!(result.clusters.is_empty());
+        assert!(result.residuals.is_empty());
+    }
 }

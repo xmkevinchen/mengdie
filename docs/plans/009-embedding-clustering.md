@@ -62,19 +62,19 @@ Complexity: O(N²) cosine comparisons + O(D·k) for centroid computation where D
 
 ## Steps
 
-### Step 1: `cluster_memories` + pure unit tests (AC1, AC2)
+### Step 1: `cluster_memories` + pure unit tests (AC1, AC2) — commit c2160c9
 
-- [ ] Add module: `pub mod clustering;` in `src/core/mod.rs` (keep alphabetical grouping consistent with existing layout)
-- [ ] Create `src/core/clustering.rs` with:
+- [x] Add module: `pub mod clustering;` in `src/core/mod.rs` (keep alphabetical grouping consistent with existing layout)
+- [x] Create `src/core/clustering.rs` with:
   - `pub struct Cluster { pub memory_ids: Vec<String>, pub centroid: Vec<f32> }` — `centroid` is the element-wise mean of member embeddings. BL-007 can use it to label the cluster in synthesis prompts or to rank clusters; cheap to compute (O(k·D) at cluster-build time) and avoids a second DB round-trip in BL-007.
   - `pub struct ClusteringResult { pub clusters: Vec<Cluster>, pub residuals: Vec<String> }` — `residuals` lists memory_ids that were evaluated but didn't land in a cluster ≥ min_size. BL-007 decides policy (summarize pairs differently, skip singletons, merge to "misc"). This plan does not drop residuals silently.
   - `pub fn cluster_memories(db: &Db, project_id: Option<&str>, threshold: f32, min_size: usize) -> anyhow::Result<ClusteringResult>` — loads embeddings from DB with the SAME filter as `search_vector`: `embedding IS NOT NULL` AND `embedding_dim = ?` AND `(valid_until IS NULL OR valid_until > now)` AND `project_id = ?`. The `embedding_dim` filter is required (copy from `vector.rs:56-72`) so mixed-dim DBs don't produce nonsense. Pass `384` as the constant today — if/when fastembed provides a const symbol, prefer it; otherwise inline the literal with a comment pointing at the fastembed init in `embeddings.rs::Embedder::new`.
   - Internal `fn cluster_embeddings(pairs: &[(String, Vec<f32>)], threshold: f32, min_size: usize) -> ClusteringResult` — pure, no DB access, the testable seam (matches the `drive_subprocess`/`classify_output` pattern from plan 007).
-- [ ] Default constants in the module: `pub const DEFAULT_THRESHOLD: f32 = 0.75; pub const DEFAULT_MIN_SIZE: usize = 3;` — justification in a doc comment: Sentence-Transformers' `community_detection` utility uses 0.75 as its default for all-MiniLM-L6-v2 (the model mengdie runs); tight topical community, excludes related-but-not-same scores (~0.65–0.70).
-- [ ] Use existing `cosine_similarity` from `crate::core::embeddings` — do not reimplement.
-- [ ] Use existing `blob_to_embedding` for reading embedding blobs from the DB.
-- [ ] Centroid computation: helper `fn centroid(embeddings: &[&[f32]]) -> Vec<f32>` that computes element-wise mean. Handle empty input defensively (shouldn't happen for kept clusters, but add a debug_assert).
-- [ ] Unit tests (all on `cluster_embeddings`, no DB):
+- [x] Default constants in the module: `pub const DEFAULT_THRESHOLD: f32 = 0.75; pub const DEFAULT_MIN_SIZE: usize = 3;` — justification in a doc comment: Sentence-Transformers' `community_detection` utility uses 0.75 as its default for all-MiniLM-L6-v2 (the model mengdie runs); tight topical community, excludes related-but-not-same scores (~0.65–0.70).
+- [x] Use existing `cosine_similarity` from `crate::core::embeddings` — do not reimplement.
+- [x] Use existing `blob_to_embedding` for reading embedding blobs from the DB.
+- [x] Centroid computation: helper `fn centroid(embeddings: &[&[f32]]) -> Vec<f32>` that computes element-wise mean. Handle empty input defensively (shouldn't happen for kept clusters, but add a debug_assert).
+- [x] Unit tests (all on `cluster_embeddings`, no DB):
   - Empty input → `ClusteringResult { clusters: [], residuals: [] }`
   - 3 near-identical embeddings, 2 orthogonal → 1 cluster of 3 + 2 residuals (the orthogonals)
   - 2 near-identical + 2 near-identical, orthogonal to each other, min_size=3 → 0 clusters + 4 residuals (neither pair reaches min_size; all 4 ids appear in `residuals`)
@@ -83,13 +83,13 @@ Complexity: O(N²) cosine comparisons + O(D·k) for centroid computation where D
   - Determinism: run same input twice, assert identical `ClusteringResult` (same clusters with same seed/member order, same residuals order). Explicitly calling this out because the algorithm's determinism is a DESIGN property (derives from sorted-slice iteration), not a happy accident — a future contributor must not introduce a HashSet-iteration-dependent ordering.
   - Seed selection: with sorted input, first cluster's seed is lowest memory_id. Input `[("c", v), ("b", v), ("a", v)]` all similar → one cluster with `memory_ids = ["a", "b", "c"]`.
   - Centroid math: 3 embeddings `[1,0,0], [1,0,0], [1,0,0]` → cluster centroid `[1,0,0]` (exact). 3 embeddings `[1,0,0], [0,1,0], [0,0,1]` — not a real cluster test, skipped for the 3-orthogonals case since they wouldn't cluster — but assert centroid helper directly: mean of `[[2.0, 0.0], [0.0, 2.0]]` = `[1.0, 1.0]`.
-- [ ] Verify: `cargo test --lib clustering::` passes (expected ≥7 tests). `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
+- [x] Verify: `cargo test --lib clustering::` passes (expected ≥7 tests). `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
 
 Expected files: `src/core/mod.rs`, `src/core/clustering.rs`
 
 ### Step 2: DB-loading integration test (AC3)
 
-- [ ] Add a `#[test]` in `src/core/clustering.rs` (or `tests/clustering_db.rs` if it needs more setup) that:
+- [x] Add a `#[test]` in `src/core/clustering.rs` (or `tests/clustering_db.rs` if it needs more setup) that:
   - Opens `Db::open_in_memory()`
   - Inserts 5 memories with controlled embeddings via `insert_memory` + `store_embedding`: 3 near-identical at `[1.0, 0.0, 0.0]` + tiny noise, 2 near-identical at `[0.0, 1.0, 0.0]` + tiny noise (2 distinct clusters)
   - Calls `cluster_memories(&db, Some("proj"), 0.9, 2)` — threshold 0.9 to catch the cluster even with noise, min_size 2 to catch both
