@@ -17,6 +17,43 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
+      # TEMPORARY DEBUG — trace where CFLAGS leaks in from. Remove once the
+      # runner host's env is cleaned up. Puts this FIRST so we see env
+      # before any other action runs (checkout@v4 dot env changes too).
+      - name: DEBUG dump env + shell chain
+        run: |
+          echo "::group::full env (sorted)"
+          env | sort
+          echo "::endgroup::"
+          echo "::group::build-flags env specifically"
+          env | grep -iE "CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|SDKROOT|ISYSROOT|MACOSX_DEPLOYMENT|CC=|CXX=|AR=" || echo "(none — flags unset in runner env)"
+          echo "::endgroup::"
+          echo "::group::shell detection"
+          echo "SHELL=$SHELL"
+          echo "0=$0"
+          echo "BASH_VERSION=$BASH_VERSION"
+          echo "ZSH_VERSION=$ZSH_VERSION"
+          echo "::endgroup::"
+          echo "::group::parent process chain"
+          pid=$$
+          depth=0
+          while [ -n "$pid" ] && [ $depth -lt 8 ]; do
+            line=$(ps -o pid=,ppid=,comm=,args= -p "$pid" 2>/dev/null)
+            [ -z "$line" ] && break
+            echo "$line"
+            pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+            depth=$((depth + 1))
+          done
+          echo "::endgroup::"
+          echo "::group::possible sources"
+          for f in /etc/environment /etc/zsh/zshenv /etc/profile /etc/bash.bashrc ~/.zshenv ~/.zshrc ~/.bashrc ~/.profile; do
+            if [ -f "$f" ] && grep -qE "CFLAGS|SDKROOT|isysroot" "$f" 2>/dev/null; then
+              echo "== $f =="
+              grep -nE "CFLAGS|SDKROOT|isysroot" "$f" 2>/dev/null
+            fi
+          done
+          echo "::endgroup::"
+
       - uses: actions/checkout@v4
 
       # NOTE: `actions/cache@v4` was intended here but the Forgejo Actions
