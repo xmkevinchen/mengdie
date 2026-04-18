@@ -198,8 +198,7 @@ discussion 013 (still unstarted).
 checkboxes, the completion commit must also update the parent discussion's
 `status:` and `pipeline.work:` frontmatter — otherwise the dashboard and
 `/ae:next` see phantom-active discussions. See
-`docs/backlog/BL-ae-work-closes-parent-discussion.md` for the upstream
-(AE plugin skill) fix.
+upstream AE plugin backlog (`../agentic-engineering/.ae/backlog/unscheduled/BL-038-work-closes-parent-discussion.md`) for the real fix.
 
 **Backlog**: `docs/backlog/` — see the directory for the canonical,
 trigger-annotated list. Formerly-deferred discussions (006 SQLite
