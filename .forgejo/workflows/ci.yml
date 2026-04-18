@@ -17,11 +17,14 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      # TEMPORARY DEBUG — trace where CFLAGS leaks in from. Remove once the
-      # runner host's env is cleaned up. Puts this FIRST so we see env
-      # before any other action runs (checkout@v4 dot env changes too).
+      # TEMPORARY DEBUG — already confirmed env is clean; now trying
+      # explicit CARGO_BUILD_TARGET to force cc-rs target detection.
       - name: DEBUG dump env + shell chain
         run: |
+          echo "::group::rustc target probe"
+          source ~/.cargo/env
+          rustc --version --verbose
+          echo "::endgroup::"
           echo "::group::full env (sorted)"
           env | sort
           echo "::endgroup::"
@@ -69,6 +72,7 @@ jobs:
         # (no rust-toolchain.toml) but we DO need these two components to
         # be present on the runner. rustup noops if they're already there.
         run: |
+          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
           unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           rustup component add rustfmt clippy
@@ -76,6 +80,7 @@ jobs:
       - name: Toolchain version log
         # Sanity log only — not a guard. Helps debug CI-vs-local mismatches.
         run: |
+          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
           unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           rustc --version
@@ -84,18 +89,21 @@ jobs:
 
       - name: Format check
         run: |
+          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
           unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo fmt --all -- --check
 
       - name: Clippy
         run: |
+          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
           unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         run: |
+          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
           unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo test
