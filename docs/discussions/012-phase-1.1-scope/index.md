@@ -24,9 +24,9 @@ We have 21 backlog items from 5 analyses, an AE PRD Phase C (wire remaining skil
 
 | # | Topic | File | Status | Decision |
 |---|-------|------|--------|----------|
-| 1 | What goes into Phase 1.1? | [topic-01-scope/](topic-01-scope/) | pending | — |
-| 2 | Execution approach | [topic-02-execution/](topic-02-execution/) | pending | — |
-| 3 | Acceptance criteria | [topic-03-acceptance/](topic-03-acceptance/) | pending | — |
+| 1 | What goes into Phase 1.1? | [topic-01-scope/](topic-01-scope/) | done | See conclusion.md |
+| 2 | Execution approach | [topic-02-execution/](topic-02-execution/) | done | See conclusion.md |
+| 3 | Acceptance criteria | [topic-03-acceptance/](topic-03-acceptance/) | done | See conclusion.md |
 
 ## Documents
 - [Conclusion](conclusion.md)

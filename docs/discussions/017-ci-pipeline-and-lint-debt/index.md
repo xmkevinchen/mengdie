@@ -1,13 +1,13 @@
 ---
 id: "017"
 title: "CI Pipeline + Lint Debt Cleanup"
-status: active
+status: done
 created: 2026-04-17
 pipeline:
   analyze: skipped
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/008-ci-pipeline-and-lint-debt.md"
 tags: [ci, forgejo, clippy, lint-debt, project-hygiene]
 ---

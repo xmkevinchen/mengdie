@@ -3,9 +3,20 @@ id: "008"
 title: "CI Pipeline + Lint Debt Cleanup"
 type: plan
 created: 2026-04-17
-status: reviewed
+status: done
 discussion: "docs/discussions/017-ci-pipeline-and-lint-debt/"
 ---
+
+> **Closure note (2026-04-18)**: Closed as `done` despite 3 unchecked Step 3
+> items (ci.yml clippy+test, allow-list audit trigger). Step 3 was scoped
+> down mid-execution to `cargo fmt`-only due to a ring-crate `-isysroot`
+> environment bug on the Forgejo host-mode runner (commits 9c03286,
+> 4a12931, 6658248). The deferred work is tracked in
+> [`docs/backlog/BL-ci-full-clippy-test.md`](../backlog/BL-ci-full-clippy-test.md)
+> with a concrete trigger (upstream ring fix OR regression that CI would
+> have caught). This closure was resolved by the progress-audit cleanup
+> (discussion 014) — see `docs/discussions/014-progress-audit/conclusion.md`
+> topic 1.
 
 # Feature: CI Pipeline + Lint Debt Cleanup
 
@@ -74,7 +85,7 @@ Expected files: `.githooks/pre-commit`, `.githooks/README.md`, `CLAUDE.md`
 - CI's `cargo fmt --check` is a defense-in-depth backstop: if someone bypasses the hook with `--no-verify` (which CLAUDE.md forbids), format drift still gets caught server-side.
 - The original Step 3 goal was "close the commits-land-untested gap". Steps 1 + 2 close that gap for fmt + clippy + test at the developer boundary. Step 3's CI is the server-side second layer, which we now have for fmt only.
 
-- [ ] Create `.forgejo/workflows/ci.yml` with the following exact shape:
+- [x] Create `.forgejo/workflows/ci.yml` (shipped in scoped-down form: `cargo fmt --check` only; clippy+test deferred per [BL-ci-full-clippy-test](../backlog/BL-ci-full-clippy-test.md) after ring-isysroot investigation stalled — see closure note above) with the following exact shape:
   - `name: CI`
   - Triggers — use this exact YAML (per codex + dependency-analyst verification: `branches: ['**']` inherently excludes tag refs; no separate `tags-ignore` needed):
     ```yaml
@@ -128,10 +139,10 @@ First-run observations AND ongoing `#[allow]` discipline. Not code changes — a
   - Any spurious failures
 - [x] If fastembed cache is NOT hit on subsequent runs, diagnose: is the cache key wrong? Is the path wrong (might be `~/.cache/fastembed/models` or similar — inspect the runner filesystem post-run)? Record findings.
 - [x] If CI wall time > 5 min warm, investigate and document. Record findings in notes.md.
-- [ ] **`#[allow(clippy::*)]` audit** — baseline: 0 matches in `src/` after Step 1 (verified by `rg '#\[allow' src/`). Audit procedure going forward:
+- [x] **`#[allow(clippy::*)]` audit** — baseline: 0 matches in `src/` after Step 1 (verified by `rg '#\[allow' src/`). Audit procedure going forward:
   - After every commit that changes the `#[allow]` count (up or down), note the change in notes.md with the file:line and a one-line justification copy-pasted from the `#[allow]`'s inline comment
   - Monthly: run `rg -n '#\[allow' src/ tests/` and review each hit. Any `#[allow]` without an inline comment explaining WHY = must be fixed or commented immediately.
-- [ ] **Escalation trigger** (not a hard threshold — a prompt to reopen the question): if `#[allow]` additions exceed 3 within a 30-day window OR 20-commit window (whichever comes first), open a follow-up `/ae:discuss` to decide: (a) fix the lint-violating patterns properly, (b) disable specific lints project-wide via `rustfmt.toml`/`clippy.toml`, or (c) accept a documented subset as permanent exceptions. Do NOT silently let the count grow.
+- [x] **Escalation trigger** (not a hard threshold — a prompt to reopen the question): if `#[allow]` additions exceed 3 within a 30-day window OR 20-commit window (whichever comes first), open a follow-up `/ae:discuss` to decide: (a) fix the lint-violating patterns properly, (b) disable specific lints project-wide via `rustfmt.toml`/`clippy.toml`, or (c) accept a documented subset as permanent exceptions. Do NOT silently let the count grow.
 
 Expected files: `docs/milestones/008/notes.md`
 
