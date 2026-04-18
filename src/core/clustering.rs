@@ -37,6 +37,11 @@ pub struct Cluster {
 /// Result of a clustering pass: kept clusters and memories that didn't reach
 /// `min_size` (policy decision — skip / summarize / misc — belongs to the
 /// caller, not here).
+///
+/// Cluster ordering in `clusters` is insertion order — determined by the
+/// first unassigned memory_id encountered during the sorted-pair scan. It is
+/// NOT ranked by size, density, or centroid relevance. Callers that need a
+/// specific order (e.g., "largest cluster first") must sort after the call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClusteringResult {
     pub clusters: Vec<Cluster>,
@@ -116,6 +121,18 @@ fn load_embeddings(db: &Db, project_id: Option<&str>) -> anyhow::Result<Vec<(Str
 /// Determinism derives from sorting the input slice by `memory_id`; the
 /// `assigned` HashSet is used only for membership lookup (its iteration order
 /// is never observed).
+///
+/// **Seed-ordering tradeoff** (design bet — re-evaluate after BL-007 ships):
+/// the seed is always the lexicographically smallest unassigned `memory_id`.
+/// For the pattern `A ~ B` and `B ~ C` but `A !~ C`, this pass produces a
+/// cluster `{A, B}` (via A as seed) and a singleton `{C}` — it does NOT
+/// chain-link into `{A, B, C}`. If IDs are UUIDs, which seed wins is
+/// essentially arbitrary. This is intentional: tighter topical groups give
+/// better LLM summarization prompts than chain-linked sprawls (see the module
+/// doc comment). If BL-007's empirical cluster quality is poor, switch to
+/// density-weighted seeding (neighbor-count-first) rather than swapping in
+/// connected-component / DBSCAN — those change the semantics more than
+/// needed.
 pub fn cluster_embeddings(
     pairs: &[(String, Vec<f32>)],
     threshold: f32,
@@ -366,11 +383,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "wall-clock sanity check — run manually via cargo test -- --ignored, not CI-enforced"]
     fn test_n200_synthetic_completes() {
         // Local-dev sanity check that O(N²) cosine is not pathologically slow at N=200.
         // Plan AC2 measures <500ms on dev hardware; the assert ceiling here is 5_000ms
-        // to stay green under CI load, debug builds, and slow sanitizer runs (per
-        // Codex review). Record the measured ms in the commit message.
+        // to stay green under CI load, debug builds, and slow sanitizer runs.
+        // Marked #[ignore] after review feedback (wall-clock asserts flap in shared
+        // CI/debug runners; run with `cargo test -- --ignored` when you want the check).
         let mut pairs: Vec<(String, Vec<f32>)> = Vec::with_capacity(200);
         for i in 0..100 {
             pairs.push(pair(&format!("cluster-{i:04}"), vec![1.0, 0.0, 0.0]));
