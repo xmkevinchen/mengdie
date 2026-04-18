@@ -98,15 +98,23 @@ multiple plans. No obvious hallucinations in the 3–5 rows spot-checked.
 
 **Triggers fired**:
 
-1. **#3 (residuals policy)** — **ACTIVE TRIGGER**. 133 / 198 ≈ 67%
-   residuals is above the fix-me threshold (plan 010 AC5 noted
-   ">50% of eligible memories" as the signal). With threshold 0.75 and
-   min_size=3, the greedy seed-neighborhood algorithm is too strict for
-   our corpus. Recommended action: keep the "skip" policy for MVP but
-   file a sibling plan that either (a) pair-summarizes residuals at a
-   looser threshold, (b) runs a second pass at threshold 0.65 specifically
-   for residuals, or (c) reduces min_size to 2 for topic clusters that
-   repeatedly fail the floor. This is the next concrete follow-up plan.
+1. **#3 (residuals policy)** — **TRIGGER ADDRESSED by plan 011**
+   (2026-04-18). 133 / 198 ≈ 67% residuals at threshold 0.75 + min_size=3
+   prompted a /ae:discuss → /ae:plan cycle (discussion 018, plan 011).
+   Resolution: flip `DEFAULT_MIN_SIZE` 3→2 (recovers near-duplicate pairs)
+   and bundle a null-escape-hatch (`{"skip": true, "reason": ...}`) so
+   the ~30% topically-adjacent pair share cleanly gets LLM-rejected
+   instead of synthesized as noise. Original option (c) taken (reduce
+   min_size to 2); options (a) and (b) deferred. Next signal source:
+   plan 011's AC5 post-ship audit writeback in this file's new
+   `## BL-residuals-reduction empirical results` section.
+
+   **Updated signal trigger (replaces `>50% residuals`)**: `>50%
+   residuals AND synthesis_hit_rate < 10% = revisit-parameter signal`.
+   Note: `synthesis_hit_rate` instrumentation is deferred (no search-log
+   table exists yet); use residual-% only until search logging lands
+   in a future plan. The AND-conjunction form is the forward-looking
+   wording once instrumentation exists.
 2. **#2 (threshold validation)** — **WEAK TRIGGER**. The 14 clusters
    that DID form look topically tight. Loosening threshold to 0.70 might
    pull more memories into clusters but risks over-clustering (Project A

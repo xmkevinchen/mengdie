@@ -20,7 +20,19 @@ use super::db::Db;
 use super::embeddings::{blob_to_embedding, cosine_similarity};
 
 pub const DEFAULT_THRESHOLD: f32 = 0.75;
-pub const DEFAULT_MIN_SIZE: usize = 3;
+
+/// DEFAULT_MIN_SIZE = 2: lowered from 3 (discussion 018) based on empirical
+/// spot-check — ~60% of pair-clusters in a solo-dev AE corpus are
+/// near-duplicates (plan↔backlog, discuss↔conclusion, analyze↔analyze
+/// pairs) that benefit from consolidation. The remaining ~30% topic-
+/// adjacent pairs are filtered by the null-escape-hatch in synthesis.rs.
+///
+/// Revisit if, across 3–5 dream runs: skip rate > 25% of pair-clusters
+/// OR manual spot-check shows majority-weak syntheses. Ladder: first
+/// revert min_size=3; if residuals stay > 50%, pursue threshold drop to
+/// 0.70 with real-LLM validation first. See
+/// `docs/backlog/BL-clustering-validation.md` for trigger conditions.
+pub const DEFAULT_MIN_SIZE: usize = 2;
 
 /// Dimension of the embedding model mengdie runs today
 /// (`all-MiniLM-L6-v2`, see `embeddings::Embedder::new`). Inlined here until
