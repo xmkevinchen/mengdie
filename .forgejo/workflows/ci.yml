@@ -19,17 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo + fastembed model
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/fastembed
-          key: rust-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            rust-cache-${{ runner.os }}-
+      # NOTE: `actions/cache@v4` was intended here but the Forgejo Actions
+      # marketplace mirror (code.forgejo.org) gave "connection reset by peer"
+      # during the action clone on the first CI run. Dropped per plan 008
+      # rollback option 2 — rely on the self-hosted runner's persistent
+      # $HOME/.cargo and $HOME/.cache/fastembed between runs. Revisit if:
+      # (a) CI wall time exceeds 8 min warm, OR
+      # (b) a working Forgejo cache backend is deployed.
 
       - name: Ensure rustfmt + clippy components
         # Idempotent component install — we don't pin a toolchain version
