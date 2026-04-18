@@ -140,6 +140,7 @@ mod tests {
             entities: "test".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         })
         .unwrap()
     }

@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Check if a column exists in a table (for crash-safe migrations).
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -125,6 +125,22 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE memory_entries ADD COLUMN invalidation_reason TEXT;")?;
     }
 
+    // Migration v4: synthesis link table (BL-007 dream synthesis)
+    if current_version < 4 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_synthesis_links (
+                source_memory_id     TEXT NOT NULL,
+                synthesis_memory_id  TEXT NOT NULL,
+                created_at           TEXT NOT NULL,
+                PRIMARY KEY (source_memory_id, synthesis_memory_id),
+                FOREIGN KEY (source_memory_id) REFERENCES memory_entries(id),
+                FOREIGN KEY (synthesis_memory_id) REFERENCES memory_entries(id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_syn_link_source ON memory_synthesis_links(source_memory_id);
+             CREATE INDEX IF NOT EXISTS idx_syn_link_synthesis ON memory_synthesis_links(synthesis_memory_id);",
+        )?;
+    }
+
     // Set schema version
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
 
@@ -161,6 +177,117 @@ mod tests {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_schema_version_is_v4_on_fresh_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        // Idempotent: re-running leaves version at 4.
+        run_migrations(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+    }
+
+    #[test]
+    fn test_v4_synthesis_link_table_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_synthesis_links' AND type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Indexes exist as well.
+        let idx_source: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_syn_link_source' AND type = 'index'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_source, 1);
+        let idx_syn: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_syn_link_synthesis' AND type = 'index'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_syn, 1);
+    }
+
+    #[test]
+    fn test_migration_from_v3_preserves_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        // First put the DB into a v3 state by running migrations then setting user_version = 3.
+        run_migrations(&conn).unwrap();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+        // Drop the v4 table so the migration has work to do.
+        conn.execute_batch("DROP TABLE IF EXISTS memory_synthesis_links;")
+            .unwrap();
+
+        // Insert a row at the v3 state to verify it survives migration.
+        let hash = compute_content_hash("some content");
+        conn.execute(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "row-1",
+                "proj",
+                "f.md",
+                "conclusion",
+                "decisional",
+                "title",
+                "some content",
+                "tag",
+                "2026-04-18T00:00:00Z",
+                "2026-04-18T00:00:00Z",
+                hash,
+            ],
+        )
+        .unwrap();
+
+        // Re-run migrations — should upgrade to v4 cleanly.
+        run_migrations(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        // Existing row intact.
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM memory_entries WHERE id = 'row-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "title");
+
+        // New table exists.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_synthesis_links'",
                 [],
                 |row| row.get(0),
             )

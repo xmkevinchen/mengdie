@@ -432,6 +432,7 @@ mod tests {
             entities: "test".to_string(),
             embedding: Some(embedding_to_blob(embedding)),
             embedding_dim: Some(embedding.len() as i64),
+            is_longterm: false,
         })
         .unwrap()
     }
@@ -582,6 +583,7 @@ mod tests {
             entities: "test".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         })
         .unwrap();
 

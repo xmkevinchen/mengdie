@@ -222,6 +222,7 @@ mod tests {
                 entities: entities.to_string(),
                 embedding: Some(embedding_to_blob(embedding)),
                 embedding_dim: Some(embedding.len() as i64),
+                is_longterm: false,
             })
             .unwrap();
         id

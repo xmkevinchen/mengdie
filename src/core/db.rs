@@ -56,6 +56,7 @@ pub struct NewMemory {
     pub entities: String,
     pub embedding: Option<Vec<u8>>,
     pub embedding_dim: Option<i64>,
+    pub is_longterm: bool,
 }
 
 impl Db {
@@ -101,8 +102,8 @@ impl Db {
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
                  title, content, entities, valid_from, embedding, embedding_dim,
-                 created_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 is_longterm, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(project_id, content_hash) DO UPDATE SET
                 source_file = excluded.source_file,
                 source_type = excluded.source_type,
@@ -110,7 +111,8 @@ impl Db {
                 title = excluded.title,
                 entities = excluded.entities,
                 embedding = excluded.embedding,
-                embedding_dim = excluded.embedding_dim
+                embedding_dim = excluded.embedding_dim,
+                is_longterm = excluded.is_longterm
              RETURNING id",
             params![
                 id,
@@ -124,6 +126,7 @@ impl Db {
                 now,
                 mem.embedding,
                 mem.embedding_dim,
+                mem.is_longterm as i64,
                 now,
                 content_hash,
             ],
@@ -183,8 +186,8 @@ impl Db {
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
                  title, content, entities, valid_from, embedding, embedding_dim,
-                 created_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 is_longterm, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(project_id, content_hash) DO UPDATE SET
                 source_file = excluded.source_file,
                 source_type = excluded.source_type,
@@ -192,7 +195,8 @@ impl Db {
                 title = excluded.title,
                 entities = excluded.entities,
                 embedding = excluded.embedding,
-                embedding_dim = excluded.embedding_dim
+                embedding_dim = excluded.embedding_dim,
+                is_longterm = excluded.is_longterm
              RETURNING id",
             params![
                 id,
@@ -206,6 +210,7 @@ impl Db {
                 now,
                 mem.embedding,
                 mem.embedding_dim,
+                mem.is_longterm as i64,
                 now,
                 content_hash,
             ],
@@ -455,6 +460,7 @@ mod tests {
             entities: "auth,middleware,jwt".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         }
     }
 
@@ -571,6 +577,7 @@ mod tests {
                 entities: "auth".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -586,6 +593,7 @@ mod tests {
                 entities: "auth,jwt".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -608,6 +616,7 @@ mod tests {
                 entities: "database".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -631,6 +640,7 @@ mod tests {
                 entities: "topic".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -650,6 +660,7 @@ mod tests {
                 entities: "other".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -675,6 +686,7 @@ mod tests {
             entities: "auth".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         })
         .unwrap();
 
@@ -689,6 +701,7 @@ mod tests {
             entities: "auth,jwt,redis".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         })
         .unwrap();
 
@@ -733,6 +746,7 @@ mod tests {
                 entities: "tag".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -752,6 +766,7 @@ mod tests {
                 entities: "tag,new".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -795,6 +810,7 @@ mod tests {
             entities: "test".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         })
         .unwrap();
 
@@ -810,6 +826,7 @@ mod tests {
                 entities: "test".to_string(),
                 embedding: None,
                 embedding_dim: None,
+                is_longterm: false,
             })
             .unwrap();
 
@@ -824,6 +841,7 @@ mod tests {
             entities: "unique".to_string(),
             embedding: None,
             embedding_dim: None,
+            is_longterm: false,
         })
         .unwrap();
 
@@ -873,5 +891,57 @@ mod tests {
         assert_eq!(projects.len(), 2);
         assert_eq!(projects[0], ("proj-a".to_string(), 2));
         assert_eq!(projects[1], ("proj-b".to_string(), 1));
+    }
+
+    #[test]
+    fn test_insert_memory_is_longterm_true() {
+        let db = test_db();
+        let id = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: "lt.md".to_string(),
+                source_type: "synthesis".to_string(),
+                knowledge_type: "factual".to_string(),
+                title: "Long-term memory".to_string(),
+                content: "seeded longterm content".to_string(),
+                entities: "long,term".to_string(),
+                embedding: None,
+                embedding_dim: None,
+                is_longterm: true,
+            })
+            .unwrap();
+
+        // Round-trip: get_memory should report is_longterm = true.
+        let entry = db.get_memory(&id).unwrap().unwrap();
+        assert!(entry.is_longterm);
+
+        // Raw column is stored as 1.
+        let conn = db.conn.lock().unwrap();
+        let raw: i64 = conn
+            .query_row(
+                "SELECT is_longterm FROM memory_entries WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, 1);
+    }
+
+    #[test]
+    fn test_insert_memory_is_longterm_default_false() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("proj")).unwrap();
+        let entry = db.get_memory(&id).unwrap().unwrap();
+        assert!(!entry.is_longterm);
+
+        let conn = db.conn.lock().unwrap();
+        let raw: i64 = conn
+            .query_row(
+                "SELECT is_longterm FROM memory_entries WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, 0);
     }
 }

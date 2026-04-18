@@ -42,6 +42,7 @@ pub enum SourceType {
     Review,
     Plan,
     Retrospect,
+    Synthesis,
 }
 
 impl std::fmt::Display for SourceType {
@@ -51,6 +52,7 @@ impl std::fmt::Display for SourceType {
             Self::Review => write!(f, "review"),
             Self::Plan => write!(f, "plan"),
             Self::Retrospect => write!(f, "retrospect"),
+            Self::Synthesis => write!(f, "synthesis"),
         }
     }
 }
@@ -365,6 +367,7 @@ impl MengdieServer {
             entities: params.entities,
             embedding: embedding_blob,
             embedding_dim,
+            is_longterm: false,
         };
 
         let resolves = params.resolves.unwrap_or_default();
@@ -504,5 +507,25 @@ mod tests {
             result.is_err(),
             "should reject 'decision' as knowledge_type"
         );
+    }
+
+    #[test]
+    fn test_source_type_synthesis_display() {
+        assert_eq!(SourceType::Synthesis.to_string(), "synthesis");
+    }
+
+    #[test]
+    fn test_ingest_params_accepts_synthesis_source_type() {
+        let json = serde_json::json!({
+            "title": "Synthesis memory",
+            "content": "Distilled from several sources.",
+            "source_type": "synthesis",
+            "knowledge_type": "factual",
+            "entities": "syn,test"
+        });
+        let result = serde_json::from_value::<IngestParams>(json);
+        assert!(result.is_ok(), "should accept source_type 'synthesis'");
+        let params = result.unwrap();
+        assert_eq!(params.source_type.to_string(), "synthesis");
     }
 }

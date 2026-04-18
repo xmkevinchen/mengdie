@@ -58,6 +58,7 @@ pub fn ingest_document(
         entities: normalized_entities.join(","),
         embedding: Some(embedding_to_blob(&embedding)),
         embedding_dim: Some(dim),
+        is_longterm: false,
     };
 
     let entry_id = db.insert_memory(mem)?;
