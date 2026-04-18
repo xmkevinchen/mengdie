@@ -121,10 +121,10 @@ mengdie dream [--project PID] [--synthesize | --dry-run]
 
 ## Steps
 
-### Step 1: Schema v4 + `NewMemory.is_longterm` + `SourceType::Synthesis` (AC1)
+### Step 1: Schema v4 + `NewMemory.is_longterm` + `SourceType::Synthesis` (AC1) — commit 7b3a876
 
-- [ ] Bump `SCHEMA_VERSION` in `src/core/schema.rs` from `3` → `4`.
-- [ ] In `run_migrations`, add the v4 block (gated on `current_version < 4`)
+- [x] Bump `SCHEMA_VERSION` in `src/core/schema.rs` from `3` → `4`.
+- [x] In `run_migrations`, add the v4 block (gated on `current_version < 4`)
   that creates the link table:
   ```sql
   CREATE TABLE IF NOT EXISTS memory_synthesis_links (
@@ -143,17 +143,17 @@ mengdie dream [--project PID] [--synthesize | --dry-run]
   declarations are documentation + future-proofing. A synthesis row
   deleted by hand will orphan link rows, but nothing in the current code
   path deletes memories — invalidation sets `valid_until`.
-- [ ] Add `Synthesis` variant to `SourceType` enum in `src/core/mcp_tools.rs`:
+- [x] Add `Synthesis` variant to `SourceType` enum in `src/core/mcp_tools.rs`:
   ```rust
   pub enum SourceType { Conclusion, Review, Plan, Retrospect, Synthesis }
   ```
   Update the `Display` impl to emit `"synthesis"`.
-- [ ] Update the parser-layer whitelist (if one exists) to accept
+- [x] Update the parser-layer whitelist (if one exists) to accept
   `"synthesis"` — grep for callers that `match` or validate the string.
   Memory ingest via MCP will now accept `source_type: "synthesis"`; that's
   fine — it allows tests to insert synthesis rows without going through
   the dream command.
-- [ ] Add `is_longterm: bool` field to `NewMemory` (`src/core/db.rs:49-59`) and
+- [x] Add `is_longterm: bool` field to `NewMemory` (`src/core/db.rs:49-59`) and
   thread it through `insert_memory`'s SQL INSERT column list + VALUES
   placeholder (line 101-131). Add `is_longterm = excluded.is_longterm`
   to the ON CONFLICT DO UPDATE SET clause. Update the ON CONFLICT
@@ -162,25 +162,25 @@ mengdie dream [--project PID] [--synthesize | --dry-run]
   `NewMemory {` — ingest.rs, tests). This closes the architect +
   dep-analyst MF-1 finding that the plan previously left the path
   ambiguous.
-- [ ] Unit test (schema): fresh in-memory DB → `run_migrations` →
+- [x] Unit test (schema): fresh in-memory DB → `run_migrations` →
   `PRAGMA user_version = 4`. Second call is a no-op. `memory_synthesis_links`
   table exists (query `sqlite_master`).
-- [ ] Unit test (schema): open a DB at schema v3 (manually set
+- [x] Unit test (schema): open a DB at schema v3 (manually set
   `user_version = 3`, insert a row), run migration → `user_version = 4`,
   existing row intact, new table exists.
-- [ ] Unit test (db): `insert_memory` with `is_longterm = true` stores 1
+- [x] Unit test (db): `insert_memory` with `is_longterm = true` stores 1
   in the column; round-trip via `get_memory` returns `is_longterm: true`.
   With `is_longterm = false` (default), column is 0.
-- [ ] Unit test (SourceType): `SourceType::Synthesis.to_string() == "synthesis"`.
-- [ ] Unit test (SourceType): deserialize `{"source_type": "synthesis", ...}`
+- [x] Unit test (SourceType): `SourceType::Synthesis.to_string() == "synthesis"`.
+- [x] Unit test (SourceType): deserialize `{"source_type": "synthesis", ...}`
   via the existing IngestParams — must succeed.
 
 Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
 `src/core/ingest.rs` (callsite default)
 
-### Step 2: Pure synthesis seam — prompt builder + response parser (AC2)
+### Step 2: Pure synthesis seam — prompt builder + response parser (AC2) — commit 7427b27
 
-- [ ] Create `src/core/synthesis.rs` with two pure functions, no I/O, no DB,
+- [x] Create `src/core/synthesis.rs` with two pure functions, no I/O, no DB,
   no LLM:
   ```rust
   pub struct SynthesisInput<'a> {
@@ -205,7 +205,7 @@ Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
   `SynthesisError` is a `thiserror::Error` enum covering:
   `NoJsonObject` (no `{...}` found), `InvalidJson(serde error)`,
   `MissingField { field: &'static str }`, `EmptyTitle`, `EmptyContent`.
-- [ ] System prompt: short, strict JSON contract. Exact text in the plan
+- [x] System prompt: short, strict JSON contract. Exact text in the plan
   (copy verbatim into code):
   > "You are consolidating related engineering memories. Output ONLY a
   > JSON object with keys title, content, entities. title ≤ 80 chars.
@@ -213,14 +213,14 @@ Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
   > without naming file paths. entities is an array of 2–6 compound tags
   > (lowercase, hyphen-separated, no spaces). No markdown, no prose
   > outside the JSON."
-- [ ] User prompt: template `"Project: {project}\n\nMemories in this
+- [x] User prompt: template `"Project: {project}\n\nMemories in this
   cluster ({n}):\n\n--- MEMORY 1 ---\nTitle: {t1}\nEntities: {e1}\n{c1}\n\n
   --- MEMORY 2 ---\n...\n\nWrite the synthesis JSON now."` with content
   truncation at **4000 chars per memory** (`content.chars().take(4000).collect()`),
   appending `"… [truncated]"` marker if truncated. Total prompt bound at
   ~20 memories × 4000 = 80K chars ≈ 20K tokens, safely under
   claude-sonnet context.
-- [ ] Response parser: extract the first complete top-level `{...}` block
+- [x] Response parser: extract the first complete top-level `{...}` block
   via a **brace-depth counter** (O(n) single pass). Starting from the
   first `{`, increment depth on `{`, decrement on `}`, end at the
   matching depth-0 `}`. Correctly handles inner braces in content
@@ -238,7 +238,7 @@ Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
   `entities` with `,`. Validate: non-empty title (≤ 200 chars, hard cap
   in case LLM ignores the 80-char soft cap), non-empty content, fill
   `source_memory_ids` from the passed-in `source_ids`.
-- [ ] Unit tests (prompt builder):
+- [x] Unit tests (prompt builder):
   - Empty cluster (shouldn't happen — min_size ≥ 3 upstream) →
     `debug_assert`. Release-mode: still produces a valid prompt with
     `(0)` count.
@@ -249,7 +249,7 @@ Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
   - Content of 4001 chars → truncation marker appended.
   - System prompt exact string matches a `const EXPECTED_SYSTEM_PROMPT`
     (regression guard).
-- [ ] Unit tests (response parser):
+- [x] Unit tests (response parser):
   - Happy path: `{"title":"X","content":"Y.","entities":["a","b"]}` →
     `SynthesisDraft { title:"X", content:"Y.", entities:"a,b", source_memory_ids:[...] }`.
   - LLM preamble: `"Sure! Here:\n\n{\"title\":...}"` → parses cleanly.
@@ -267,8 +267,8 @@ Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
   - **Nested objects in entities** (adversarial): entities sometimes
     come back as `[{"tag":"x"}]` instead of `["x"]`. The parser should
     `InvalidJson` (strict schema), not silently flatten.
-- [ ] Register: `pub mod synthesis;` in `src/core/mod.rs` (alphabetical).
-- [ ] Verify: `cargo test --lib synthesis::` ≥ 10 tests pass. clippy +
+- [x] Register: `pub mod synthesis;` in `src/core/mod.rs` (alphabetical).
+- [x] Verify: `cargo test --lib synthesis::` ≥ 10 tests pass. clippy +
   fmt clean. No `#[allow]`.
 
 Expected files: `src/core/synthesis.rs`, `src/core/mod.rs`
