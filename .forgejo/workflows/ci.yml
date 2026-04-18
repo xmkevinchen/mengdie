@@ -32,14 +32,14 @@ jobs:
         # (no rust-toolchain.toml) but we DO need these two components to
         # be present on the runner. rustup noops if they're already there.
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           rustup component add rustfmt clippy
 
       - name: Toolchain version log
         # Sanity log only — not a guard. Helps debug CI-vs-local mismatches.
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           rustc --version
           cargo fmt --version
@@ -47,18 +47,18 @@ jobs:
 
       - name: Format check
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo fmt --all -- --check
 
       - name: Clippy
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo test

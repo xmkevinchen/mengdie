@@ -20,31 +20,31 @@ jobs:
       # closes that window.
       - name: Ensure rustfmt + clippy components
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           rustup component add rustfmt clippy
 
       - name: Format check
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo fmt --all -- --check
 
       - name: Clippy
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo test
 
       - name: Build release binaries
         run: |
-          unset SDKROOT
+          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo build --release --target x86_64-unknown-linux-gnu
           mkdir -p dist
