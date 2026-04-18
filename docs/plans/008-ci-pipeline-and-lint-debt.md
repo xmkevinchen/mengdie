@@ -60,9 +60,19 @@ Add a committed hook script + one-line setup. Hook runs the fast checks only (fm
 
 Expected files: `.githooks/pre-commit`, `.githooks/README.md`, `CLAUDE.md`
 
-### Step 3: CI workflow + release.yml trim (AC3)
+### Step 3: CI workflow + release.yml trim (AC3) — PARTIAL
 
-Ship the push/PR CI workflow and retire the redundant release-time test job. Both in one atomic commit since they're coupled (release.yml test removal is only safe once ci.yml covers the path).
+**Delivered**: `.forgejo/workflows/ci.yml` scoped down to `cargo fmt --check` only. Fires on push (all branches) + pull_request. Catches format drift at PR/push time.
+
+**Not delivered** (deferred to BL-006 in `docs/backlog/`):
+- `cargo clippy --all-targets -- -D warnings` in CI — would compile `ring` which fails on this specific runner with a `-isysroot /Applications/Xcode.app/.../MacOSX.sdk` flag. Debug traced (runs 26–28): job env is CLEAN, no CFLAGS / SDKROOT / PATH shim / `.cargo/config.toml` — yet cc receives the macOS SDK path. Root cause not isolated after ~30 min of hunting. Left for BL-006.
+- `cargo test` in CI — same issue (any C-compiled dep triggers the leak).
+- Removing release.yml's standalone `test:` job + inlining the gate in `build-linux:` — reverted. release.yml is back to its pre-Step-3 state so the next tag push doesn't hit the same ring failure.
+
+**Why this is acceptable for now**:
+- Local pre-commit hook (Step 2) runs full `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` on every commit. Solo-dev workflow → all commits go through the hook before reaching Forgejo.
+- CI's `cargo fmt --check` is a defense-in-depth backstop: if someone bypasses the hook with `--no-verify` (which CLAUDE.md forbids), format drift still gets caught server-side.
+- The original Step 3 goal was "close the commits-land-untested gap". Steps 1 + 2 close that gap for fmt + clippy + test at the developer boundary. Step 3's CI is the server-side second layer, which we now have for fmt only.
 
 - [ ] Create `.forgejo/workflows/ci.yml` with the following exact shape:
   - `name: CI`

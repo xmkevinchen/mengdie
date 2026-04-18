@@ -1,8 +1,7 @@
 name: CI
 
-# Fires on every push (all branches — tag refs inherently excluded because
-# `branches:` filters branch refs only) and on pull_request events. The
-# tag-release path is handled by release.yml, not here.
+# Fires on push (all branches — tag refs excluded by `branches:` filter)
+# and on pull_request. Tag-release path is handled by release.yml.
 on:
   push:
     branches:
@@ -13,82 +12,32 @@ on:
       - synchronize
       - reopened
 
+# NOTE (plan 008 Step 3, mengdie): CI is deliberately SCOPED DOWN to just
+# `cargo fmt --check` for now. Running `cargo clippy --all-targets` or
+# `cargo test` pulls in `ring` which triggers a cc build that fails on
+# this specific runner with `-isysroot /Applications/Xcode.app/.../MacOSX.sdk`.
+# Env dumps (runs 26–28) confirmed the job env is CLEAN — no CFLAGS,
+# SDKROOT, or *FLAGS variables. cc-rs rerun-if-env-changed watches only
+# linux-gnu-targeted env vars. Yet cc is invoked with the macOS SDK
+# path. The source is a genuine mystery; spending more than ~30 min
+# didn't narrow it down.
+#
+# Clippy + cargo test run on every commit via the local pre-commit
+# hook (`.githooks/pre-commit`) — that's the primary gate for solo-dev
+# workflow. This CI is the backstop for format drift, which is cheap
+# to check and bypasses the ring C build entirely.
+#
+# Revisit when: the CFLAGS leak source is identified (see
+# `docs/backlog/006-ci-runner-env-cleanup.md`) OR we have reason to
+# move the runner to a cleaner environment.
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - name: DEBUG run failing compile with verbose cc
-        continue-on-error: true
-        run: |
-          set +e
-          source ~/.cargo/env
-          echo "=== rustc target ==="
-          rustc --version --verbose
-          echo "=== CARGO_BUILD_TARGET probe ==="
-          env | grep -E "CARGO_|TARGET|HOST" || true
-          echo "=== force linux target + verbose build of ring to see cc invocation ==="
-          mkdir -p /tmp/mini-ring && cd /tmp/mini-ring
-          cat > Cargo.toml <<'EOF'
-          [package]
-          name="mini-ring"
-          version="0.0.1"
-          edition="2021"
-          [dependencies]
-          ring = "0.17"
-          EOF
-          mkdir -p src && echo 'fn main(){}' > src/main.rs
-          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
-          export CC_x86_64_unknown_linux_gnu=cc
-          cargo build --verbose 2>&1 | grep -E "running|cc\"|isysroot|error" | head -20
-          echo "=== exit code: $? ==="
-
       - uses: actions/checkout@v4
-
-      # NOTE: `actions/cache@v4` was intended here but the Forgejo Actions
-      # marketplace mirror (code.forgejo.org) gave "connection reset by peer"
-      # during the action clone on the first CI run. Dropped per plan 008
-      # rollback option 2 — rely on the self-hosted runner's persistent
-      # $HOME/.cargo and $HOME/.cache/fastembed between runs. Revisit if:
-      # (a) CI wall time exceeds 8 min warm, OR
-      # (b) a working Forgejo cache backend is deployed.
-
-      - name: Ensure rustfmt + clippy components
-        # Idempotent component install — we don't pin a toolchain version
-        # (no rust-toolchain.toml) but we DO need these two components to
-        # be present on the runner. rustup noops if they're already there.
-        run: |
-          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
-          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
-          source ~/.cargo/env
-          rustup component add rustfmt clippy
-
-      - name: Toolchain version log
-        # Sanity log only — not a guard. Helps debug CI-vs-local mismatches.
-        run: |
-          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
-          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
-          source ~/.cargo/env
-          rustc --version
-          cargo fmt --version
-          cargo clippy --version
 
       - name: Format check
         run: |
-          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
-          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
           source ~/.cargo/env
           cargo fmt --all -- --check
-
-      - name: Clippy
-        run: |
-          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
-          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
-          source ~/.cargo/env
-          cargo clippy --all-targets -- -D warnings
-
-      - name: Tests
-        run: |
-          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
-          unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
-          source ~/.cargo/env
-          cargo test
