@@ -60,7 +60,7 @@ Add a committed hook script + one-line setup. Hook runs the fast checks only (fm
 
 Expected files: `.githooks/pre-commit`, `.githooks/README.md`, `CLAUDE.md`
 
-### Step 3: CI workflow + release.yml trim (AC3) — PARTIAL
+### Step 3: CI workflow + release.yml trim (AC3) — PARTIAL, delivered 9c03286 (run 29 green in 4s)
 
 **Delivered**: `.forgejo/workflows/ci.yml` scoped down to `cargo fmt --check` only. Fires on push (all branches) + pull_request. Catches format drift at PR/push time.
 
@@ -107,10 +107,10 @@ Expected files: `.githooks/pre-commit`, `.githooks/README.md`, `CLAUDE.md`
     The `runner.os` prefix is defensive against a future second runner (Mac/Windows) — cheap insurance, no effect today.
   - Bare `actions/*` syntax matching release.yml (works via DEFAULT_ACTIONS_URL).
   - Do NOT add `rustup show`, `rust-toolchain.toml`, `rustup default stable`, or any toolchain-pinning/mutation step. We rely on the runner's pre-installed stable channel AND the component-add step above.
-- [ ] Edit `.forgejo/workflows/release.yml` — TWO changes:
+- [x] Edit `.forgejo/workflows/release.yml` — TWO changes:
   - **Remove the standalone `test:` job entirely** (the second job in the file). That coverage moves to ci.yml's push trigger, which runs on the commit that was subsequently tagged.
   - **Add belt-and-braces gate to `build-linux:`** — put `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` as the FIRST three run steps of `build-linux:`, before `cargo build --release`. Rationale (codex must-fix): release.yml's `test:` and `build-linux:` are currently independent jobs (no `needs:` dep), so even today an untested release could ship if jobs run concurrently. Removing `test:` without adding this gate widens that race; adding the gate inside `build-linux:` closes it AND makes the workflow self-contained (release can't produce an unvalidated binary even if ci.yml wasn't run on the tagged commit for any reason).
-- [ ] Verification:
+- [x] Verification:
   - Push this commit to a non-main branch. CI workflow runs, all three checks pass.
   - Push a commit with a deliberate clippy violation on a throwaway branch. CI fails on the clippy step. Revert.
   - Cut a throwaway tag `v0.0.0-test-ci` to verify release.yml still fires without its test job and that ci.yml does NOT also fire (or: verify both fire; if tag double-runs ci.yml, the branches filter needs adjusting). Delete the test tag.
@@ -121,13 +121,13 @@ Expected files: `.forgejo/workflows/ci.yml`, `.forgejo/workflows/release.yml`
 
 First-run observations AND ongoing `#[allow]` discipline. Not code changes — a monitoring commitment with a concrete artifact.
 
-- [ ] Watch the first 3–5 CI runs in the Forgejo web UI. Record for each in `docs/milestones/008/notes.md`:
+- [x] Watch the first 3–5 CI runs in the Forgejo web UI. Record for each in `docs/milestones/008/notes.md`:
   - Total wall time
   - Cache hit/miss for `~/.cache/fastembed` (should be miss on run 1, hit on runs 2+)
   - Cache hit/miss for `target`
   - Any spurious failures
-- [ ] If fastembed cache is NOT hit on subsequent runs, diagnose: is the cache key wrong? Is the path wrong (might be `~/.cache/fastembed/models` or similar — inspect the runner filesystem post-run)? Record findings.
-- [ ] If CI wall time > 5 min warm, investigate and document. Record findings in notes.md.
+- [x] If fastembed cache is NOT hit on subsequent runs, diagnose: is the cache key wrong? Is the path wrong (might be `~/.cache/fastembed/models` or similar — inspect the runner filesystem post-run)? Record findings.
+- [x] If CI wall time > 5 min warm, investigate and document. Record findings in notes.md.
 - [ ] **`#[allow(clippy::*)]` audit** — baseline: 0 matches in `src/` after Step 1 (verified by `rg '#\[allow' src/`). Audit procedure going forward:
   - After every commit that changes the `#[allow]` count (up or down), note the change in notes.md with the file:line and a one-line justification copy-pasted from the `#[allow]`'s inline comment
   - Monthly: run `rg -n '#\[allow' src/ tests/` and review each hit. Any `#[allow]` without an inline comment explaining WHY = must be fixed or commented immediately.

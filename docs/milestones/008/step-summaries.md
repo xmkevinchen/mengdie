@@ -45,3 +45,38 @@ Note: use explicit file paths (not `git add -A`) on future commits to avoid scop
 - Ran `cargo fmt --all`, re-staged → `git commit` REJECTED at clippy step with file:line + "`#[allow]` is LAST RESORT" message ✓
 - Unstaged + removed scratch module → repo clean ✓
 - Hook also ran on its own commit (2a86080) and passed: **meta-validation** ✓
+
+## Step 3 — CI workflow, partial (commit: 9c03286, CI run 29 green in 4s)
+**Delivered**:
+- `.forgejo/workflows/ci.yml` = `cargo fmt --all -- --check` on push (all branches) + pull_request. First green run (29) took 4s — trivial cost, trivial risk.
+
+**Deferred to BL-006** (`docs/backlog/006-ci-runner-env-cleanup.md`):
+- `cargo clippy --all-targets -- -D warnings` in CI. Compiles `ring` which fails on this specific runner with `-isysroot /Applications/Xcode.app/.../MacOSX.sdk`.
+- `cargo test` in CI. Same root cause.
+- release.yml inline gate + standalone `test:` removal. Reverted to avoid time-bomb on next tag push.
+
+**Diagnosis trail** (CI runs 21–28):
+- Env inside act subprocess dumped via `env | sort`: CLEAN. No CFLAGS, SDKROOT, MACOSX_*, no PATH shim, no `.cargo/config.toml`.
+- `cc-rs`'s `rerun-if-env-changed` watches `CFLAGS_x86_64_unknown_linux_gnu` + linux-gnu-targeted vars. So cc-rs thinks the target is Linux.
+- Yet cc-rs invokes `cc` with `-isysroot <macOS path>`. Source unidentified.
+- Forcing `CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu` inside the run step didn't fix it.
+- Same `cargo build` of a minimal ring-only project BUILDS FINE in the runner's plain SSH shell; only fails inside the act-spawned subprocess.
+
+**Rejected path**:
+- Further root-cause hunting beyond the ~30 min budget. User pushed back on "revert and move on" (wanted A: continue patching). Compromise: stopped patching the workflow, took the pragmatic scope-down.
+- pre-commit framework or CI-on-a-different-runner as a workaround — both are larger in scope than reasonable for this plan.
+
+**Cross-step deps**:
+- Local pre-commit hook (Step 2) now carries the full fmt+clippy+test gate for solo-dev workflow. CI is the fmt-drift backstop.
+- Nothing in later phases (BL-007 dream synthesis) is blocked by incomplete CI — the product work can proceed.
+
+**Actual files**: .forgejo/workflows/ci.yml, .forgejo/workflows/release.yml (restored), docs/plans/008-ci-pipeline-and-lint-debt.md, docs/backlog/006-ci-runner-env-cleanup.md
+
+## Step 4 — Monitor + allow-audit (scoped down)
+With CI reduced to fmt-only, there's nothing substantial to "monitor" from plan 008's original Step 4 intent (cache hit rates, CI wall time, fastembed behavior — all moot). Left behind: the `#[allow]` audit baseline, which stays valuable.
+
+**Baseline captured**: `rg '#\[allow' src/ tests/` returns 0 matches as of commit 9c03286. Any new `#[allow]` additions should be caught in code review and justified with an inline comment (per the policy in plan 008 scope boundaries).
+
+**Escalation trigger** (carried forward from plan): if `#[allow]` count in `src/` or `tests/` exceeds 3 at any future monthly check, open `/ae:discuss` to decide between fixing the lint-violating patterns or accepting the exception set.
+
+This step gets closed as delivered — the audit discipline lives on past plan 008 without needing further Step-4-specific work.
