@@ -35,3 +35,29 @@
 - `SynthesisInput` borrows `MemoryEntry` from `crate::core::db` — Step 3's bulk `get_memories_by_ids` helper must return `Vec<MemoryEntry>` to feed this directly.
 
 **Actual files**: `src/core/synthesis.rs` (new), `src/core/mod.rs` (registration).
+
+## Step 3 — run_synthesis_pass + CLI wiring + e2e test (commit: 6d52bda)
+
+**Decisions**:
+- Synthesis pass lives in `src/core/dreaming.rs` alongside the existing promotion pass (rather than splitting to `dream_pipeline.rs`). File is ~580 lines after Step 3, still manageable; splitting would just fragment the "dream" concept across two files for no readability gain.
+- `insert_synthesis_with_links` is a new Db method, not a free function — it needs `conn.transaction()` scoped under the existing `Arc<Mutex<Connection>>`, which only Db owns. Same rationale for `get_memories_by_ids` (one lock acquisition per call is a Db-method pattern).
+- `count_synthesis_links` added as a public helper so external integration tests (tests/dream_synthesis.rs) can verify link-row presence without needing `lock_conn` access — that method is `pub(crate)` and external tests can't reach it.
+- `fn main` switched to `#[tokio::main(flavor = "current_thread")]` per the plan review. Current-thread scheduler keeps the single-threaded cost profile of the previously-proposed nested-runtime approach without double-init risk. Other sync subcommands unchanged — they just don't `.await`.
+- `--dry-run` implies `--synthesize` (documented in the help string) — running `mengdie dream --dry-run` alone should show prompts; forcing the user to pass both flags would be annoying UX. The opt-in default of `--synthesize` still holds for non-dry-run runs.
+
+**Rejected**:
+- Per-call retry inside `run_synthesis_pass` — explicit non-goal per plan. One attempt per cluster per pass; re-runs are safe via content_hash dedup.
+- Auto-invalidation of source memories after synthesis — non-goal per plan. Originals stay valid; synthesis is additive.
+- Streaming LLM output to stdout during dry-run — plan just says "print prompt, skip LLM." Kept simple: println + tracing::info.
+- Using `list_memories(Some(...))` inside `run_synthesis_pass` — `get_memories_by_ids` is more precise (one IN-query vs full project scan) and the plan explicitly required the bulk helper.
+
+**Cross-step deps**:
+- `SynthesisResult` struct is `#[derive(Debug, Default, PartialEq, Eq)]` so future tooling can compare expected-vs-actual counts in integration or ae:review harnesses.
+- The Db helpers (`get_memories_by_ids`, `insert_synthesis_with_links`, `count_synthesis_links`) are public and reusable for BL-012 (RAG) and any future batch-consolidation feature.
+- `cmd_dream`'s new argument list is large (10 params) — kept as flat args (with `#[allow(clippy::too_many_arguments)]`) rather than bundling into a struct, matching the existing `cmd_rename` style. If BL-008 adds more flags, revisit.
+
+**Actual files**: `src/bin/cli.rs`, `src/core/db.rs` (approved drift — plan required the Db helpers but didn't list db.rs in Expected files), `src/core/dreaming.rs`, `tests/dream_synthesis.rs`.
+
+**Test count**: 175 passed + 5 ignored (up from 169 + 4). Includes 6 new tokio::test synthesis pass unit tests + 1 new #[ignore] e2e test.
+
+**AC5 reminder**: After the first real `mengdie dream --synthesize` run on production mengdie data, remember to append a `## BL-007 empirical results` section to `docs/backlog/BL-clustering-validation.md` with (1) threshold bucket + cluster count, (2) cluster quality good/mixed/poor, (3) which deferred triggers fire. See plan 010 AC5.

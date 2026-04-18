@@ -273,9 +273,9 @@ Expected files: `src/core/schema.rs`, `src/core/mcp_tools.rs`, `src/core/db.rs`,
 
 Expected files: `src/core/synthesis.rs`, `src/core/mod.rs`
 
-### Step 3: `mengdie dream` synthesis orchestration + CLI flags + e2e test (AC3, AC4)
+### Step 3: `mengdie dream` synthesis orchestration + CLI flags + e2e test (AC3, AC4) — commit 6d52bda
 
-- [ ] In `src/core/dreaming.rs` (or new `src/core/dream_pipeline.rs` if
+- [x] In `src/core/dreaming.rs` (or new `src/core/dream_pipeline.rs` if
   `dreaming.rs` grows too large — judgment call during execution,
   prefer keeping it in `dreaming.rs` unless it exceeds ~400 lines):
   ```rust
@@ -334,7 +334,7 @@ Expected files: `src/core/synthesis.rs`, `src/core/mod.rs`
     synthesis rows are searchable immediately via FTS/vector (no
     `is_longterm` gate in search today), this change is a no-op for
     discovery but a meaningful signal of "not yet promoted."
-- [ ] Extend `src/bin/cli.rs` `Commands::Dream` with new flags. Default
+- [x] Extend `src/bin/cli.rs` `Commands::Dream` with new flags. Default
   **flipped** per cross-family review: `--synthesize` is explicit
   opt-in, not default-on. LLM-calling commands should not make
   network calls and DB writes on a bare `mengdie dream` invocation.
@@ -370,7 +370,7 @@ Expected files: `src/core/synthesis.rs`, `src/core/mod.rs`
   project: Option<String>,
   ```
   No `--no-synthesize` needed now — the default is off.
-- [ ] Convert `fn main()` in `src/bin/cli.rs:106` to
+- [x] Convert `fn main()` in `src/bin/cli.rs:106` to
   `#[tokio::main(flavor = "current_thread")]`-annotated `async fn main()`.
   `cmd_dream` becomes `async fn`; the other subcommands stay sync and
   are called from the async `main` with no await. Reason (consolidated
@@ -384,32 +384,32 @@ Expected files: `src/core/synthesis.rs`, `src/core/mod.rs`
     `cmd_dream` after the existing promotion pass.
   - If `dry_run` is set without `synthesize`, still run the synthesis
     path (dry_run implies synthesize — documented in the flag help).
-- [ ] Output: print synthesis stats after promotion stats:
+- [x] Output: print synthesis stats after promotion stats:
   `"Synthesis: N syntheses created from M clusters (K residuals skipped, E LLM errors)"`.
-- [ ] Integration test (`tests/dream_synthesis.rs`, `#[ignore]`,
+- [x] Integration test (`tests/dream_synthesis.rs`, `#[ignore]`,
   same pattern as BL-005's `tests/llm_claude_cli.rs`): bootstrap an
   in-memory-file DB with 6 near-identical 384-dim embeddings in one
   project, run `run_synthesis_pass` with the real `ClaudeCliProvider`,
   assert exactly 1 synthesis row with `source_type="synthesis"` and 6
   link rows. Document at top: requires authenticated `claude` on PATH,
   opt-in via `cargo test -- --ignored dream_synthesis`.
-- [ ] Unit test (no LLM): `run_synthesis_pass` with `dry_run=true` + a
+- [x] Unit test (no LLM): `run_synthesis_pass` with `dry_run=true` + a
   stub `LlmProvider` that panics if `complete` is called → asserts
   the stub is never called, no rows inserted, result counts match
   expected cluster count.
-- [ ] Unit test (no LLM): `run_synthesis_pass` with a stub provider
+- [x] Unit test (no LLM): `run_synthesis_pass` with a stub provider
   that returns a fixed JSON payload → asserts exactly N synthesis rows
   inserted (where N = cluster count from `cluster_memories`), link
   rows populated correctly.
-- [ ] Unit test (error isolation): stub provider that returns `Err(Timeout)`
+- [x] Unit test (error isolation): stub provider that returns `Err(Timeout)`
   for one cluster and valid JSON for another → one synthesis row, one
   LLM error counter incremented, residuals unchanged, pass completes
   without error propagation.
-- [ ] Unit test (content_hash dedup): run synthesis pass twice against
+- [x] Unit test (content_hash dedup): run synthesis pass twice against
   the same stub provider output → second run does not create a duplicate
   synthesis row (content_hash ON CONFLICT), does not create duplicate
   link rows (PK ON CONFLICT).
-- [ ] Verify: `cargo test` (minus `#[ignore]`) clean. `cargo clippy
+- [x] Verify: `cargo test` (minus `#[ignore]`) clean. `cargo clippy
   --all-targets -- -D warnings` clean. `cargo fmt --all -- --check` clean.
   Manual: `cargo test -- --ignored dream_synthesis` run once with
   `claude` CLI authenticated; record outcome in the commit message.
