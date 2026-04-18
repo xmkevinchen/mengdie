@@ -280,6 +280,21 @@ impl Db {
             by_id.insert(entry.id.clone(), entry);
         }
 
+        // Review feedback: when the fetched count is < requested count, log
+        // the missing ids at warn level. Root cause is usually that a memory
+        // was invalidated or deleted between cluster_memories and the bulk
+        // fetch. Surfacing the ids lets the operator diagnose without
+        // re-running with debug logging.
+        if by_id.len() < ids.len() {
+            let missing: Vec<&String> = ids.iter().filter(|id| !by_id.contains_key(*id)).collect();
+            tracing::warn!(
+                requested = ids.len(),
+                loaded = by_id.len(),
+                ?missing,
+                "get_memories_by_ids: partial load"
+            );
+        }
+
         Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
@@ -347,7 +362,12 @@ impl Db {
     }
 
     /// Count synthesis link rows pointing at a given synthesis memory.
-    /// Used by tests and the synthesis pass result summary.
+    /// Used by unit + external integration tests; kept `pub` because
+    /// `tests/dream_synthesis.rs` is an external crate and can't reach
+    /// `pub(crate)` items. NOT a production read path — `run_synthesis_pass`
+    /// tracks counts via `SynthesisResult.syntheses_created`. Architecture
+    /// review flagged the visibility; the trade-off is: test-harness access
+    /// vs surface area. We pick test-harness.
     pub fn count_synthesis_links(&self, synthesis_memory_id: &str) -> anyhow::Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         let count: i64 = conn.query_row(

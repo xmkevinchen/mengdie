@@ -4,7 +4,7 @@ use crate::core::db::MemoryEntry;
 
 const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON.";
 
-const CONTENT_CHAR_LIMIT: usize = 4000;
+pub const CONTENT_CHAR_LIMIT: usize = 4000;
 const TITLE_HARD_CAP: usize = 200;
 
 pub struct SynthesisInput<'a> {
@@ -121,12 +121,31 @@ pub fn parse_synthesis_response(
     })
 }
 
+/// Extract the first complete top-level JSON object from `raw`, ignoring
+/// braces that appear inside JSON string literals. The scanner tracks
+/// `in_string` + escape state so adversarial content like
+/// `"quote with \"{unbalanced"` does not cause the brace counter to terminate
+/// early or over-capture. Falls through to serde_json for any syntactic
+/// validity check — this helper only locates the object boundary.
 fn extract_first_json_object(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let start = bytes.iter().position(|&b| b == b'{')?;
     let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
     for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
         match b {
+            b'"' => in_string = true,
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
@@ -310,5 +329,38 @@ mod tests {
         let raw = r#"{"title":"X","content":"Y.","entities":[{"tag":"x"}]}"#;
         let err = parse_synthesis_response(raw, &[]).unwrap_err();
         assert!(matches!(err, SynthesisError::InvalidJson(_)));
+    }
+
+    #[test]
+    fn parser_escaped_quote_with_unbalanced_inner_brace_is_handled() {
+        // Review regression: the naive brace-depth counter (no string-state
+        // tracking) would see the `{` at position X inside the content string
+        // literal, increment depth, scan past an unbalanced closing `}` that
+        // would get absorbed, and then fail. With string-aware tracking, the
+        // inner `{` and `}` inside JSON string values are ignored entirely.
+        let raw = r#"{"title":"X","content":"quote with \"{unbalanced","entities":["a"]}"#;
+        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        assert_eq!(draft.title, "X");
+        assert_eq!(draft.content, r#"quote with "{unbalanced"#);
+        assert_eq!(draft.entities, "a");
+    }
+
+    #[test]
+    fn parser_balanced_braces_inside_escaped_string() {
+        let raw = r#"{"title":"X","content":"JSON example: \"{\"k\":1}\" end.","entities":["a"]}"#;
+        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        assert_eq!(draft.title, "X");
+        assert!(draft.content.contains("{\"k\":1}"));
+    }
+
+    #[test]
+    fn parser_markdown_fenced_json_extracts_cleanly() {
+        // Real LLMs sometimes wrap JSON in ```json ... ``` fences despite
+        // being told to output JSON only. The extractor should find the first
+        // `{` inside the fence and parse.
+        let raw = "```json\n{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}\n```";
+        let draft = parse_synthesis_response(raw, &[]).unwrap();
+        assert_eq!(draft.title, "X");
+        assert_eq!(draft.content, "Y.");
     }
 }

@@ -128,16 +128,39 @@ impl Db {
 // ============================================================================
 
 /// Result of a single synthesis pass.
+///
+/// `llm_call_errors` and `parse_errors` are tracked separately so an operator
+/// can distinguish transient infra failures (timeouts, rate limits — worth
+/// retrying) from structural regressions (LLM wrapping JSON in fences,
+/// dropping required fields — worth a prompt fix). Review feedback:
+/// collapsing both into a single counter loses the discriminator the operator
+/// needs to decide remediation.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SynthesisResult {
-    /// Clusters seen (including ones that failed the LLM call).
+    /// Clusters seen (including ones that failed the LLM call or parse).
     pub clusters_processed: usize,
     /// Synthesis rows written (≤ clusters_processed; dry_run → always 0).
     pub syntheses_created: usize,
-    /// Clusters where the LLM call or response parsing failed.
-    pub llm_errors: usize,
+    /// Clusters where `provider.complete(...)` returned `Err(_)`.
+    pub llm_call_errors: usize,
+    /// Clusters where the LLM call succeeded but `parse_synthesis_response`
+    /// failed (NoJsonObject, InvalidJson, MissingField, EmptyTitle, …).
+    pub parse_errors: usize,
     /// Memories that didn't reach `min_size` and were logged + skipped.
     pub residuals_skipped: usize,
+    /// Memories whose content was truncated at `CONTENT_CHAR_LIMIT` before
+    /// inclusion in the prompt. Populated by the prompt-build loop via the
+    /// tracing layer — if this is > 0, synthesis quality may be degraded
+    /// because source signal landed past the cap.
+    pub memories_truncated: usize,
+}
+
+impl SynthesisResult {
+    /// Total LLM-adjacent failures (sum of call + parse). Preserved for
+    /// operators who want the old flat metric; prefer the split fields.
+    pub fn llm_errors(&self) -> usize {
+        self.llm_call_errors + self.parse_errors
+    }
 }
 
 /// Cluster the given project's memories then either log the prompts (dry_run)
@@ -194,6 +217,18 @@ pub async fn run_synthesis_pass(
         }
 
         let proj = memories[0].project_id.clone();
+
+        // Count how many memories in this cluster will hit the 4000-char
+        // truncation cap before the pure prompt builder applies it. Review
+        // feedback: silent truncation loses signal; surface it in the
+        // SynthesisResult so the operator can tell if synthesis quality is
+        // being degraded by content truncation.
+        for mem in &memories {
+            if mem.content.chars().count() > super::synthesis::CONTENT_CHAR_LIMIT {
+                result.memories_truncated += 1;
+            }
+        }
+
         let input = SynthesisInput {
             cluster_memories: &memories,
             cluster_centroid: &cluster.centroid,
@@ -223,7 +258,7 @@ pub async fn run_synthesis_pass(
                     error = %e,
                     "synthesis: LLM call failed, skipping cluster"
                 );
-                result.llm_errors += 1;
+                result.llm_call_errors += 1;
                 continue;
             }
         };
@@ -236,7 +271,7 @@ pub async fn run_synthesis_pass(
                     error = %e,
                     "synthesis: parse failed, skipping cluster"
                 );
-                result.llm_errors += 1;
+                result.parse_errors += 1;
                 continue;
             }
         };
@@ -481,7 +516,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0);
-        assert_eq!(r.llm_errors, 0);
+        assert_eq!(r.llm_errors(), 0);
         // No synthesis rows should exist
         let total: i64 = {
             let conn = db.lock_conn().unwrap();
@@ -506,7 +541,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 1);
-        assert_eq!(r.llm_errors, 0);
+        assert_eq!(r.llm_errors(), 0);
         assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
 
         // 1 synthesis row in DB with source_type = "synthesis" and is_longterm = 0
@@ -560,7 +595,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.clusters_processed, 2);
         assert_eq!(r.syntheses_created, 1);
-        assert_eq!(r.llm_errors, 1);
+        assert_eq!(r.llm_errors(), 1);
     }
 
     #[tokio::test]
@@ -613,7 +648,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0);
-        assert_eq!(r.llm_errors, 0);
+        assert_eq!(r.llm_errors(), 0);
     }
 
     #[tokio::test]

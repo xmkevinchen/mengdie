@@ -55,8 +55,10 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         max_cluster_size: usize,
 
-        /// Show what would be sent to the LLM without making calls (implies --synthesize;
-        /// no rows written, no LLM invoked).
+        /// Show synthesis prompts without making LLM calls or writing rows.
+        /// Requires `--synthesize` (review feedback: previously `--dry-run`
+        /// silently triggered the synthesis path even without `--synthesize`,
+        /// which surprised users expecting a promotion-pass preview).
         #[arg(long)]
         dry_run: bool,
 
@@ -216,10 +218,17 @@ async fn cmd_dream(
         result.promoted, result.total_eligible, min_recall, min_relevance, window_days
     );
 
-    // dry_run implies synthesize (documented in --help): we still want the
-    // cluster prompts printed even if --synthesize was not explicitly passed.
-    let want_synthesis = synthesize || dry_run;
-    if !want_synthesis {
+    // Review feedback: `--dry-run` alone previously silently ran the synthesis
+    // path. New contract: `--dry-run` requires explicit `--synthesize` to make
+    // the operator's intent unambiguous. Plain `mengdie dream` still only
+    // runs the promotion pass (no LLM calls, no writes).
+    if dry_run && !synthesize {
+        anyhow::bail!(
+            "--dry-run requires --synthesize (dry-run is a preview of the synthesis pass, \
+             not the promotion pass). Re-run with both flags if you want to inspect prompts."
+        );
+    }
+    if !synthesize {
         return Ok(());
     }
 
@@ -237,8 +246,14 @@ async fn cmd_dream(
     .await?;
 
     println!(
-        "Synthesis: {} syntheses created from {} clusters ({} residuals skipped, {} LLM errors)",
-        syn.syntheses_created, syn.clusters_processed, syn.residuals_skipped, syn.llm_errors
+        "Synthesis: {} syntheses created from {} clusters \
+         ({} residuals skipped, {} LLM-call errors, {} parse errors, {} memories truncated)",
+        syn.syntheses_created,
+        syn.clusters_processed,
+        syn.residuals_skipped,
+        syn.llm_call_errors,
+        syn.parse_errors,
+        syn.memories_truncated
     );
     Ok(())
 }

@@ -102,11 +102,14 @@ async fn end_to_end_dream_synthesis_writes_one_row_with_six_links() {
 
     assert_eq!(result.clusters_processed, 1);
     assert_eq!(
-        result.syntheses_created, 1,
+        result.syntheses_created,
+        1,
         "expected exactly 1 synthesis row; got {}, llm_errors={}",
-        result.syntheses_created, result.llm_errors
+        result.syntheses_created,
+        result.llm_errors()
     );
-    assert_eq!(result.llm_errors, 0);
+    assert_eq!(result.llm_call_errors, 0);
+    assert_eq!(result.parse_errors, 0);
 
     // Verify the synthesis row shape.
     let syns: Vec<_> = db

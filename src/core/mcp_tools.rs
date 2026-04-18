@@ -123,6 +123,12 @@ pub struct SearchResultItem {
     pub id: String,
     pub title: String,
     pub source_file: String,
+    /// One of: conclusion | review | plan | retrospect | synthesis.
+    /// Review feedback: callers (ae:analyze Round 0 injection, operators
+    /// reading `mengdie search`) need to distinguish primary-source memories
+    /// from LLM-synthesized summaries so they can apply appropriate
+    /// epistemic weight.
+    pub source_type: String,
     pub knowledge_type: String,
     pub entities: String,
     pub score: f64,
@@ -247,6 +253,7 @@ impl MengdieServer {
                     id: r.entry.id,
                     title: r.entry.title,
                     source_file: r.entry.source_file,
+                    source_type: r.entry.source_type,
                     knowledge_type: r.entry.knowledge_type,
                     entities: r.entry.entities,
                     score: r.score,
