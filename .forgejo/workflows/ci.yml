@@ -16,6 +16,14 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    env:
+      # The runner inherits the host user's shell env which includes a
+      # macOS Xcode SDKROOT (set locally for native macOS builds per
+      # project_infra memory). On the Linux runner `ring`'s C build
+      # blindly consumes SDKROOT and hands it to cc as -isysroot, which
+      # then fails because the Xcode path doesn't exist on Linux. Blank
+      # it out job-wide so no subprocess inherits a stale macOS value.
+      SDKROOT: ''
     steps:
       - uses: actions/checkout@v4
 

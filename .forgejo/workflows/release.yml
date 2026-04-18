@@ -8,6 +8,11 @@ on:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    env:
+      # See comment in ci.yml — host user's SDKROOT leaks in from the
+      # Mac dev setup; blank it out so ring/cc don't try to use a
+      # nonexistent Xcode path on the Linux runner.
+      SDKROOT: ''
     steps:
       - uses: actions/checkout@v4
 
