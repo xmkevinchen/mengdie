@@ -3,7 +3,7 @@ id: "009"
 title: "BL-006 — Embedding Clustering"
 type: plan
 created: 2026-04-18
-status: reviewed
+status: done
 discussion: ""
 ---
 
