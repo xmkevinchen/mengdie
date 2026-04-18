@@ -17,45 +17,30 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      # TEMPORARY DEBUG — already confirmed env is clean; now trying
-      # explicit CARGO_BUILD_TARGET to force cc-rs target detection.
-      - name: DEBUG dump env + shell chain
+      - name: DEBUG run failing compile with verbose cc
+        continue-on-error: true
         run: |
-          echo "::group::rustc target probe"
+          set +e
           source ~/.cargo/env
+          echo "=== rustc target ==="
           rustc --version --verbose
-          echo "::endgroup::"
-          echo "::group::full env (sorted)"
-          env | sort
-          echo "::endgroup::"
-          echo "::group::build-flags env specifically"
-          env | grep -iE "CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|SDKROOT|ISYSROOT|MACOSX_DEPLOYMENT|CC=|CXX=|AR=" || echo "(none — flags unset in runner env)"
-          echo "::endgroup::"
-          echo "::group::shell detection"
-          echo "SHELL=$SHELL"
-          echo "0=$0"
-          echo "BASH_VERSION=$BASH_VERSION"
-          echo "ZSH_VERSION=$ZSH_VERSION"
-          echo "::endgroup::"
-          echo "::group::parent process chain"
-          pid=$$
-          depth=0
-          while [ -n "$pid" ] && [ $depth -lt 8 ]; do
-            line=$(ps -o pid=,ppid=,comm=,args= -p "$pid" 2>/dev/null)
-            [ -z "$line" ] && break
-            echo "$line"
-            pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-            depth=$((depth + 1))
-          done
-          echo "::endgroup::"
-          echo "::group::possible sources"
-          for f in /etc/environment /etc/zsh/zshenv /etc/profile /etc/bash.bashrc ~/.zshenv ~/.zshrc ~/.bashrc ~/.profile; do
-            if [ -f "$f" ] && grep -qE "CFLAGS|SDKROOT|isysroot" "$f" 2>/dev/null; then
-              echo "== $f =="
-              grep -nE "CFLAGS|SDKROOT|isysroot" "$f" 2>/dev/null
-            fi
-          done
-          echo "::endgroup::"
+          echo "=== CARGO_BUILD_TARGET probe ==="
+          env | grep -E "CARGO_|TARGET|HOST" || true
+          echo "=== force linux target + verbose build of ring to see cc invocation ==="
+          mkdir -p /tmp/mini-ring && cd /tmp/mini-ring
+          cat > Cargo.toml <<'EOF'
+          [package]
+          name="mini-ring"
+          version="0.0.1"
+          edition="2021"
+          [dependencies]
+          ring = "0.17"
+          EOF
+          mkdir -p src && echo 'fn main(){}' > src/main.rs
+          export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
+          export CC_x86_64_unknown_linux_gnu=cc
+          cargo build --verbose 2>&1 | grep -E "running|cc\"|isysroot|error" | head -20
+          echo "=== exit code: $? ==="
 
       - uses: actions/checkout@v4
 
