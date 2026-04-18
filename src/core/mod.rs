@@ -12,5 +12,6 @@ pub mod parser;
 pub mod project;
 pub mod schema;
 pub mod search;
+pub mod synthesis;
 pub mod vector;
 pub mod watcher;
