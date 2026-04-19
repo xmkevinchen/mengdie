@@ -1,8 +1,10 @@
 ---
 id: BL-synthesis-cli-skip-metric
-status: open
+status: closed
 origin: BL-residuals-reduction AC5 post-ship audit (2026-04-19)
 created: 2026-04-19
+closed: 2026-04-19
+closed_reason: "Shipped by plan 012 (commit 63d83b0). Option A adopted — pair_clusters_skipped now tracked as a SynthesisResult field; CLI numerator fixed. Smoke test on production DB: displays 3/11 = 27% (correct pair-cluster skip rate). Review verdict: pass. See docs/reviews/010-synthesis-cli-skip-metric.md."
 scope: mengdie (observability / operator-facing metric label)
 ---
 
