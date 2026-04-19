@@ -1,11 +1,20 @@
 ---
 id: "005"
-title: "Phase 2 Roadmap — LLM Intelligence Layer (archive — Phase 2.1 shipped)"
-status: closed
-closed: 2026-04-19
-closed_reason: "Phase 2.1 (BL-005 LLM provider, BL-006 clustering, BL-007 dream synthesis) all SHIPPED as plans 007/009/010 (2026-04-18). Plan 011 added residuals reduction on top. Plan 012 fixed the CLI metric. Phase 2.2+ items remain ROADMAP-ONLY (not yet elevated to standalone BLs): BL-008 power-law decay (dormant, no current trigger), BL-009 MCP dream tool (depends on BL-008), BL-010 daemon (Phase 2.2, depends on Phase 2.1 complete — now unblocked), BL-011 async entity extraction (daemon-dependent), BL-012 RAG search (user-felt-need trigger), BL-013 KG schema (500+ memories), BL-014 feedback loop (3+ months active use). Any of these can be elevated to a standalone BL-*.md when trigger fires. Roadmap doc retained as history."
+title: "Phase 2 Roadmap — LLM Intelligence Layer"
+status: open
+created: 2026-04-16
+updated: 2026-04-19
+progress: "Phase 2.1 complete (3/10 items): BL-005/006/007 shipped as plans 007/009/010. Phase 2.2-2.5 (BL-008 through BL-014) NOT started."
 source: "Discussion 016 (Dreaming Evolution)"
 ---
+
+**Status update (2026-04-19)**: Phase 2.1 items BL-005, BL-006, BL-007 all
+shipped (plans 007/009/010/011/012). Remaining items below are still
+actionable backlog — **BL-008 power-law decay has no dependency gate
+("Trigger: any time")** and is the most-ready next unit of work. BL-009
+through BL-014 stay gated on BL-008 / daemon / corpus size as noted per
+item. This doc remains the source of truth for Phase 2.2+ until those
+items land as standalone plans.
 
 # Phase 2 Roadmap — LLM Intelligence Layer
 
