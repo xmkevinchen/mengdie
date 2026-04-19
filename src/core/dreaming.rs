@@ -197,6 +197,16 @@ impl SynthesisResult {
 /// onto a single struct after the plan review (unanimous challenger C win)
 /// found that a metric's numerator and denominator belong together. See
 /// `docs/plans/012-synthesis-cli-skip-metric.md`.
+///
+/// **Attribution invariant**: both `pair_clusters_processed` and its subset
+/// `pair_clusters_skipped` are counted by inspecting `trimmed_ids.len() == 2`
+/// PRE-DB-load (before `db.get_memories_by_ids`), matching the attribution
+/// stage used by `clusters_processed`. Moving either counter to post-DB-load
+/// would produce a pair-cluster skip percentage that silently undercounts on
+/// DB-load misses — see plan 011 AC3 for the original denominator fix, plan
+/// 012 for the numerator extension, and `BL-synthesis-preload-db-miss-edge`
+/// for the remaining asymmetry (denominator counted, numerator never
+/// incremented if DB load fails — low-probability edge; not yet observed).
 pub async fn run_synthesis_pass(
     db: &Db,
     project_id: Option<&str>,
@@ -238,8 +248,12 @@ pub async fn run_synthesis_pass(
 
         // Count pair-clusters PRE-DB-load for consistent denominator with
         // the pair-cluster skip numerator (plan 011 AC3; plan 012 moved the
-        // counter from a local binding onto SynthesisResult).
-        if trimmed_ids.len() == 2 {
+        // counter from a local binding onto SynthesisResult). `is_pair_cluster`
+        // is reused below in the Skipped branch to prevent drift between the
+        // two increment sites (review feedback: duplicate `len() == 2` checks
+        // are a refactor hazard).
+        let is_pair_cluster = trimmed_ids.len() == 2;
+        if is_pair_cluster {
             result.pair_clusters_processed += 1;
         }
 
@@ -334,9 +348,12 @@ pub async fn run_synthesis_pass(
                     );
                 }
                 result.syntheses_llm_skipped += 1;
-                if trimmed_ids.len() == 2 {
-                    // Pair-cluster skip subset — denominator for the
-                    // pair-cluster skip percentage (plan 012 AC2).
+                if is_pair_cluster {
+                    // Pair-cluster skip subset — numerator of the pair-cluster
+                    // skip percentage (plan 012 AC2). Same `is_pair_cluster`
+                    // binding as the denominator increment above — single
+                    // source of truth prevents the two sites from drifting
+                    // if the size rule ever changes.
                     result.pair_clusters_skipped += 1;
                 }
                 continue;

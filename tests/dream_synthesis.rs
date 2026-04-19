@@ -110,6 +110,15 @@ async fn end_to_end_dream_synthesis_writes_one_row_with_six_links() {
     );
     assert_eq!(result.llm_call_errors, 0);
     assert_eq!(result.parse_errors, 0);
+    // Plan 012 pair-cluster counters: the 6-memory cluster is a triple+,
+    // not a pair, so both pair-cluster counters MUST be 0. Locks the
+    // field semantics into integration coverage (review feedback from
+    // challenger D: public API fields need integration-test exercise).
+    assert_eq!(
+        result.pair_clusters_processed, 0,
+        "6-memory cluster is not a pair"
+    );
+    assert_eq!(result.pair_clusters_skipped, 0);
 
     // Verify the synthesis row shape.
     let syns: Vec<_> = db
