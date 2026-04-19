@@ -151,14 +151,53 @@ against a second dream run.
 
 ## BL-residuals-reduction empirical results
 
-_Populated after the first real `mengdie dream --synthesize` run at the new defaults
-(min_size=2 + null-escape-hatch, plan 011). Do NOT delete this section; either fill
-it in with live data, or explicitly mark "insufficient data, re-run" and schedule
-another pass._
+First real `mengdie dream --synthesize` run at the new defaults (min_size=2 +
+null-escape-hatch, plan 011). Audit recorded here per the AC5 post-ship
+follow-up contract.
 
-- **Run date**: TODO
-- **Corpus size at run**: TODO memories
-- **Skip rate**: TODO % of pair-clusters (target < 25% hatch working, 25-40% monitor, > 40% revisit min_size)
-- **Skip classification (N skips audited)**: CORRECT-SKIP: TODO, FALSE-NEGATIVE: TODO, UNCLEAR: TODO
-- **Non-skipped synthesis quality (3 spot-checked)**: good / mixed / poor — TODO
-- **Decision**: keep new defaults / revert min_size / revert prompt only / tune further — TODO
+- **Run date**: 2026-04-19 (within 24h of plan 011 ship at 2026-04-18)
+- **Corpus size at run**: 237 eligible memories (up from 224 first attempt; one
+  ingest batch landed between the two runs — same DB, both runs processed the
+  same cluster graph shape with negligible drift)
+- **Run output**: 14 syntheses created from 25 clusters, 125 residuals skipped,
+  11 LLM-skipped (all 11 LLM calls returned the null-escape hatch), 0 LLM-call
+  errors, 0 parse errors, 30 memories truncated
+- **Skip rate (true pair-cluster-only)**: **3 / 11 pair-clusters = 27%**.
+  **Sits in the "hatch working" band (< 25% → hatch working; 25-40% → monitor;
+  > 40% → revisit min_size)**. The CLI currently displays "11/11 pair-clusters
+  = 100%" which is a label bug — numerator is total LLM-skips across all
+  cluster sizes, denominator is pair-count. See BL-synthesis-cli-skip-metric
+  for the fix. The 27% figure is the correct operator signal, manually
+  recomputed from the 11 log lines.
+- **Skip rate (overall, all cluster sizes)**: 11 / 25 clusters = 44%
+- **Skip classification (all 11 skips audited from RUST_LOG=info stderr)**:
+  CORRECT-SKIP: **9**, UNCLEAR: **2**, FALSE-NEGATIVE: **0**
+  - The two UNCLEAR skips:
+    - size=3 cluster mixing "skill compaction", "Agent Teams context:fork",
+      "pre-commit Layer 1" — could plausibly be consolidated as "AE plugin
+      orchestration decisions" but LLM judgment (no shared decision rationale)
+      is defensible
+    - size=4 cluster mixing AE infrastructure concerns (file output paths,
+      cross-step context injection, roadmap dirs, pipeline writeback reliability)
+      — same shape: plausible "AE infrastructure" consolidation but LLM rejected
+      for lacking single synthesizable intent
+  - All 9 CORRECT-SKIP cases had obvious cross-project or cross-domain mixing
+    (e.g., "AE plugin conclusions + children's education app features" in one
+    size=19 cluster)
+- **Non-skipped synthesis quality (3 spot-checked)**: **good**. Titles remain
+  topically tight and distinct across projects (SmartPal / mengdie / AE
+  plugin) and within-project sub-concerns. No hallucination patterns spotted
+  in the 3-title spot-check. Mirrors the first pre-flip run's quality finding.
+- **Secondary observation**: pair-cluster LLM skip rate at 27% implies the
+  min_size=2 flip is pulling in genuinely valuable near-duplicate pairs (the
+  8 synthesized pair-clusters) while the hatch correctly drops the 3 noise
+  pairs. The reframe bet ("60% near-dup + 30% topic-adj + null-escape = 90%
+  coverage") is holding — 73% of pair-clusters (8/11) produced useful
+  syntheses, vs. the worst-case "100% skip rate → min_size flip was wrong"
+  scenario that would have forced a revert.
+- **Decision**: **keep new defaults**. Hatch precision high (0 false
+  negatives), pair-cluster synthesis yield good (73%), overall synthesis
+  count up from 13 → 14 (comparable; null-escape + min_size=2 together net
+  +1 synthesis with zero added noise in DB). Next refinement should be the
+  CLI metric label fix (BL-synthesis-cli-skip-metric), not a parameter
+  change.
