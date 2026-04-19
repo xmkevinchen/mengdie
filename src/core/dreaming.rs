@@ -294,13 +294,34 @@ pub async fn run_synthesis_pass(
             Ok(SynthesisOutcome::Skipped { reason }) => {
                 // Null-escape-hatch (plan 011): LLM judged the cluster as
                 // lacking a common thread and declined to synthesize. Count
-                // it as a skip (not an error), log at info, no DB write.
-                tracing::info!(
-                    cluster_ids = ?trimmed_ids,
-                    cluster_size = trimmed_ids.len(),
-                    reason = %reason,
-                    "synthesis: LLM skipped cluster (null-escape-hatch)"
-                );
+                // it as a skip (not an error), no DB write. Log level varies
+                // by reason quality: info for normal skips with a reason,
+                // warn when reason is empty (prompt-adherence signal — the
+                // LLM should include a reason per prompt instruction; a flood
+                // of empty reasons means the prompt is failing the `reason`
+                // field expectation). Review feedback: empty `reason=""` log
+                // lines have low audit signal on their own; escalating to
+                // warn makes prompt-drift visible.
+                let log_reason = if reason.is_empty() {
+                    "(unspecified)".to_string()
+                } else {
+                    reason.clone()
+                };
+                if reason.is_empty() {
+                    tracing::warn!(
+                        cluster_ids = ?trimmed_ids,
+                        cluster_size = trimmed_ids.len(),
+                        reason = %log_reason,
+                        "synthesis: LLM skipped cluster (null-escape-hatch) — EMPTY reason, check prompt adherence"
+                    );
+                } else {
+                    tracing::info!(
+                        cluster_ids = ?trimmed_ids,
+                        cluster_size = trimmed_ids.len(),
+                        reason = %log_reason,
+                        "synthesis: LLM skipped cluster (null-escape-hatch)"
+                    );
+                }
                 result.syntheses_llm_skipped += 1;
                 continue;
             }
@@ -757,45 +778,104 @@ mod tests {
         assert_eq!(link_count, 0);
     }
 
+    /// Cluster-size-aware stub: inspects the user prompt to count
+    /// "--- MEMORY N ---" separators. If exactly 2 memories → return SKIP_JSON;
+    /// otherwise return OK_JSON. Lets us MIX skip (pair-clusters) with
+    /// synthesis (triple-clusters) in a single test — which is necessary to
+    /// verify the pair_skip_pct denominator discrimination (review feedback:
+    /// an all-skip fixture can't distinguish pair-count from total-count).
+    struct ClusterSizeAwareProvider;
+    impl LlmProvider for ClusterSizeAwareProvider {
+        fn complete<'a>(&'a self, _system: &'a str, prompt: &'a str) -> LlmFuture<'a> {
+            let memory_count = prompt.matches("--- MEMORY ").count();
+            let payload = if memory_count == 2 {
+                SKIP_JSON.to_string()
+            } else {
+                OK_JSON.to_string()
+            };
+            Box::pin(async move { Ok(payload) })
+        }
+        fn model(&self) -> &str {
+            "stub-cluster-size-aware"
+        }
+    }
+
     #[tokio::test]
     async fn test_synthesis_pair_skip_percentage_computed_against_pairs() {
         // Fixture: 2 pair-clusters (2 memories each) + 2 triple-clusters
-        // (3 memories each). Stub skips one pair-cluster only. Expected:
-        // pair_clusters_processed == 2, syntheses_llm_skipped == 1 →
-        // caller computes 50% (1/2), NOT 25% (1/4) — denominator MUST be
-        // pair-clusters, not total clusters. Plan 011 AC3.
+        // (3 memories each). Stub skips ONLY the pair-clusters; triples
+        // synthesize normally. Expected:
+        //   - syntheses_created == 2 (from 2 triple-clusters)
+        //   - syntheses_llm_skipped == 2 (from 2 pair-clusters)
+        //   - pair_count == 2 (denominator = pairs, NOT total)
+        //   - CLI arithmetic: 2 * 100 / 2 = 100% (all pair-clusters skipped)
+        // A buggy implementation that used total-cluster denominator would
+        // compute 2 * 100 / 4 = 50%. This test discriminates: mixed outcomes
+        // are necessary to expose the bug. Plan 011 AC3.
         let db = Db::open_in_memory().unwrap();
-        // 2 pair clusters on different axes
         seed_tight_cluster(&db, "proj", 2, &[1.0, 0.0, 0.0]);
         seed_tight_cluster(&db, "proj", 2, &[0.0, 1.0, 0.0]);
-        // 2 triple clusters on different axes
         seed_tight_cluster(&db, "proj", 3, &[0.0, 0.0, 1.0]);
         seed_tight_cluster(&db, "proj", 3, &[1.0, 1.0, 0.0]);
 
-        // First call skips, rest synthesize. But order matters:
-        // sorted-by-id cluster iteration may not put pair-clusters first.
-        // So give all 4 clusters a skip for the simplest attribution:
-        // actually we want ONLY a pair cluster to skip. Simpler fixture:
-        // give all clusters skip-JSON EXCEPT triples; since stub is
-        // by-index, we'd need to know iteration order. Instead:
-        // use a stub that emits SKIP only when prompt contains exactly 2
-        // memory titles. For fixture simplicity here: all-skip + assert
-        // skip==4 and pair-denominator==2.
-        let provider = FixedProvider::new(SKIP_JSON);
+        let provider = ClusterSizeAwareProvider;
         let (r, pair_count) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
             .await
             .unwrap();
 
         assert_eq!(r.clusters_processed, 4);
+        assert_eq!(pair_count, 2, "expected 2 pair-clusters pre-DB-load");
         assert_eq!(
-            pair_count, 2,
-            "expected 2 pair-clusters counted pre-DB-load"
+            r.syntheses_llm_skipped, 2,
+            "expected 2 skips (pair-clusters only)"
         );
-        assert_eq!(r.syntheses_llm_skipped, 4, "all 4 clusters skipped by stub");
+        assert_eq!(
+            r.syntheses_created, 2,
+            "expected 2 syntheses (triple-clusters only)"
+        );
 
-        // Consumer (CLI) computes pct as (syn.syntheses_llm_skipped * 100)
-        // / pair_count — in a real run with mixed outcomes this captures
-        // the pair-adjacency signal. The assert here is about the
-        // denominator value, not the printed percentage.
+        // Exercise the CLI pair_skip_pct arithmetic directly: (S * 100) / P.
+        // With S=2 skips and P=2 pair-clusters → 100%. If the implementation
+        // mistakenly divided by total clusters (4), it would yield 50% — a
+        // materially different operator signal.
+        let pair_skip_pct = (r.syntheses_llm_skipped * 100) / pair_count;
+        assert_eq!(
+            pair_skip_pct, 100,
+            "pair_skip_pct must use pair_count as denominator, not clusters_processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_skip_precedence_over_title_content() {
+        // Plan 011 review (ai-engineer P3): explicit precedence test. When
+        // the LLM emits both `skip: true` AND synthesis fields, the skip
+        // must win. Prevents a future parser refactor from silently
+        // flipping the precedence rule.
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
+
+        const SKIP_PLUS_FIELDS: &str = r#"{"skip":true,"reason":"adjacent","title":"Ignored","content":"Ignored body.","entities":["x"]}"#;
+        let provider = FixedProvider::new(SKIP_PLUS_FIELDS);
+        let (r, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+            .await
+            .unwrap();
+        assert_eq!(r.clusters_processed, 1);
+        assert_eq!(r.syntheses_created, 0, "skip must win over title+content");
+        assert_eq!(r.syntheses_llm_skipped, 1);
+
+        // No synthesis row should have been written with the "Ignored" title.
+        let found_ignored: i64 = {
+            let conn = db.lock_conn().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE title = 'Ignored'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            found_ignored, 0,
+            "synthesis body from skip=true response must NOT land in DB"
+        );
     }
 }

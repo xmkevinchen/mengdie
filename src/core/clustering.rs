@@ -22,10 +22,13 @@ use super::embeddings::{blob_to_embedding, cosine_similarity};
 pub const DEFAULT_THRESHOLD: f32 = 0.75;
 
 /// DEFAULT_MIN_SIZE = 2: lowered from 3 (discussion 018) based on empirical
-/// spot-check — ~60% of pair-clusters in a solo-dev AE corpus are
-/// near-duplicates (plan↔backlog, discuss↔conclusion, analyze↔analyze
-/// pairs) that benefit from consolidation. The remaining ~30% topic-
-/// adjacent pairs are filtered by the null-escape-hatch in synthesis.rs.
+/// spot-check of N=10 pair-clusters on the author's 214-memory AE corpus
+/// (2026-04-18). 60% were near-duplicates (plan↔backlog, discuss↔conclusion,
+/// analyze↔analyze pairs) that benefit from consolidation. The remaining
+/// ~30% topic-adjacent pairs are filtered by the null-escape-hatch in
+/// synthesis.rs. Small-sample caveat: a corpus with a different topic
+/// distribution may see a different ratio — re-measure on any new project
+/// adopting this default.
 ///
 /// Revisit if, across 3–5 dream runs: skip rate > 25% of pair-clusters
 /// OR manual spot-check shows majority-weak syntheses. Ladder: first
