@@ -3,7 +3,7 @@ id: "012"
 title: "BL-synthesis-cli-skip-metric — fix pair-cluster skip rate display"
 type: plan
 created: 2026-04-19
-status: reviewed
+status: done
 discussion: ""
 ---
 
