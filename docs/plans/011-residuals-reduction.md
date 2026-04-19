@@ -3,7 +3,7 @@ id: "011"
 title: "BL-residuals-reduction — min_size=2 + null-escape-hatch"
 type: plan
 created: 2026-04-18
-status: reviewed
+status: done
 discussion: "docs/discussions/018-residuals-reduction/"
 ---
 
