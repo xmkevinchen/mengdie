@@ -162,6 +162,18 @@ pub struct SynthesisResult {
     /// deliberate opt-out, not a failure. Revisit threshold/min_size if
     /// skip rate exceeds 25% of pair-clusters across 3–5 runs.
     pub syntheses_llm_skipped: usize,
+    /// Clusters of size exactly 2 processed this pass (counted PRE-DB-load
+    /// at `trimmed_ids.len() == 2`, matching `clusters_processed`'s
+    /// attribution stage). Denominator for the pair-cluster skip percentage
+    /// reported by the CLI.
+    pub pair_clusters_processed: usize,
+    /// Subset of pair-clusters (size == 2) that took the
+    /// `SynthesisOutcome::Skipped` branch. Numerator for the pair-cluster
+    /// skip percentage reported by the CLI. MUST NOT be incremented for
+    /// non-pair-cluster skips — those count toward `syntheses_llm_skipped`
+    /// only. Plan 012 fixes the prior CLI bug where the numerator was
+    /// `syntheses_llm_skipped` (total) against a pair-only denominator.
+    pub pair_clusters_skipped: usize,
 }
 
 impl SynthesisResult {
@@ -177,11 +189,14 @@ impl SynthesisResult {
 /// One LLM error per cluster increments `llm_errors` and does NOT abort the
 /// pass — recovery is to re-run (content_hash dedup makes that idempotent).
 ///
-/// Returns `(SynthesisResult, pair_clusters_processed)`. The second element is
-/// a derived local count (clusters with exactly 2 members, counted PRE-DB-load
-/// to match the `clusters_processed` attribution stage) used by the CLI to
-/// compute the pair-cluster skip percentage. Kept out of `SynthesisResult`
-/// because it's a display-layer value with no external caller.
+/// Returns a `SynthesisResult` whose fields include both the outcome counters
+/// (`syntheses_created`, `syntheses_llm_skipped`, error counters, …) and the
+/// cluster-geometry observations (`pair_clusters_processed`,
+/// `pair_clusters_skipped`) used by the CLI to compute the pair-cluster skip
+/// percentage. The co-location is intentional — plan 012 consolidated these
+/// onto a single struct after the plan review (unanimous challenger C win)
+/// found that a metric's numerator and denominator belong together. See
+/// `docs/plans/012-synthesis-cli-skip-metric.md`.
 pub async fn run_synthesis_pass(
     db: &Db,
     project_id: Option<&str>,
@@ -190,13 +205,8 @@ pub async fn run_synthesis_pass(
     min_size: usize,
     max_cluster_size: usize,
     dry_run: bool,
-) -> anyhow::Result<(SynthesisResult, usize)> {
+) -> anyhow::Result<SynthesisResult> {
     let clustering = cluster_memories(db, project_id, threshold, min_size)?;
-
-    // Pair-cluster attribution: count PRE-DB-load (trimmed_ids.len()==2),
-    // not post-load (memories.len()==2). Consistent with clusters_processed
-    // which is set pre-loop, pre-fetch. Architect must-fix from plan review.
-    let mut pair_clusters_processed: usize = 0;
 
     let mut result = SynthesisResult {
         clusters_processed: clustering.clusters.len(),
@@ -227,9 +237,10 @@ pub async fn run_synthesis_pass(
         }
 
         // Count pair-clusters PRE-DB-load for consistent denominator with
-        // `syntheses_llm_skipped` numerator (plan 011 AC3).
+        // the pair-cluster skip numerator (plan 011 AC3; plan 012 moved the
+        // counter from a local binding onto SynthesisResult).
         if trimmed_ids.len() == 2 {
-            pair_clusters_processed += 1;
+            result.pair_clusters_processed += 1;
         }
 
         let memories = db.get_memories_by_ids(&trimmed_ids)?;
@@ -323,6 +334,11 @@ pub async fn run_synthesis_pass(
                     );
                 }
                 result.syntheses_llm_skipped += 1;
+                if trimmed_ids.len() == 2 {
+                    // Pair-cluster skip subset — denominator for the
+                    // pair-cluster skip percentage (plan 012 AC2).
+                    result.pair_clusters_skipped += 1;
+                }
                 continue;
             }
             Err(e) => {
@@ -353,7 +369,7 @@ pub async fn run_synthesis_pass(
         result.syntheses_created += 1;
     }
 
-    Ok((result, pair_clusters_processed))
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -571,7 +587,7 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
 
         let provider = PanicProvider;
-        let (r, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
             .await
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
@@ -596,7 +612,7 @@ mod tests {
         let src_ids = seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
 
         let provider = FixedProvider::new(OK_JSON);
-        let (r, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
             .await
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
@@ -650,7 +666,7 @@ mod tests {
             counter: AtomicUsize::new(0),
             ok_payload: OK_JSON.to_string(),
         };
-        let (r, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
             .await
             .unwrap();
         assert_eq!(r.clusters_processed, 2);
@@ -664,12 +680,12 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
 
         let provider = FixedProvider::new(OK_JSON);
-        let (r1, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+        let r1 = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
             .await
             .unwrap();
         assert_eq!(r1.syntheses_created, 1);
 
-        let (r2, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+        let r2 = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
             .await
             .unwrap();
         // Re-run still counts the cluster as processed + "created" in-stat, but
@@ -703,7 +719,7 @@ mod tests {
         seed_tight_cluster(&db, "proj", 5, &[1.0, 0.0, 0.0]);
 
         let provider = PanicProvider; // must not be called
-        let (r, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 2, false)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 2, false)
             .await
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
@@ -723,12 +739,12 @@ mod tests {
 
         let provider = FixedProvider::new(OK_JSON);
 
-        let (r_high, _) = run_synthesis_pass(&db, Some("proj"), &provider, 1.5, 3, 20, true)
+        let r_high = run_synthesis_pass(&db, Some("proj"), &provider, 1.5, 3, 20, true)
             .await
             .unwrap();
         assert_eq!(r_high.clusters_processed, 0);
 
-        let (r_low, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
+        let r_low = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
             .await
             .unwrap();
         assert_eq!(r_low.clusters_processed, 2);
@@ -749,13 +765,14 @@ mod tests {
         seed_tight_cluster(&db, "proj", 2, &[1.0, 0.0, 0.0]); // pair cluster
 
         let provider = FixedProvider::new(SKIP_JSON);
-        let (r, pair_count) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
             .await
             .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0);
         assert_eq!(r.syntheses_llm_skipped, 1);
-        assert_eq!(pair_count, 1);
+        assert_eq!(r.pair_clusters_processed, 1);
+        assert_eq!(r.pair_clusters_skipped, 1);
 
         // No synthesis row, no link rows.
         let syn_count: i64 = {
@@ -819,30 +836,88 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 1.0, 0.0]);
 
         let provider = ClusterSizeAwareProvider;
-        let (r, pair_count) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
             .await
             .unwrap();
 
         assert_eq!(r.clusters_processed, 4);
-        assert_eq!(pair_count, 2, "expected 2 pair-clusters pre-DB-load");
+        assert_eq!(
+            r.pair_clusters_processed, 2,
+            "expected 2 pair-clusters pre-DB-load"
+        );
         assert_eq!(
             r.syntheses_llm_skipped, 2,
             "expected 2 skips (pair-clusters only)"
+        );
+        assert_eq!(
+            r.pair_clusters_skipped, 2,
+            "all skips came from pair-clusters — pair-skipped equals total in this fixture"
         );
         assert_eq!(
             r.syntheses_created, 2,
             "expected 2 syntheses (triple-clusters only)"
         );
 
-        // Exercise the CLI pair_skip_pct arithmetic directly: (S * 100) / P.
-        // With S=2 skips and P=2 pair-clusters → 100%. If the implementation
-        // mistakenly divided by total clusters (4), it would yield 50% — a
-        // materially different operator signal.
-        let pair_skip_pct = (r.syntheses_llm_skipped * 100) / pair_count;
+        // Exercise the CLI pair_skip_pct arithmetic directly: (S_pair * 100) / P.
+        // With S_pair=2 pair-cluster skips and P=2 pair-clusters → 100%. If
+        // the implementation mistakenly divided by total clusters (4), it
+        // would yield 50%. Plan 012: numerator is pair_clusters_skipped
+        // (NOT syntheses_llm_skipped — they coincide here only because the
+        // ClusterSizeAwareProvider skips only pairs by design). The
+        // `test_pair_clusters_skipped_excludes_non_pair_skips` test below
+        // exercises the case where they differ.
+        let pair_skip_pct = (r.pair_clusters_skipped * 100) / r.pair_clusters_processed;
         assert_eq!(
             pair_skip_pct, 100,
-            "pair_skip_pct must use pair_count as denominator, not clusters_processed"
+            "pair_skip_pct must use pair_clusters_processed as denominator"
         );
+    }
+
+    #[tokio::test]
+    async fn test_pair_clusters_skipped_excludes_non_pair_skips() {
+        // Discrimination fixture for plan 012 AC2: 2 pair-clusters (2 memories
+        // each) + 2 triple-clusters (3 memories each). `FixedProvider` returns
+        // SKIP_JSON for every call, so all 4 clusters take the Skipped branch.
+        //
+        // Expected:
+        //   - pair_clusters_processed == 2 (denominator)
+        //   - pair_clusters_skipped == 2 (numerator — ONLY the pair-cluster skips)
+        //   - syntheses_llm_skipped == 4 (all 4 clusters skipped)
+        //   - syntheses_created == 0
+        //
+        // A buggy implementation that incremented `pair_clusters_skipped` on
+        // every skip would yield pair_clusters_skipped == 4 — this test
+        // discriminates that bug. Companion to
+        // `test_synthesis_pair_skip_percentage_computed_against_pairs` which
+        // discriminates the denominator; this one discriminates the numerator.
+        let db = Db::open_in_memory().unwrap();
+        seed_tight_cluster(&db, "proj", 2, &[1.0, 0.0, 0.0]);
+        seed_tight_cluster(&db, "proj", 2, &[0.0, 1.0, 0.0]);
+        seed_tight_cluster(&db, "proj", 3, &[0.0, 0.0, 1.0]);
+        seed_tight_cluster(&db, "proj", 3, &[1.0, 1.0, 0.0]);
+
+        let provider = FixedProvider::new(SKIP_JSON);
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
+            .await
+            .unwrap();
+
+        assert_eq!(r.clusters_processed, 4);
+        assert_eq!(r.pair_clusters_processed, 2);
+        assert_eq!(
+            r.pair_clusters_skipped, 2,
+            "pair-cluster skip counter must exclude the 2 triple-cluster skips"
+        );
+        assert_eq!(
+            r.syntheses_llm_skipped, 4,
+            "total LLM-skip counter includes all 4 (2 pairs + 2 triples)"
+        );
+        assert_eq!(r.syntheses_created, 0);
+
+        // CLI arithmetic check: (S_pair * 100) / P = (2 * 100) / 2 = 100%.
+        // A buggy impl using syntheses_llm_skipped as numerator would yield
+        // (4 * 100) / 2 = 200% — impossible for a percentage, exposing the bug.
+        let pair_skip_pct = (r.pair_clusters_skipped * 100) / r.pair_clusters_processed;
+        assert_eq!(pair_skip_pct, 100);
     }
 
     #[tokio::test]
@@ -856,7 +931,7 @@ mod tests {
 
         const SKIP_PLUS_FIELDS: &str = r#"{"skip":true,"reason":"adjacent","title":"Ignored","content":"Ignored body.","entities":["x"]}"#;
         let provider = FixedProvider::new(SKIP_PLUS_FIELDS);
-        let (r, _) = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
+        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
             .await
             .unwrap();
         assert_eq!(r.clusters_processed, 1);

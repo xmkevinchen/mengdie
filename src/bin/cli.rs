@@ -234,7 +234,7 @@ async fn cmd_dream(
 
     let cfg = mengdie::core::config::MengdieConfig::load_from_process_env()?;
     let provider = build_provider(&cfg.llm)?;
-    let (syn, pair_clusters_processed) = run_synthesis_pass(
+    let syn = run_synthesis_pass(
         db,
         project,
         provider.as_ref(),
@@ -245,10 +245,17 @@ async fn cmd_dream(
     )
     .await?;
 
-    let pair_skip_pct = if pair_clusters_processed == 0 {
+    // Pair-cluster skip percentage: numerator is the pair-cluster subset of
+    // LLM skips (NOT total LLM skips across all cluster sizes). The prior
+    // impl displayed total-skips / pair-count, which on the 2026-04-19 run
+    // produced "11/11 pair-clusters = 100%" when the true rate was 3/11.
+    // Plan 012 / BL-synthesis-cli-skip-metric fix. Format string shape
+    // stays "{S_all} LLM-skipped ({S_pair}/{P} pair-clusters = {X}%)" —
+    // if a downstream parser depends on this shape, update this comment.
+    let pair_skip_pct = if syn.pair_clusters_processed == 0 {
         0
     } else {
-        (syn.syntheses_llm_skipped * 100) / pair_clusters_processed
+        (syn.pair_clusters_skipped * 100) / syn.pair_clusters_processed
     };
     println!(
         "Synthesis: {} syntheses created from {} clusters \
@@ -258,8 +265,8 @@ async fn cmd_dream(
         syn.clusters_processed,
         syn.residuals_skipped,
         syn.syntheses_llm_skipped,
-        syn.syntheses_llm_skipped,
-        pair_clusters_processed,
+        syn.pair_clusters_skipped,
+        syn.pair_clusters_processed,
         pair_skip_pct,
         syn.llm_call_errors,
         syn.parse_errors,
