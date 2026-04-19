@@ -1,7 +1,9 @@
 ---
 id: "003"
-title: "Deep review P3 findings"
-status: open
+title: "Deep review P3 findings (plan 001 rollup)"
+status: closed
+closed: 2026-04-19
+closed_reason: "Rollup archive: 4 of 6 items fixed in Phase 1. 2 dormant triggers remain: P3-1 (path traversal via symlink — daemon/Phase 2 trigger, not live because ingest is CLI-only today), P3-3 (user input in tracing logs — external-log-shipping trigger, not live because logs are stderr-only). If either trigger fires, promote to BL-*.md with the specific threat model. Rollup retained as-is."
 created: 2026-04-05
 tags: [review, p3, deferred]
 ---

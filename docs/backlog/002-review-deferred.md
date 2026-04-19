@@ -1,7 +1,9 @@
 ---
 id: "002"
-title: "Deferred review findings"
-status: open
+title: "Deferred review findings (plan 001 rollup)"
+status: closed
+closed: 2026-04-19
+closed_reason: "Rollup archive: 7 of 13 items fixed in Phase 1. 6 dormant triggers remain: 002-1 (Mutex blocking — Phase 2 concurrent requests), 002-2 (query metadata asymmetry — search quality gate), 002-4 (FTS5 operator sanitization — untrusted input), 002-7 (contradiction O(n) scan — ingest >100ms at 238 memories it's fine), 002-10 (e2e test realistic data — dreaming-from-real-data; now partly addressed by plan 011/012 production runs), 002-13 (contradiction+insert non-transactional — concurrent ingestion). If any trigger fires, promote the specific item to a new BL-*.md file with the trigger citation. The rollup is retained as-is for traceability."
 created: 2026-04-05
 tags: [review, deferred, performance, architecture]
 ---

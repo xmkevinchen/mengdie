@@ -1,7 +1,9 @@
 ---
 id: "001"
 title: "Learnings from qmd (tobi/qmd)"
-status: open
+status: closed
+closed: 2026-04-19
+closed_reason: "Phase 1 items all shipped: RRF (plan 002), score normalization (plan 002 Step 1 commit 299b4e6), metadata-in-chunk encoding (plan 002). Phase 2+ items triggers NOT firing at 238 memories: #4 LLM re-ranking (500+ memory trigger), #5 smart chunking (longer-docs trigger), #6 query expansion (explicit skip). File kept as-is for doc history; no action pending."
 source: "Discussion 003 tech stack evaluation"
 created: 2026-04-04
 tags: [search, hybrid-search, qmd, prior-art]

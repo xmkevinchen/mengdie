@@ -1,3 +1,13 @@
+---
+id: "004"
+title: "Findings from 5 ae:analyze sessions (archive rollup)"
+status: closed
+closed: 2026-04-19
+closed_reason: "Rollup archive: 6 of 21 items fixed/done in plans 002-005. 15 dormant-trigger items remain (004-06 through 004-20 excluding 004-21 which is done). At 238 memories, several triggers are at-or-near firing: 004-11 (contradiction index at >1K memories — not yet), 004-12 (threshold calibration at 100+ memories — POSSIBLE TRIGGER; file as BL if contradiction FP rate is examined empirically), 004-14 (composite scoring — Phase 2 after more data). Other triggers (sqlite-vec at 10K memories, KG at 500+ memories, daemon-dependent items) remain dormant. If any fires, promote the specific item to a BL-*.md. Rollup retained as-is."
+created: 2026-04-05
+tags: [review, analyze, deferred, archive]
+---
+
 # Backlog 004: Findings from 5 ae:analyze Sessions
 
 Consolidated actionable findings from analyses 006-010 (2026-04-05).
