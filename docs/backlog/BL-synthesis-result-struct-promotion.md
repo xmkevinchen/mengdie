@@ -1,8 +1,10 @@
 ---
 id: BL-synthesis-result-struct-promotion
-status: open
+status: closed
 origin: plan 011 /ae:review (architecture-reviewer P2)
 created: 2026-04-18
+closed: 2026-04-19
+closed_reason: "Superseded by plan 012. The 'second display-layer counter' (pair_clusters_skipped) landed as a field on the existing SynthesisResult struct instead of triggering wrapper-struct promotion. Tuple return eliminated entirely (run_synthesis_pass now returns Result<SynthesisResult>). Trigger avoided; no wrapper needed."
 scope: mengdie (ergonomic refactor)
 ---
 
