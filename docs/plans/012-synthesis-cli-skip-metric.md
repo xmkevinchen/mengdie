@@ -53,28 +53,28 @@ outside the CLI ever reads these fields for non-display purposes.
 
 ## Steps
 
-### Step 1: Add pair_* fields to SynthesisResult, remove tuple return, fix CLI, add discrimination test (AC1, AC2, AC3)
+### Step 1: Add pair_* fields to SynthesisResult, remove tuple return, fix CLI, add discrimination test (AC1, AC2, AC3) ✓ (commit 63d83b0)
 
-- [ ] Add two fields to `SynthesisResult` in `src/core/dreaming.rs:141`:
+- [x] Add two fields to `SynthesisResult` in `src/core/dreaming.rs:141`:
   - `pub pair_clusters_processed: usize`
   - `pub pair_clusters_skipped: usize`
-- [ ] Change `run_synthesis_pass` return type from `anyhow::Result<(SynthesisResult, usize)>` to `anyhow::Result<SynthesisResult>`
-- [ ] Update doc comment at `dreaming.rs:180-184` — remove tuple language, describe fields
-- [ ] In `run_synthesis_pass`:
+- [x] Change `run_synthesis_pass` return type from `anyhow::Result<(SynthesisResult, usize)>` to `anyhow::Result<SynthesisResult>`
+- [x] Update doc comment at `dreaming.rs:180-184` — remove tuple language, describe fields
+- [x] In `run_synthesis_pass`:
   - Replace local `let mut pair_clusters_processed: usize = 0;` (line 199) with increment of `result.pair_clusters_processed` at the existing increment site (line 232)
   - In the `SynthesisOutcome::Skipped` match arm (around line 325), add: `if trimmed_ids.len() == 2 { result.pair_clusters_skipped += 1; }` next to the existing `result.syntheses_llm_skipped += 1`
   - Change final `Ok((result, pair_clusters_processed))` to `Ok(result)`
-- [ ] Migrate all callsites (compiler-enforced):
+- [x] Migrate all callsites (compiler-enforced):
   - `src/bin/cli.rs:237` — `let (syn, pair_clusters_processed) = ...` → `let syn = ...`
   - `src/bin/cli.rs:248-262` — numerator changes from `syn.syntheses_llm_skipped` to `syn.pair_clusters_skipped`; denominator accesses `syn.pair_clusters_processed`. Format string keeps the same `"{} LLM-skipped ({}/{} pair-clusters = {}%)"` shape.
   - `tests/dream_synthesis.rs` — `let (result, _pair_clusters_processed) = ...` → `let result = ...`
   - All ~9 test callsites in `src/core/dreaming.rs` — `let (r, _) = ...` / `let (r, pair_count) = ...` → `let r = ...`; update `pair_count` references to `r.pair_clusters_processed`
-- [ ] Add test `test_pair_clusters_skipped_excludes_non_pair_skips` in `src/core/dreaming.rs` tests module: seeds 2 pair-clusters + 2 triple-clusters, uses `FixedProvider::new(SKIP_JSON)` (all 4 skip), asserts the discrimination (see AC2)
-- [ ] Update existing `test_synthesis_pair_skip_percentage_computed_against_pairs`: add assertion `r.pair_clusters_skipped == 2` alongside the existing `pair_count == 2` check (now accessed as `r.pair_clusters_processed`). Update test body to reflect the single-return shape.
-- [ ] `cargo test` green — expect 186 tests (one new)
-- [ ] `cargo clippy --all-targets -- -D warnings` clean
-- [ ] `cargo fmt --check` clean
-- [ ] Manual smoke test: run `./target/release/mengdie dream --synthesize` on production DB; confirm the displayed numerator matches the true pair-cluster skip count (manual recount from RUST_LOG=info stderr log lines with `cluster_size=2`)
+- [x] Add test `test_pair_clusters_skipped_excludes_non_pair_skips` in `src/core/dreaming.rs` tests module: seeds 2 pair-clusters + 2 triple-clusters, uses `FixedProvider::new(SKIP_JSON)` (all 4 skip), asserts the discrimination (see AC2)
+- [x] Update existing `test_synthesis_pair_skip_percentage_computed_against_pairs`: add assertion `r.pair_clusters_skipped == 2` alongside the existing `pair_count == 2` check (now accessed as `r.pair_clusters_processed`). Update test body to reflect the single-return shape.
+- [x] `cargo test` green — expect 186 tests (one new)
+- [x] `cargo clippy --all-targets -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+- [x] Manual smoke test: run `./target/release/mengdie dream --synthesize` on production DB; confirm the displayed numerator matches the true pair-cluster skip count (manual recount from RUST_LOG=info stderr log lines with `cluster_size=2`)
 
 Expected files: src/core/dreaming.rs, src/bin/cli.rs, tests/dream_synthesis.rs
 
