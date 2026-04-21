@@ -121,12 +121,15 @@ regression-table refresh in `src/core/decay.rs`.
 ## Baseline
 
 Populated by the first `mengdie dream --decay-dry-run` on the
-production DB (`~/.mengdie/db.sqlite`). Fill in with the actual snapshot
-values after the first run.
+production DB (`~/.mengdie/db.sqlite`).
 
 | Date | `decay_floor_breaches` | `avg_effective_score_before` | `avg_effective_score_after` | Longest recall gap (days) |
 |---|---|---|---|---|
-| (pending first run) | — | — | — | — |
+| 2026-04-20 | 0 | 0.4712 | 0.4712 | <15 |
+
+Matches archaeologist V3 simulation from discussion 019 Round 2
+(min effective observed = 0.397 > floor of 0.20). Safe to proceed to
+live `mengdie dream` — no demotions will fire on the current corpus.
 
 ## AE parser audit
 

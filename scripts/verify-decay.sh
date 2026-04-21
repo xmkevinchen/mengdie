@@ -54,9 +54,12 @@ RUST_LOG="${RUST_LOG:-info}" mengdie dream --decay-dry-run \
 echo "=== Human output ==="
 cat "$TMP_OUT"
 
-# Extract the single JSON object from stderr (tracing's JSON formatter
-# emits one per INFO event). We grep for the unique marker.
-JSON_LINE=$(grep -o '{"event":"dreaming_pass"[^}]*\(\[[^]]*\]\)[^}]*}' "$TMP_ERR" | head -n1 || true)
+# Extract the single JSON object from stderr. The CLI emits a bare
+# `{...}` line via `eprintln!` (NOT tracing — tracing's default formatter
+# wraps the JSON in a log line with ISO timestamp). We find the line that
+# contains the unique event marker regardless of key order (serde_json
+# sorts keys alphabetically, so "event" may appear mid-object).
+JSON_LINE=$(grep -E '^\{.*"event":"dreaming_pass".*\}$' "$TMP_ERR" | head -n1 || true)
 
 if [[ -z "$JSON_LINE" ]]; then
   echo "WARNING: could not parse structured JSON line from stderr. Falling back to human line only." >&2

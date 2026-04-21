@@ -200,6 +200,27 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Format the structured-JSON event for machine consumers. Single-line
+/// `{"event":"dreaming_pass",...}` on stderr — stable contract.
+/// Emitted directly via `eprintln!` to bypass tracing's default formatter
+/// (which otherwise wraps the JSON in a log line with timestamp prefix).
+fn format_structured_json(
+    result: &mengdie::core::dreaming::DreamingResult,
+    decay_dry_run: bool,
+) -> String {
+    let v = serde_json::json!({
+        "event": "dreaming_pass",
+        "promoted": result.promoted,
+        "demoted": result.demoted,
+        "decay_floor_breaches": result.decay_floor_breaches,
+        "avg_effective_before": result.avg_effective_score_before,
+        "avg_effective_after": result.avg_effective_score_after,
+        "dry_run": decay_dry_run,
+        "breaches": result.breached_ids,
+    });
+    v.to_string()
+}
+
 /// Format the single-line human-readable dreaming-pass summary. Extracted
 /// for unit testing — callers include the AC5 regex contract.
 fn format_dreaming_line(
@@ -262,20 +283,15 @@ async fn cmd_dream(
     // Human-readable line (AC5 loose regex tolerates whitespace + decimal variation).
     println!("{}", format_dreaming_line(&result, decay_dry_run));
 
-    // Structured-JSON line for machine consumption (AC5 blocker from codex).
-    // Emitted at INFO via tracing → stderr. Downstream tooling parses this;
-    // the human line above is free to evolve without breaking parsers.
-    let structured = serde_json::json!({
-        "event": "dreaming_pass",
-        "promoted": result.promoted,
-        "demoted": result.demoted,
-        "decay_floor_breaches": result.decay_floor_breaches,
-        "avg_effective_before": result.avg_effective_score_before,
-        "avg_effective_after": result.avg_effective_score_after,
-        "dry_run": decay_dry_run,
-        "breaches": result.breached_ids,
-    });
-    tracing::info!(target: "mengdie::dreaming", %structured, "dreaming_pass");
+    // Structured-JSON line for machine consumption (AC5 blocker from
+    // codex). Emitted as a RAW JSON line on stderr via `eprintln!` — NOT
+    // through `tracing` — because the default tracing formatter wraps
+    // field values in a human-readable log line with ISO timestamps and
+    // the `structured=` prefix, which breaks stderr parsers expecting a
+    // bare `{"event":"dreaming_pass",...}` line. `scripts/verify-decay.sh`
+    // (Step 5) greps for exactly that shape.
+    let structured_line = format_structured_json(&result, decay_dry_run);
+    eprintln!("{structured_line}");
 
     // Review feedback: `--dry-run` alone previously silently ran the synthesis
     // path. New contract: `--dry-run` requires explicit `--synthesize` to make
@@ -729,6 +745,36 @@ mod tests {
         let line = format_dreaming_line(&sample_result(0, 7, 0.421, 0.421), true);
         assert!(line.contains("7 would-demote"));
         assert!(!line.contains("0 would-demote"));
+    }
+
+    #[test]
+    fn format_structured_json_parses_with_all_required_fields() {
+        let mut r = sample_result(2, 3, 0.421, 0.500);
+        r.breached_ids = vec!["BL-X".to_string(), "BL-Y".to_string()];
+        let line = format_structured_json(&r, true);
+        // Must parse as valid JSON
+        let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(v["event"], "dreaming_pass");
+        assert_eq!(v["promoted"], 1);
+        assert_eq!(v["demoted"], 2);
+        assert_eq!(v["decay_floor_breaches"], 3);
+        assert_eq!(v["dry_run"], true);
+        assert!(v["avg_effective_before"].is_number());
+        assert!(v["avg_effective_after"].is_number());
+        assert_eq!(v["breaches"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn format_structured_json_breaches_array_length_matches_decay_floor_breaches() {
+        // Invariant: JSON `breaches.len() == decay_floor_breaches`.
+        let mut r = sample_result(2, 2, 0.4, 0.5);
+        r.breached_ids = vec!["a".into(), "b".into()];
+        let line = format_structured_json(&r, false);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["breaches"].as_array().unwrap().len() as u64,
+            v["decay_floor_breaches"].as_u64().unwrap()
+        );
     }
 
     #[test]
