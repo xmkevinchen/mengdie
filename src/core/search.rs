@@ -3,9 +3,19 @@ use std::collections::HashMap;
 use anyhow::Context;
 
 use super::db::{Db, MemoryEntry};
+use super::decay;
 use super::vector::VectorResult;
 
 /// Score multiplier for long-term memories (promoted by Dreaming).
+///
+/// Note — LONGTERM_BOOST cliff: when the Dreaming pass clears `is_longterm`
+/// on a stale memory (effective_relevance < DEMOTION_FLOOR, see
+/// `core::dreaming::run_dreaming_with_config`), the next search of that
+/// memory drops its boost from this 1.2× multiplier to 1.0×. Combined with
+/// the decay multiplier applied below, a demoted memory's score collapses
+/// from `normalized × 1.2 × decay` to `normalized × decay` on the next
+/// query — a one-time discontinuity. This is the mechanism, not a bug.
+/// See docs/discussions/019-power-law-decay/conclusion.md Topic 3.
 const LONGTERM_BOOST: f64 = 1.2;
 
 /// A search result with merged score and full memory data.
@@ -24,6 +34,34 @@ pub struct FtsResult {
 
 /// FTS5 reserved words that must be filtered from query tokens.
 const FTS5_RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
+
+/// Compute the post-fetch search score: apply the long-term boost (if
+/// applicable) and the time-decay multiplier, clamping at 1.0.
+///
+/// Extracted to a pure helper so the boost-and-decay ordering is unit-
+/// testable without spinning up the embedding infra. Never-recalled
+/// memories (`last_recalled IS NULL`) receive no decay penalty —
+/// symmetric with the Dreaming pass's NULL-recall skip. Both compute
+/// sites derive the age clock from `MemoryEntry::last_recalled_as_datetime()`
+/// (same-age-clock invariant from discussion 019).
+fn apply_boost_and_decay(
+    normalized_rrf: f64,
+    entry: &MemoryEntry,
+    now: chrono::DateTime<chrono::Utc>,
+) -> f64 {
+    let decay_mult = entry
+        .last_recalled_as_datetime()
+        .map(|last| {
+            let days = (now - last).num_seconds() as f64 / 86_400.0;
+            decay::decay_factor(days)
+        })
+        .unwrap_or(1.0);
+    if entry.is_longterm {
+        (normalized_rrf * LONGTERM_BOOST * decay_mult).min(1.0)
+    } else {
+        normalized_rrf * decay_mult
+    }
+}
 
 /// Sanitize a query string for safe use in FTS5 MATCH.
 /// Splits on non-alphanumeric boundaries (aligning with FTS5's unicode61 tokenizer),
@@ -135,15 +173,17 @@ impl Db {
         // RRF scores are raw (~0.01-0.03). Normalize to 0-1 for Dreaming's avg_relevance.
         // Max theoretical RRF: 2 rankers at rank 1 = 2/(k+1) = 2/61 ≈ 0.0328
         const RRF_MAX: f64 = 2.0 / 61.0;
+        // `now` is captured once per search call and reused across every
+        // result in this response. Same-age-clock invariant with the
+        // Dreaming pass (discussion 019, challenger Q4): both call sites
+        // drive decay off `entry.last_recalled` via the shared helper
+        // `MemoryEntry::last_recalled_as_datetime()`.
+        let now = chrono::Utc::now();
         let mut results = Vec::new();
         for (id, score) in &top_ids {
             if let Some(entry) = self.get_memory(id)? {
                 let normalized = (*score / RRF_MAX).clamp(0.0, 1.0);
-                let boosted = if entry.is_longterm {
-                    (normalized * LONGTERM_BOOST).min(1.0)
-                } else {
-                    normalized
-                };
+                let boosted = apply_boost_and_decay(normalized, &entry, now);
                 // Record recall with original score, not boosted — avoid circular amplification
                 if let Err(e) = self.record_recall(id, normalized) {
                     tracing::warn!(id = %id, error = %e, "failed to record recall");
@@ -552,5 +592,131 @@ mod tests {
             !results.is_empty(),
             "FTS5 AND-term should match non-adjacent terms across title and content"
         );
+    }
+
+    // =========================================================================
+    // BL-008 Step 3: search-path decay re-rank (apply_boost_and_decay helper)
+    // =========================================================================
+
+    fn entry_with(last_recalled: Option<&str>, is_longterm: bool) -> MemoryEntry {
+        MemoryEntry {
+            id: "id".to_string(),
+            project_id: "p".to_string(),
+            source_file: String::new(),
+            source_type: String::new(),
+            knowledge_type: String::new(),
+            title: String::new(),
+            content: String::new(),
+            entities: String::new(),
+            valid_from: String::new(),
+            valid_until: None,
+            superseded_by: None,
+            recall_count: 0,
+            avg_relevance: 0.5,
+            last_recalled: last_recalled.map(|s| s.to_string()),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm,
+            created_at: String::new(),
+        }
+    }
+
+    fn frozen_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 7, 20, 12, 0, 0).unwrap()
+    }
+
+    fn rfc3339_n_days_ago(d: i64) -> String {
+        (frozen_now() - chrono::Duration::days(d)).to_rfc3339()
+    }
+
+    #[test]
+    fn apply_boost_no_last_recalled_no_decay_penalty() {
+        let entry = entry_with(None, false);
+        let out = apply_boost_and_decay(0.5, &entry, frozen_now());
+        assert_eq!(out, 0.5, "never-recalled non-longterm memory: no change");
+    }
+
+    #[test]
+    fn apply_boost_longterm_fresh_applies_boost_full() {
+        let entry = entry_with(Some(&rfc3339_n_days_ago(0)), true);
+        let out = apply_boost_and_decay(0.5, &entry, frozen_now());
+        // d=0 → decay_factor=1.0 → 0.5 × 1.2 × 1.0 = 0.6
+        assert!((out - 0.6).abs() < 1e-9, "expected 0.6, got {out}");
+    }
+
+    #[test]
+    fn apply_boost_longterm_stale_reduced_by_decay() {
+        // 60 days old, longterm: 0.5 × 1.2 × 0.5 = 0.3
+        let entry = entry_with(Some(&rfc3339_n_days_ago(60)), true);
+        let out = apply_boost_and_decay(0.5, &entry, frozen_now());
+        assert!((out - 0.3).abs() < 1e-6, "expected 0.3, got {out}");
+    }
+
+    #[test]
+    fn apply_boost_nonlongterm_stale_still_decays() {
+        // 60 days old, not longterm: 0.5 × 0.5 = 0.25 (no boost, yes decay)
+        let entry = entry_with(Some(&rfc3339_n_days_ago(60)), false);
+        let out = apply_boost_and_decay(0.5, &entry, frozen_now());
+        assert!((out - 0.25).abs() < 1e-6, "expected 0.25, got {out}");
+    }
+
+    #[test]
+    fn apply_boost_clamps_at_one() {
+        let entry = entry_with(Some(&rfc3339_n_days_ago(0)), true);
+        // 0.9 × 1.2 × 1.0 = 1.08 → clamped to 1.0
+        let out = apply_boost_and_decay(0.9, &entry, frozen_now());
+        assert_eq!(out, 1.0);
+    }
+
+    #[test]
+    fn apply_boost_ranks_fresh_above_stale_with_equal_avg_relevance() {
+        // Two longterm memories, same avg_relevance (pre-boost score), different ages.
+        let fresh = entry_with(Some(&rfc3339_n_days_ago(1)), true);
+        let stale = entry_with(Some(&rfc3339_n_days_ago(60)), true);
+        let fresh_score = apply_boost_and_decay(0.5, &fresh, frozen_now());
+        let stale_score = apply_boost_and_decay(0.5, &stale, frozen_now());
+        assert!(
+            fresh_score > stale_score,
+            "fresh ({fresh_score}) should rank above stale ({stale_score})"
+        );
+        // Ratio should match decay_factor(1) / decay_factor(60) ≈ 0.9885 / 0.5 ≈ 1.977
+        let ratio = fresh_score / stale_score;
+        let expected_ratio = decay::decay_factor(1.0) / decay::decay_factor(60.0);
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-6,
+            "ratio {ratio} should match decay_factor ratio {expected_ratio}"
+        );
+    }
+
+    #[test]
+    fn apply_boost_same_age_clock_invariant_with_dreaming_pass() {
+        // Same-age-clock invariant: given identical (avg_relevance, last_recalled, now),
+        // search's decay factor and Dreaming's effective_relevance must agree on the
+        // multiplier. We verify by computing both and checking the ratio.
+        let now = frozen_now();
+        let last_str = rfc3339_n_days_ago(30);
+        let last_dt = chrono::DateTime::parse_from_rfc3339(&last_str)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // Dreaming's effective_relevance for avg=1.0 → IS the decay factor.
+        let dreaming_side = crate::core::decay::effective_relevance(1.0, last_dt, now);
+
+        // Search's non-longterm path for normalized=1.0 → IS the decay factor.
+        let entry = entry_with(Some(&last_str), false);
+        let search_side = apply_boost_and_decay(1.0, &entry, now);
+
+        assert!(
+            (dreaming_side - search_side).abs() < 1e-9,
+            "same-age-clock invariant violated: dreaming={dreaming_side} vs search={search_side}"
+        );
+    }
+
+    #[test]
+    fn apply_boost_malformed_last_recalled_falls_back_to_no_decay() {
+        // Graceful — a malformed timestamp must not panic and must not apply decay.
+        let entry = entry_with(Some("not-a-date"), false);
+        let out = apply_boost_and_decay(0.5, &entry, frozen_now());
+        assert_eq!(out, 0.5, "malformed timestamp: treat as no decay");
     }
 }
