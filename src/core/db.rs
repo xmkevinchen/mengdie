@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -43,6 +43,33 @@ pub struct MemoryEntry {
     pub embedding_dim: Option<i64>,
     pub is_longterm: bool,
     pub created_at: String,
+}
+
+/// Parse a stored RFC3339 timestamp into `DateTime<Utc>`. Returns `None`
+/// when the string is malformed. Shared free function so call sites that
+/// already have the string in hand (e.g., the Dreaming pass's demotion
+/// loop, which fetches `last_recalled` as a `String` tuple element
+/// without materialising a full `MemoryEntry`) can use the same parse
+/// logic as `MemoryEntry::last_recalled_as_datetime`. Same-age-clock
+/// invariant (discussion 019).
+pub fn parse_last_recalled(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+impl MemoryEntry {
+    /// Parse `last_recalled` (RFC3339 string, stored as TEXT in SQLite) into
+    /// a `DateTime<Utc>`. Returns `None` when the column is NULL or the
+    /// string is malformed. Graceful — does not panic on bad data.
+    ///
+    /// Shared helper: the Dreaming pass (demotion path) and search
+    /// post-fetch re-rank both call this to drive decay off the same
+    /// timestamp, satisfying the same-age-clock invariant from
+    /// discussion 019.
+    pub fn last_recalled_as_datetime(&self) -> Option<DateTime<Utc>> {
+        self.last_recalled.as_deref().and_then(parse_last_recalled)
+    }
 }
 
 /// Input for creating a new memory entry.
@@ -1077,5 +1104,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(raw, 0);
+    }
+
+    // ----- last_recalled_as_datetime helper (BL-008 Step 1) -----
+
+    fn entry_with_last_recalled(last: Option<String>) -> MemoryEntry {
+        MemoryEntry {
+            id: "id".to_string(),
+            project_id: "p".to_string(),
+            source_file: String::new(),
+            source_type: String::new(),
+            knowledge_type: String::new(),
+            title: String::new(),
+            content: String::new(),
+            entities: String::new(),
+            valid_from: String::new(),
+            valid_until: None,
+            superseded_by: None,
+            recall_count: 0,
+            avg_relevance: 0.0,
+            last_recalled: last,
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn last_recalled_as_datetime_valid_rfc3339() {
+        let e = entry_with_last_recalled(Some("2026-04-20T12:00:00Z".to_string()));
+        let dt = e.last_recalled_as_datetime().expect("should parse");
+        assert_eq!(dt.to_rfc3339(), "2026-04-20T12:00:00+00:00");
+    }
+
+    #[test]
+    fn last_recalled_as_datetime_none_when_null() {
+        let e = entry_with_last_recalled(None);
+        assert!(e.last_recalled_as_datetime().is_none());
+    }
+
+    #[test]
+    fn last_recalled_as_datetime_none_when_malformed() {
+        let e = entry_with_last_recalled(Some("not-a-date".to_string()));
+        assert!(e.last_recalled_as_datetime().is_none());
+        let e = entry_with_last_recalled(Some(String::new()));
+        assert!(e.last_recalled_as_datetime().is_none());
     }
 }

@@ -2,7 +2,9 @@ pub mod clustering;
 pub mod config;
 pub mod contradiction;
 pub mod db;
+pub mod decay;
 pub mod dreaming;
+
 pub mod embeddings;
 pub mod ingest;
 pub mod llm;
