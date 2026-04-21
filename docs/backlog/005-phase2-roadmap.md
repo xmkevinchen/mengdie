@@ -4,7 +4,7 @@ title: "Phase 2 Roadmap — LLM Intelligence Layer"
 status: open
 created: 2026-04-16
 updated: 2026-04-19
-progress: "Phase 2.1 complete (3/10 items): BL-005/006/007 shipped as plans 007/009/010. Phase 2.2-2.5 (BL-008 through BL-014) NOT started."
+progress: "Phase 2.1 complete (4/10 items): BL-005/006/007 shipped as plans 007/009/010; BL-008 (exponential decay) shipped as plan 013 on 2026-04-20. Phase 2.2-2.5 (BL-009 through BL-014) NOT started."
 source: "Discussion 016 (Dreaming Evolution)"
 ---
 
@@ -44,12 +44,24 @@ Reference implementations: SmartPal, OpenClaw, Hermes-Agent
 - **Trigger**: after BL-005 + BL-006 complete
 - **Scope**: ~300-500 LOC. `src/core/dreaming.rs`, `src/core/schema.rs`, `src/bin/cli.rs`
 
-### BL-008: Power-Law Decay (Computed, Not Stored)
-- **What**: effective_relevance = avg_relevance × 0.95^days at promotion/demotion time. NEVER mutate stored avg_relevance.
-- **Demotion**: effective < 0.01 → clear is_longterm
-- **Independent of LLM**: can ship alongside or before BL-005
-- **Trigger**: any time (no dependency)
-- **Scope**: ~50-100 LOC in `src/core/dreaming.rs`
+### BL-008: Exponential Decay (Computed, Not Stored) — ✅ SHIPPED (plan 013, 2026-04-20)
+- **What (shipped)**: `effective_relevance = avg_relevance × 2^(-d/60)` at
+  promotion/demotion and search-rerank time. NEVER mutates stored avg_relevance.
+  Originally sketched as `0.95^days` / floor=0.01; discussion 019 converged on
+  60-day half-life + floor=0.20 (77-day trigger at observed mean 0.487) and
+  renamed "power-law" → "exponential" (the formula was never a power-law).
+- **Demotion**: effective < 0.20 → clear `is_longterm`. Same-age-clock invariant
+  enforced between Dreaming pass and search path (both use `last_recalled`).
+- **Observability**: `mengdie dream --decay-dry-run` for pre-mutation validation;
+  `DreamingResult` grew 5 fields (`demoted`, `avg_effective_score_before/after`,
+  `decay_floor_breaches`, `breached_ids`); structured-JSON event on stderr per pass.
+- **Ship criterion**: `scripts/verify-decay.sh` approval gate with
+  `--i-reviewed-each` on breached memories (replaces hard-zero assertion).
+- **Artifacts**: plan [`docs/plans/013-exponential-decay.md`], ops doc
+  [`docs/operations/dreaming-decay.md`], discussion
+  [`docs/discussions/019-power-law-decay/`].
+- **Revisit triggers**: `avg_effective_relevance < 0.25`, or
+  `max(last_recalled gap)` > 90 days, or `avg_relevance` IQR > 0.05.
 
 ### BL-009: MCP Dream Tool (Session-Based)
 - **What**: `memory_dream` MCP tool — runs decay + promote + cluster, returns clusters to Claude. Claude synthesizes inline and calls `memory_ingest`.

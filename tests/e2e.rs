@@ -121,3 +121,110 @@ fn test_full_pipeline() {
 
     eprintln!("E2E test passed: ingest → search → recall → dream → contradiction ✓");
 }
+
+/// BL-008 Step 5 — smoke test the decay/demotion pass on a seeded corpus.
+///
+/// Seeds 6 long-term memories with varied `last_recalled` ages and a frozen
+/// `now`, then runs one `run_dreaming_with_config` pass. Verifies the exact
+/// demotion outcome across the boundary cases from plan 013 AC1:
+/// d=0 and d=15 stay promoted; d=75 rides the floor boundary and survives
+/// (effective ≈ 0.205 > 0.20); d=77 is just above the floor (eff ≈ 0.2001,
+/// survives); d=78 just crosses (eff ≈ 0.1977, demotes); d=137 demotes hard.
+///
+/// Note: integration tests can't reach private `Db::lock_conn`, so the
+/// raw UPDATE that forces `is_longterm = 1` + specific `avg_relevance` +
+/// specific `last_recalled` goes through a parallel `rusqlite` connection
+/// on the same file. The `Db` handle's `Arc<Mutex<Connection>>` is
+/// released between operations so SQLite serializes correctly.
+#[test]
+fn test_decay_smoke_on_seeded_corpus() {
+    use chrono::TimeZone;
+    use mengdie::core::db::{Db, NewMemory};
+    use mengdie::core::dreaming::DreamingConfig;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+    let db = Db::open(&db_path).unwrap();
+
+    let now = chrono::Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap();
+
+    let days_before = |d: i64| now - chrono::Duration::days(d);
+
+    let insert = |title: &str| -> String {
+        let uid = uuid::Uuid::new_v4();
+        db.insert_memory(NewMemory {
+            project_id: "proj".to_string(),
+            source_file: format!("seed-{uid}.md"),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: format!("{title} {uid}"),
+            content: format!("content {uid}"),
+            entities: "test".to_string(),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+        })
+        .unwrap()
+    };
+
+    let force_longterm = |id: &str, avg: f64, last: chrono::DateTime<chrono::Utc>| {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memory_entries SET is_longterm = 1, avg_relevance = ?1, last_recalled = ?2 WHERE id = ?3",
+            rusqlite::params![avg, last.to_rfc3339(), id],
+        )
+        .unwrap();
+    };
+
+    let m_d0 = insert("d0");
+    force_longterm(&m_d0, 0.50, days_before(0));
+    let m_d15 = insert("d15");
+    force_longterm(&m_d15, 0.487, days_before(15));
+    let m_d75 = insert("d75");
+    force_longterm(&m_d75, 0.487, days_before(75));
+    let m_d77 = insert("d77");
+    force_longterm(&m_d77, 0.487, days_before(77));
+    let m_d78 = insert("d78");
+    force_longterm(&m_d78, 0.487, days_before(78));
+    let m_d137 = insert("d137");
+    force_longterm(&m_d137, 0.487, days_before(137));
+
+    let result = db
+        .run_dreaming_with_config(None, &DreamingConfig::default(), Some(now), true)
+        .unwrap();
+
+    // d=78 (eff ≈ 0.1977) and d=137 (eff ≈ 0.100) demote — exactly 2.
+    // d=0, d=15, d=75 (eff ≈ 0.205), d=77 (eff ≈ 0.2001) stay promoted.
+    assert_eq!(
+        result.demoted, 2,
+        "expected exactly 2 demotions (d=78, d=137), got {}",
+        result.demoted
+    );
+    assert_eq!(result.decay_floor_breaches, 2);
+    assert_eq!(result.breached_ids.len(), 2);
+    assert!(result.breached_ids.contains(&m_d78));
+    assert!(result.breached_ids.contains(&m_d137));
+
+    for (label, id) in [
+        ("d0", &m_d0),
+        ("d15", &m_d15),
+        ("d75", &m_d75),
+        ("d77", &m_d77),
+    ] {
+        let e = db.get_memory(id).unwrap().unwrap();
+        assert!(
+            e.is_longterm,
+            "{label} (id={id}) should still be long-term after the pass"
+        );
+    }
+
+    for (label, id) in [("d78", &m_d78), ("d137", &m_d137)] {
+        let e = db.get_memory(id).unwrap().unwrap();
+        assert!(
+            !e.is_longterm,
+            "{label} (id={id}) should be demoted (is_longterm=0)"
+        );
+    }
+
+    eprintln!("decay smoke passed: 2 demoted (d=78, d=137), 4 survived (d=0, 15, 75, 77) ✓");
+}
