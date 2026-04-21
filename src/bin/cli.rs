@@ -211,8 +211,10 @@ async fn cmd_dream(
         min_relevance,
         window_days,
     };
-    // Promotion pass (unchanged semantics: all projects).
-    let result = db.run_dreaming_with_config(None, &config)?;
+    // Dreaming pass: promotion + decay/demotion (BL-008). Step 2 of plan
+    // 013 passes `now = None` (wall clock) and `write_demotions = true`.
+    // Step 4 adds a `--decay-dry-run` CLI flag that flips the bool to false.
+    let result = db.run_dreaming_with_config(None, &config, None, true)?;
     println!(
         "Dreaming complete: {} promoted out of {} eligible memories (thresholds: recall≥{}, relevance≥{:.2}, window={}d)",
         result.promoted, result.total_eligible, min_recall, min_relevance, window_days

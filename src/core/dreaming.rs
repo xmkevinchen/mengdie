@@ -1,7 +1,9 @@
-use rusqlite::params;
+use chrono::{DateTime, Utc};
+use rusqlite::{params, ToSql};
 
 use super::clustering::cluster_memories;
-use super::db::{Db, NewMemory};
+use super::db::{parse_last_recalled, Db, NewMemory};
+use super::decay;
 use super::llm::LlmProvider;
 use super::synthesis::{
     build_synthesis_prompt, parse_synthesis_response, SynthesisInput, SynthesisOutcome,
@@ -35,7 +37,7 @@ impl Default for DreamingConfig {
     }
 }
 
-/// Result of a Dreaming promotion pass.
+/// Result of a Dreaming pass (promotion + decay/demotion).
 #[derive(Debug)]
 pub struct DreamingResult {
     pub promoted: usize,
@@ -43,27 +45,58 @@ pub struct DreamingResult {
     pub candidates_not_promoted: usize,
     /// Total non-longterm valid memories in the project.
     pub total_eligible: usize,
+    // ----- BL-008 decay/demotion counters -----
+    /// Long-term memories demoted by this pass (cleared `is_longterm`).
+    /// Always `0` when `write_demotions == false` (dry-run).
+    pub demoted: usize,
+    /// Mean effective_relevance across all `is_longterm = 1` memories with a
+    /// non-null `last_recalled`, measured BEFORE any demotion write.
+    pub avg_effective_score_before: f64,
+    /// Mean effective_relevance after demotions have been applied (live) or
+    /// identical to `avg_effective_score_before` (dry-run — no writes).
+    pub avg_effective_score_after: f64,
+    /// Count of memories whose effective relevance fell below the floor.
+    /// Equals `demoted` in live mode; can be `> demoted` only in dry-run.
+    pub decay_floor_breaches: usize,
+    /// IDs of memories whose effective relevance fell below the floor.
+    /// Populated identically in live and dry-run — consumed by CLI approval
+    /// gate in Step 5 and `--decay-dry-run` output in Step 4.
+    pub breached_ids: Vec<String>,
 }
 
 impl Db {
-    /// Run the Dreaming promotion pass, optionally scoped to a project.
-    /// Uses default thresholds. See `run_dreaming_with_config` for custom thresholds.
+    /// Run the Dreaming pass (promotion + decay/demotion) with default
+    /// thresholds and wall-clock time. Always writes demotions. This is the
+    /// production entry point; tests inject a frozen clock or suppress writes
+    /// via `run_dreaming_with_config`.
     pub fn run_dreaming(&self, project_id: Option<&str>) -> anyhow::Result<DreamingResult> {
-        self.run_dreaming_with_config(project_id, &DreamingConfig::default())
+        self.run_dreaming_with_config(project_id, &DreamingConfig::default(), None, true)
     }
 
-    /// Run the Dreaming promotion pass with configurable thresholds.
+    /// Run the Dreaming pass with configurable thresholds, injectable clock,
+    /// and controllable demotion writes.
+    ///
+    /// - `now = None` → `chrono::Utc::now()`; deterministic tests pass `Some(frozen)`.
+    /// - `write_demotions = false` → dry-run: compute `decay_floor_breaches`
+    ///   and `breached_ids` but do NOT clear any `is_longterm` flags.
+    ///   `avg_effective_score_after == avg_effective_score_before` exactly.
+    /// - `write_demotions = true` → live: `UPDATE is_longterm = 0` for each
+    ///   breached id; `demoted = affected_rows`.
     pub fn run_dreaming_with_config(
         &self,
         project_id: Option<&str>,
         config: &DreamingConfig,
+        now: Option<DateTime<Utc>>,
+        write_demotions: bool,
     ) -> anyhow::Result<DreamingResult> {
         let conn = self.lock_conn()?;
-        let now = chrono::Utc::now();
+        let now = now.unwrap_or_else(Utc::now);
         let cutoff = (now - chrono::Duration::days(config.window_days)).to_rfc3339();
 
         let project_filter_simple = project_id.map(|_| "AND project_id = ?1").unwrap_or("");
         let project_filter = project_id.map(|_| "AND project_id = ?4").unwrap_or("");
+
+        // === Promotion pass (unchanged from pre-BL-008) ===
 
         // Count total non-longterm valid memories BEFORE promotion
         let count_sql = format!(
@@ -117,10 +150,166 @@ impl Db {
             )?,
         };
 
+        // === Decay / demotion pass (BL-008) ===
+        //
+        // LONGTERM_BOOST cliff: clearing `is_longterm` here removes the 1.2×
+        // boost applied at `search.rs:~142`. The next search drops the
+        // memory from `normalized × 1.2 × decay` to `normalized × decay` —
+        // intentional discontinuity, NOT a bug. See
+        // docs/discussions/019-power-law-decay/conclusion.md Topic 3.
+
+        // Select all live long-term memories with non-null last_recalled for the decay scan.
+        // Rows with NULL last_recalled are skipped entirely (no staleness evidence).
+        let select_longterm_sql = format!(
+            "SELECT id, avg_relevance, last_recalled FROM memory_entries
+             WHERE is_longterm = 1
+               AND valid_until IS NULL
+               AND last_recalled IS NOT NULL {project_filter_simple}"
+        );
+        let longterm_rows: Vec<(String, f64, String)> = {
+            let mut stmt = conn.prepare(&select_longterm_sql)?;
+            let mapper = |row: &rusqlite::Row<'_>| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            };
+            match project_id {
+                Some(pid) => stmt
+                    .query_map(params![pid], mapper)?
+                    .collect::<rusqlite::Result<_>>()?,
+                None => stmt
+                    .query_map([], mapper)?
+                    .collect::<rusqlite::Result<_>>()?,
+            }
+        };
+
+        let mut sum_effective_before: f64 = 0.0;
+        let mut counted_before: usize = 0;
+        let mut breached_ids: Vec<String> = Vec::new();
+        for (id, avg, last) in &longterm_rows {
+            let last_dt = match parse_last_recalled(last) {
+                Some(dt) => dt,
+                None => continue, // malformed timestamp — skip defensively
+            };
+            let eff = decay::effective_relevance(*avg, last_dt, now);
+            sum_effective_before += eff;
+            counted_before += 1;
+            if decay::should_demote(eff) {
+                breached_ids.push(id.clone());
+            }
+        }
+        let avg_effective_score_before = if counted_before == 0 {
+            0.0
+        } else {
+            sum_effective_before / counted_before as f64
+        };
+        let decay_floor_breaches = breached_ids.len();
+
+        // Observability: log NULL-last_recalled long-term memories (they are
+        // excluded from decay entirely — documented skip rule).
+        let null_count_sql = format!(
+            "SELECT COUNT(*) FROM memory_entries
+             WHERE is_longterm = 1
+               AND valid_until IS NULL
+               AND last_recalled IS NULL {project_filter_simple}"
+        );
+        let null_skip: usize = match project_id {
+            Some(pid) => conn.query_row(&null_count_sql, params![pid], |row| {
+                row.get::<_, i64>(0).map(|v| v as usize)
+            })?,
+            None => conn.query_row(&null_count_sql, [], |row| {
+                row.get::<_, i64>(0).map(|v| v as usize)
+            })?,
+        };
+        if null_skip > 0 {
+            tracing::info!(
+                skipped = null_skip,
+                "skipping decay for long-term memories with NULL last_recalled"
+            );
+        }
+
+        // Conditional demotion write. Chunked to respect SQLite bind-variable
+        // limits (default 999 per statement; bundled SQLite raises this, but
+        // keep the conservative 500 for portability).
+        //
+        // Guard `AND is_longterm = 1` in the WHERE clause is defensive: the
+        // scan above already filtered to `is_longterm = 1`, but if a row is
+        // concurrently demoted by another path, the guard prevents the chunk
+        // from counting a no-op UPDATE toward `demoted`. Under the documented
+        // invariant (live mode, no concurrent writers) `demoted ==
+        // decay_floor_breaches`; under concurrency it can be less — the
+        // `debug_assert!` below would fire only if the divergence happens in
+        // a test, not in prod.
+        let mut demoted: usize = 0;
+        if write_demotions && !breached_ids.is_empty() {
+            for chunk in breached_ids.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "UPDATE memory_entries SET is_longterm = 0
+                     WHERE is_longterm = 1 AND id IN ({placeholders})"
+                );
+                let params_dyn: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+                demoted += conn.execute(&sql, params_dyn.as_slice())?;
+            }
+            debug_assert!(
+                demoted == decay_floor_breaches,
+                "live-mode invariant: demoted ({demoted}) must equal \
+                 decay_floor_breaches ({decay_floor_breaches}); divergence \
+                 indicates concurrent writes or a guard-clause regression"
+            );
+        }
+
+        // Post-state mean. In dry-run OR when no demotions fired, this equals
+        // the before-mean exactly (no writes happened). Otherwise re-scan the
+        // surviving long-term set.
+        let avg_effective_score_after = if !write_demotions || breached_ids.is_empty() {
+            avg_effective_score_before
+        } else {
+            let mut stmt = conn.prepare(&select_longterm_sql)?;
+            let mapper = |row: &rusqlite::Row<'_>| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            };
+            let rows_after: Vec<(String, f64, String)> = match project_id {
+                Some(pid) => stmt
+                    .query_map(params![pid], mapper)?
+                    .collect::<rusqlite::Result<_>>()?,
+                None => stmt
+                    .query_map([], mapper)?
+                    .collect::<rusqlite::Result<_>>()?,
+            };
+            let mut sum: f64 = 0.0;
+            let mut count: usize = 0;
+            for (_, avg, last) in &rows_after {
+                if let Some(dt) = parse_last_recalled(last) {
+                    let eff = decay::effective_relevance(*avg, dt, now);
+                    sum += eff;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                0.0
+            } else {
+                sum / count as f64
+            }
+        };
+
         Ok(DreamingResult {
             promoted,
             candidates_not_promoted: total_checked.saturating_sub(promoted),
             total_eligible: total_valid,
+            demoted,
+            avg_effective_score_before,
+            avg_effective_score_after,
+            decay_floor_breaches,
+            breached_ids,
         })
     }
 }
@@ -969,5 +1158,169 @@ mod tests {
             found_ignored, 0,
             "synthesis body from skip=true response must NOT land in DB"
         );
+    }
+
+    // =========================================================================
+    // BL-008 decay / demotion tests (plan 013 Step 2)
+    // =========================================================================
+
+    /// Insert a memory with unique content (dodges content_hash dedup) and
+    /// fabricate a long-term row with a specific `last_recalled` + `avg_relevance`,
+    /// bypassing promotion thresholds.
+    fn seed_longterm(db: &Db, title: &str, avg: f64, last_recalled: Option<&str>) -> String {
+        let uid = uuid::Uuid::new_v4();
+        let id = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: format!("test-{uid}.md"),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: title.to_string(),
+                content: format!("seed content for {title} ({uid})"),
+                entities: "test".to_string(),
+                embedding: None,
+                embedding_dim: None,
+                is_longterm: false,
+            })
+            .unwrap();
+        let conn = db.lock_conn().unwrap();
+        conn.execute(
+            "UPDATE memory_entries SET is_longterm = 1, avg_relevance = ?1, last_recalled = ?2
+             WHERE id = ?3",
+            params![avg, last_recalled, id],
+        )
+        .unwrap();
+        drop(conn);
+        id
+    }
+
+    fn frozen_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 7, 20, 12, 0, 0).unwrap()
+    }
+
+    fn days_before(now: chrono::DateTime<chrono::Utc>, d: i64) -> String {
+        (now - chrono::Duration::days(d)).to_rfc3339()
+    }
+
+    #[test]
+    fn decay_demotes_below_floor_and_preserves_above() {
+        let db = test_db();
+        let now = frozen_now();
+        // Fresh recall (d=15) at avg=0.50 → effective ≈ 0.420 > 0.20, survives.
+        let fresh = seed_longterm(&db, "Fresh", 0.50, Some(&days_before(now, 15)));
+        // Stale recall (d=78) at avg=0.487 → effective ≈ 0.198 < 0.20, demotes.
+        let stale = seed_longterm(&db, "Stale", 0.487, Some(&days_before(now, 78)));
+        // Deep-stale (d=137) at avg=0.487 → effective ≈ 0.100, demotes hard.
+        let deep = seed_longterm(&db, "Deep", 0.487, Some(&days_before(now, 137)));
+
+        let result = db
+            .run_dreaming_with_config(None, &DreamingConfig::default(), Some(now), true)
+            .unwrap();
+
+        assert_eq!(result.demoted, 2);
+        assert_eq!(result.decay_floor_breaches, 2);
+        assert_eq!(result.breached_ids.len(), 2);
+        assert!(result.breached_ids.contains(&stale));
+        assert!(result.breached_ids.contains(&deep));
+        assert!(!result.breached_ids.contains(&fresh));
+
+        let fresh_entry = db.get_memory(&fresh).unwrap().unwrap();
+        let stale_entry = db.get_memory(&stale).unwrap().unwrap();
+        let deep_entry = db.get_memory(&deep).unwrap().unwrap();
+        assert!(fresh_entry.is_longterm, "fresh should stay promoted");
+        assert!(!stale_entry.is_longterm, "stale should demote");
+        assert!(!deep_entry.is_longterm, "deep-stale should demote");
+
+        // After writes: only `fresh` remains long-term. fresh: avg=0.50, d=15
+        // → effective = 0.50 × 2^(-15/60) ≈ 0.4204.
+        assert!(
+            (result.avg_effective_score_after - 0.4204).abs() < 0.01,
+            "after mean should reflect the surviving fresh memory (~0.4204), got {}",
+            result.avg_effective_score_after
+        );
+        assert!(
+            result.avg_effective_score_before < result.avg_effective_score_after,
+            "before ({}) should be below after ({}) — demotions remove low-effective rows",
+            result.avg_effective_score_before,
+            result.avg_effective_score_after
+        );
+    }
+
+    #[test]
+    fn decay_skips_null_last_recalled() {
+        let db = test_db();
+        let now = frozen_now();
+        // NULL last_recalled — must be skipped entirely, no decay, no demotion.
+        let untouchable = seed_longterm(&db, "NeverRecalled", 0.487, None);
+        // Companion stale memory so the pass has work to do.
+        let stale = seed_longterm(&db, "Stale", 0.487, Some(&days_before(now, 90)));
+
+        let result = db
+            .run_dreaming_with_config(None, &DreamingConfig::default(), Some(now), true)
+            .unwrap();
+
+        assert_eq!(result.demoted, 1);
+        assert_eq!(result.breached_ids.len(), 1);
+        assert_eq!(result.breached_ids[0], stale);
+
+        let e = db.get_memory(&untouchable).unwrap().unwrap();
+        assert!(
+            e.is_longterm,
+            "NULL-last_recalled memory must stay is_longterm=1"
+        );
+    }
+
+    #[test]
+    fn decay_dry_run_counts_breaches_but_never_writes() {
+        let db = test_db();
+        let now = frozen_now();
+        let stale = seed_longterm(&db, "Stale", 0.487, Some(&days_before(now, 90)));
+        let fresh = seed_longterm(&db, "Fresh", 0.50, Some(&days_before(now, 15)));
+
+        let result = db
+            .run_dreaming_with_config(None, &DreamingConfig::default(), Some(now), false)
+            .unwrap();
+
+        assert_eq!(result.demoted, 0, "dry-run must not demote");
+        assert_eq!(
+            result.decay_floor_breaches, 1,
+            "breach count unchanged by write flag"
+        );
+        assert_eq!(result.breached_ids, vec![stale.clone()]);
+        // In dry-run, _after is exactly _before (no writes happened).
+        assert_eq!(
+            result.avg_effective_score_before, result.avg_effective_score_after,
+            "dry-run _after must equal _before exactly"
+        );
+
+        // DB state unchanged — both memories still is_longterm=1.
+        assert!(db.get_memory(&stale).unwrap().unwrap().is_longterm);
+        assert!(db.get_memory(&fresh).unwrap().unwrap().is_longterm);
+    }
+
+    #[test]
+    fn decay_no_longterm_yields_empty_counters() {
+        let db = test_db();
+        let now = frozen_now();
+        // No long-term memories at all.
+        let result = db
+            .run_dreaming_with_config(None, &DreamingConfig::default(), Some(now), true)
+            .unwrap();
+        assert_eq!(result.demoted, 0);
+        assert_eq!(result.decay_floor_breaches, 0);
+        assert!(result.breached_ids.is_empty());
+        assert_eq!(result.avg_effective_score_before, 0.0);
+        assert_eq!(result.avg_effective_score_after, 0.0);
+    }
+
+    #[test]
+    fn decay_wrapper_backwards_compat_uses_wall_clock() {
+        // `run_dreaming` (no-arg wrapper) must still work. With a freshly-recalled
+        // memory (< 1 day old), decay is ~1.0, nothing demotes.
+        let db = test_db();
+        let fresh = seed_longterm(&db, "Fresh", 0.50, Some(&chrono::Utc::now().to_rfc3339()));
+        let result = db.run_dreaming(None).unwrap();
+        assert_eq!(result.demoted, 0);
+        assert!(db.get_memory(&fresh).unwrap().unwrap().is_longterm);
     }
 }
