@@ -3,7 +3,7 @@ id: "013"
 title: "BL-008 — Exponential Decay for Dreaming (formula + demotion + search re-rank + observability)"
 type: plan
 created: 2026-04-20
-status: reviewed
+status: done
 discussion: "docs/discussions/019-power-law-decay/"
 ---
 
