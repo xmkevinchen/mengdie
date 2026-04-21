@@ -62,6 +62,14 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Dry-run the BL-008 decay pass: compute `decay_floor_breaches` and
+        /// report the would-demote list WITHOUT clearing any `is_longterm`
+        /// flags. Incompatible with `--synthesize --dry-run` (the two dry-run
+        /// modes target different passes). See docs/operations/dreaming-decay.md
+        /// for the operator procedure.
+        #[arg(long)]
+        decay_dry_run: bool,
+
         /// Project scope for synthesis (default: all projects).
         #[arg(long)]
         project: Option<String>,
@@ -155,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
             min_cluster_size,
             max_cluster_size,
             dry_run,
+            decay_dry_run,
             project,
         } => {
             cmd_dream(
@@ -167,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
                 min_cluster_size,
                 max_cluster_size,
                 dry_run,
+                decay_dry_run,
                 project.as_deref(),
             )
             .await
@@ -190,6 +200,27 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Format the single-line human-readable dreaming-pass summary. Extracted
+/// for unit testing — callers include the AC5 regex contract.
+fn format_dreaming_line(
+    result: &mengdie::core::dreaming::DreamingResult,
+    decay_dry_run: bool,
+) -> String {
+    let demote_phrase = if decay_dry_run {
+        format!("{} would-demote (DRY RUN)", result.decay_floor_breaches)
+    } else {
+        format!("{} demoted", result.demoted)
+    };
+    format!(
+        "Dreaming pass: {} promoted, {} ({} floor breaches, avg effective {:.3} → {:.3})",
+        result.promoted,
+        demote_phrase,
+        result.decay_floor_breaches,
+        result.avg_effective_score_before,
+        result.avg_effective_score_after,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_dream(
     db: &Db,
@@ -201,24 +232,50 @@ async fn cmd_dream(
     min_cluster_size: usize,
     max_cluster_size: usize,
     dry_run: bool,
+    decay_dry_run: bool,
     project: Option<&str>,
 ) -> anyhow::Result<()> {
     use mengdie::core::dreaming::{run_synthesis_pass, DreamingConfig};
     use mengdie::core::llm::build_provider;
+
+    // Flag-conflict guard (BL-008 AC5): the two dry-run modes target
+    // different passes (`--dry-run` previews synthesis; `--decay-dry-run`
+    // previews demotion). Combining them would be ambiguous — refuse.
+    if decay_dry_run && dry_run {
+        anyhow::bail!(
+            "--decay-dry-run is not compatible with --synthesize --dry-run. \
+             The two dry-run modes target different passes (synthesis vs decay). \
+             Run them in separate invocations. See docs/operations/dreaming-decay.md."
+        );
+    }
 
     let config = DreamingConfig {
         min_recall,
         min_relevance,
         window_days,
     };
-    // Dreaming pass: promotion + decay/demotion (BL-008). Step 2 of plan
-    // 013 passes `now = None` (wall clock) and `write_demotions = true`.
-    // Step 4 adds a `--decay-dry-run` CLI flag that flips the bool to false.
-    let result = db.run_dreaming_with_config(None, &config, None, true)?;
-    println!(
-        "Dreaming complete: {} promoted out of {} eligible memories (thresholds: recall≥{}, relevance≥{:.2}, window={}d)",
-        result.promoted, result.total_eligible, min_recall, min_relevance, window_days
-    );
+    // Dreaming pass: promotion + decay/demotion (BL-008). `write_demotions`
+    // flipped by the `--decay-dry-run` flag.
+    let write_demotions = !decay_dry_run;
+    let result = db.run_dreaming_with_config(None, &config, None, write_demotions)?;
+
+    // Human-readable line (AC5 loose regex tolerates whitespace + decimal variation).
+    println!("{}", format_dreaming_line(&result, decay_dry_run));
+
+    // Structured-JSON line for machine consumption (AC5 blocker from codex).
+    // Emitted at INFO via tracing → stderr. Downstream tooling parses this;
+    // the human line above is free to evolve without breaking parsers.
+    let structured = serde_json::json!({
+        "event": "dreaming_pass",
+        "promoted": result.promoted,
+        "demoted": result.demoted,
+        "decay_floor_breaches": result.decay_floor_breaches,
+        "avg_effective_before": result.avg_effective_score_before,
+        "avg_effective_after": result.avg_effective_score_after,
+        "dry_run": decay_dry_run,
+        "breaches": result.breached_ids,
+    });
+    tracing::info!(target: "mengdie::dreaming", %structured, "dreaming_pass");
 
     // Review feedback: `--dry-run` alone previously silently ran the synthesis
     // path. New contract: `--dry-run` requires explicit `--synthesize` to make
@@ -622,4 +679,68 @@ fn walkdir(dir: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mengdie::core::dreaming::DreamingResult;
+    use regex::Regex;
+
+    fn sample_result(demoted: usize, breaches: usize, before: f64, after: f64) -> DreamingResult {
+        DreamingResult {
+            promoted: 1,
+            candidates_not_promoted: 0,
+            total_eligible: 10,
+            demoted,
+            avg_effective_score_before: before,
+            avg_effective_score_after: after,
+            decay_floor_breaches: breaches,
+            breached_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn format_dreaming_line_live_matches_ac5_regex() {
+        // AC5 regex: Dreaming pass:\s+\d+\s+promoted,\s+\d+\s+demoted\s+\(...
+        let line = format_dreaming_line(&sample_result(2, 2, 0.421, 0.500), false);
+        let re = Regex::new(
+            r"^Dreaming pass:\s+\d+\s+promoted,\s+\d+\s+demoted\s+\(\d+\s+floor breaches,\s+avg effective\s+\d+\.\d+\s+→\s+\d+\.\d+\)$",
+        )
+        .unwrap();
+        assert!(re.is_match(&line), "live line didn't match: {line}");
+    }
+
+    #[test]
+    fn format_dreaming_line_dry_run_matches_ac5_regex() {
+        let line = format_dreaming_line(&sample_result(0, 3, 0.421, 0.421), true);
+        let re = Regex::new(
+            r"^Dreaming pass:\s+\d+\s+promoted,\s+\d+\s+would-demote\s+\(DRY RUN\)\s+\(\d+\s+floor breaches,\s+avg effective\s+\d+\.\d+\s+→\s+\d+\.\d+\)$",
+        )
+        .unwrap();
+        assert!(re.is_match(&line), "dry-run line didn't match: {line}");
+    }
+
+    #[test]
+    fn format_dreaming_line_dry_run_uses_breach_count_not_demoted() {
+        // In dry-run, `demoted = 0` but `decay_floor_breaches` reflects what WOULD demote.
+        // The human phrase must surface the breach count (`would-demote`), not the
+        // always-zero `demoted`.
+        let line = format_dreaming_line(&sample_result(0, 7, 0.421, 0.421), true);
+        assert!(line.contains("7 would-demote"));
+        assert!(!line.contains("0 would-demote"));
+    }
+
+    #[test]
+    fn format_dreaming_line_shape_stable_on_edge_counts() {
+        // Zeros and large numbers must still round-trip through the regex.
+        let zero = format_dreaming_line(&sample_result(0, 0, 0.0, 0.0), false);
+        let huge = format_dreaming_line(&sample_result(9999, 9999, 0.999, 0.999), false);
+        let re = Regex::new(
+            r"^Dreaming pass:\s+\d+\s+promoted,\s+\d+\s+demoted\s+\(\d+\s+floor breaches,\s+avg effective\s+\d+\.\d+\s+→\s+\d+\.\d+\)$",
+        )
+        .unwrap();
+        assert!(re.is_match(&zero));
+        assert!(re.is_match(&huge));
+    }
 }
