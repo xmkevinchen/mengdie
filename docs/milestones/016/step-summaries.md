@@ -36,3 +36,23 @@
 - The JSON→SQL `jq` conversion pattern is recorded in the doc; Step 4 does not need to re-implement it (the test operates on a constructed UPDATE, not on the jq pipeline).
 
 **Actual files**: `docs/operations/dreaming-decay.md`
+
+---
+
+## Step 3 — Plan 013 AC5 correction note + BL close (commit: TBD)
+**Decisions**:
+- Correction note rendered as a `>` blockquote immediately after the AC5 heading at line 192, before the first AC5 bullet at line 194. Blockquote format visually distinguishes it from the original AC text and signals "post-ship annotation" without mutating the AC itself.
+- Rejected alternative is named explicitly as "dual emission" (codex P2). Reversal path documented (~10-line diff touching format_dreaming_line + the two regex tests in cli.rs).
+- BL body gets a 4-item shipped-actions blockquote (mirrors plan 015's BL close-out pattern) + frontmatter `closed: 2026-04-23` + `closed_by: plan-016`. Includes a cross-reference note about the `breached_ids` → `breaches` cleanup so future git-blame readers understand the rename history.
+- `.ae/` BL edit is local-only (gitignored per project convention) — same pattern as plan 015 Step 6.
+
+**Rejected**:
+- Amending line 194 of plan 013 in-place — would erase the audit trail. Append-only preserves history per architect-approved pattern.
+- Duplicating the correction note into `docs/reviews/011-bl008-exponential-decay.md` — doubling up creates drift risk.
+
+**Cross-step deps**:
+- None — Step 3 is independent of Steps 1 and 2 (different files).
+- Step 4's test does NOT depend on Step 3 content.
+
+**Actual files** (tracked): `docs/plans/013-exponential-decay.md`
+**Actual files** (local-only, in `.ae/`): `.ae/backlog/v0.8.0/BL-decay-ops-doc-polish.md`
