@@ -82,6 +82,117 @@ transitions from an interactive `--i-reviewed-each` flag to a threshold
 alarm in `decay_floor_breaches`. See plan 013 "Plan-level revisit trigger"
 for the reversal shape.
 
+## Rollback: re-promoting a falsely-demoted memory
+
+Incident-response procedure for when a live `mengdie dream` pass demoted
+memories that — after the fact — turn out to have been prematurely stale.
+Examples: a search-rank regression lands on a demoted memory that the
+operator was about to re-use; the operator recognizes an ID in the breach
+list as a just-recalled piece of context; a BL-010 threshold-alarm future
+triggers on a spike during a known-burst recall pattern.
+
+**Required input**: the `breaches` array from the structured-JSON stderr
+line of the offending pass. The field name in the JSON contract is
+`breaches` (not `breached_ids` — that was a pre-plan-015 documentation
+name; see `docs/schemas/dreaming_pass.json` for the current contract).
+Capture the JSON line at run time (redirect stderr to a file or copy
+from the terminal scrollback) — without it, exact row-level rollback is
+constrained.
+
+### If the breach list is LOST (no captured stderr, no log file)
+
+Surface this branch FIRST because the honest recovery path is limited
+and an operator under incident pressure needs to know before attempting
+the happy path.
+
+- There is NO persistent dreaming output log by default. The
+  structured-JSON line goes to stderr; if the operator did not redirect
+  it, it is gone.
+- Demotion only writes `is_longterm = 0`. It does NOT set `valid_until`,
+  a `demoted_at` timestamp, or any audit-trail column (verified at
+  `src/core/dreaming.rs:251-256`). The set of currently-`is_longterm=0`
+  rows is a superset of the just-demoted set (includes all rows that
+  never reached long-term).
+- **Exact row-level rollback is not possible without the captured breach
+  list.** Recovery paths require external evidence: shell history
+  (`history | grep 'mengdie dream'`), terminal scrollback, a redirected
+  stderr file if one exists, or reconstruction from operator memory
+  ("which memories was I actively recalling today?").
+- If none of those exist, the demotion is accepted as-is. Mitigation
+  going forward: the next `mengdie dream --decay-dry-run` captures its
+  JSON line to a file (`2>/tmp/dream-$(date +%Y%m%d).log`) so this
+  branch never fires again.
+
+### Rollback SQL (with breach list available)
+
+Input: the `breaches` array from the captured JSON, e.g.:
+
+```json
+{"schema_version":1,"event":"dreaming_pass",...,"breaches":["abc-123","def-456"]}
+```
+
+**JSON → SQL quoting conversion** (required — see failure mode below):
+the `breaches` array uses JSON double-quoted strings. SQLite requires
+single-quoted literals. If the operator pastes the JSON array directly
+into SQL, SQLite parses the identifiers as column names, finds none,
+and the UPDATE silently matches zero rows. Convert with:
+
+```bash
+# Extract breaches, convert double→single quotes for SQL IN clause.
+jq -r '.breaches | map("'" + . + "'") | join(", ")' < dream-pass.json
+# or without jq:
+# echo '...' | sed -n 's/.*"breaches":\[\([^]]*\)\].*/\1/p' | tr '"' "'"
+```
+
+Then paste the result into the UPDATE template:
+
+<!-- rollback-snippet:begin -->
+```sql
+-- Re-promote memories by ID. Replace the list below with the
+-- jq-converted, single-quoted, comma-separated breach IDs from the
+-- captured dream-pass JSON.
+UPDATE memory_entries
+   SET is_longterm = 1
+ WHERE id IN ('abc-123', 'def-456');
+```
+<!-- rollback-snippet:end -->
+
+### Verification query
+
+Confirm the re-promotion took effect before leaving the incident:
+
+```sql
+SELECT id, is_longterm FROM memory_entries
+ WHERE id IN ('abc-123', 'def-456');
+-- Expected: is_longterm = 1 for each row.
+```
+
+### `last_recalled` note — shield from immediate re-demotion
+
+The rollback SQL above flips `is_longterm` back to 1 but does NOT touch
+`last_recalled`. The rolled-back memory is subject to the same decay
+schedule as before — if its `last_recalled` is already 80+ days old, the
+NEXT dream pass will demote it again. To shield a memory from immediate
+re-demotion, also update `last_recalled` to "now":
+
+```sql
+UPDATE memory_entries
+   SET is_longterm = 1,
+       last_recalled = datetime('now')
+ WHERE id IN ('abc-123', 'def-456');
+```
+
+Use with care: resetting `last_recalled` masks the real recall-age of
+the memory and delays legitimate future demotion. This is an operator
+decision, not an automatic follow-up.
+
+### Why this rollback is complete
+
+Demotion only modifies `is_longterm` (src/core/dreaming.rs:251-256).
+Setting `is_longterm = 1` is a full reversal at the row level — no
+`avg_relevance`, `valid_until`, or other field needs resetting beyond
+the optional `last_recalled` callout above.
+
 ## Metric interpretation guide
 
 All four new `DreamingResult` fields are visible in the human CLI line and
@@ -94,9 +205,12 @@ the structured JSON line on stderr.
 | `avg_effective_score_before` | Mean effective relevance across all `is_longterm = 1 AND last_recalled IS NOT NULL` memories, computed BEFORE any demotion write. | A slowly-falling series indicates the corpus is aging without fresh recall — a signal to examine why the AE pipeline isn't re-surfacing old-but-relevant memories. |
 | `avg_effective_score_after` | Mean across SURVIVORS after demotions write (live) OR identical to `_before` (dry-run — no writes occurred). | `(after - before)` quantifies how much the demotion raised the per-memory mean. A large positive delta means demotion is working as intended; a zero delta over time means nothing is ever being demoted. |
 
-The `breached_ids` array in the structured JSON line lists the specific
+The `breaches` array in the structured JSON line lists the specific
 memory IDs that fell below floor this pass — use this to inspect
-individual memories via `mengdie list --format json | grep <id>`.
+individual memories via `mengdie list --format json | grep <id>`. (Field
+name per plan 015 contract — `docs/schemas/dreaming_pass.json`. The name
+`breached_ids` in earlier revisions of this doc was a pre-plan-015
+inconsistency fixed during plan 016.)
 
 ## Data freshness: what "corpus age" means
 
