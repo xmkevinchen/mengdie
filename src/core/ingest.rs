@@ -84,10 +84,16 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // Note: these tests require the fastembed model (~90MB download on first run).
-    // They are ignored by default and run with `cargo test -- --ignored`.
+    // Note: these tests require the fastembed model (~90MB download on first run)
+    // AND a CPU with AVX2 (ORT prebuilt wheel baseline). Run with
+    // `cargo test -- --ignored`. The ckai-macmini.local CI runner
+    // (Ivy Bridge i7-3615QM, no AVX2) SIGILLs during ORT init, which
+    // was misattributed to `.cargo/config.toml` in plan 008 Step 3
+    // before discussion 020 found the actual root cause. See plan 014
+    // Step 4 for the AVX2 diagnosis trail.
 
     #[test]
+    #[ignore = "requires fastembed model download + AVX2-capable CPU; run with --ignored"]
     fn test_ingest_file_e2e() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("conclusion.md");
