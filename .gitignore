@@ -2,5 +2,6 @@
 .fastembed_cache/
 .claude/cross-family-status.json
 .claude/scheduled_tasks.lock
+.ae/
 .DS_Store
 **/.DS_Store
