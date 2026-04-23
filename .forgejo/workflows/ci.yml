@@ -1,7 +1,7 @@
 name: CI
 
-# Fires on push (all branches — tag refs excluded by `branches:` filter)
-# and on pull_request. Tag-release path is handled by release.yml.
+# Fires on push (all branches) and pull_request. Tag-release path is
+# handled by release.yml.
 on:
   push:
     branches:
@@ -12,27 +12,8 @@ on:
       - synchronize
       - reopened
 
-# NOTE (plan 008 Step 3, mengdie): CI is deliberately SCOPED DOWN to just
-# `cargo fmt --check` for now. Running `cargo clippy --all-targets` or
-# `cargo test` pulls in `ring` which triggers a cc build that fails on
-# this specific runner with `-isysroot /Applications/Xcode.app/.../MacOSX.sdk`.
-# Env dumps (runs 26–28) confirmed the job env is CLEAN — no CFLAGS,
-# SDKROOT, or *FLAGS variables. cc-rs rerun-if-env-changed watches only
-# linux-gnu-targeted env vars. Yet cc is invoked with the macOS SDK
-# path. The source is a genuine mystery; spending more than ~30 min
-# didn't narrow it down.
-#
-# Clippy + cargo test run on every commit via the local pre-commit
-# hook (`.githooks/pre-commit`) — that's the primary gate for solo-dev
-# workflow. This CI is the backstop for format drift, which is cheap
-# to check and bypasses the ring C build entirely.
-#
-# Revisit when: the CFLAGS leak source is identified (see
-# `docs/backlog/006-ci-runner-env-cleanup.md`) OR we have reason to
-# move the runner to a cleaner environment.
-
 jobs:
-  ci:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,3 +22,41 @@ jobs:
         run: |
           source ~/.cargo/env
           cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clippy
+        run: |
+          source ~/.cargo/env
+          cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: |
+          source ~/.cargo/env
+          cargo test
+
+  # Mechanical regression guard for discussion 020's `.cargo/config.toml`
+  # `[env]` scoping discipline. `cargo check` is compile-phase only (no
+  # link), so the Mac mini host-mode runner exercises the ring/cc-rs path
+  # without needing a Linux linker. If a future change reintroduces an
+  # unscoped CFLAGS/CPPFLAGS/SDKROOT in `.cargo/config.toml`, this job
+  # fails at the ring cc step exactly as plan 008 Step 3's failures did —
+  # catching the leak automatically. See
+  # docs/discussions/020-ci-runner-env-cleanup/conclusion.md.
+  cross-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cross-check (Linux target compile only)
+        run: |
+          source ~/.cargo/env
+          cargo check --target x86_64-unknown-linux-gnu
