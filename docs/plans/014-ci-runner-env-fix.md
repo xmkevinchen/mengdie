@@ -50,11 +50,10 @@ and `BL-ci-full-clippy-test` in one plan.
 Determine whether the unscoped `CFLAGS` line is needed for local macOS builds
 at all, then apply the preferred durable form regardless.
 
-- [ ] On Mac mini (local, not via CI): `mv .cargo/config.toml /tmp/mengdie-cargo-config.bak`
-- [ ] Run `cargo clean && cargo build` — record whether ring / libsqlite3-sys
-      / other cc-using crates build cleanly without the `[env]` block
-- [ ] Run `cargo test` — record pass/fail
-- [ ] Replace `.cargo/config.toml` with the per-target form below, regardless
+- [x] On Mac mini (local, not via CI): `mv .cargo/config.toml /tmp/mengdie-cargo-config.bak` (executed on M4 Max `ckai-m4x`, not Mac mini — same impact for local dev workflow)
+- [x] Run `cargo clean && cargo build` — **ring failed: `'TargetConditionals.h' file not found`** (validates need for CFLAGS)
+- [x] Run `cargo test` — not executed (build already failed; CFLAGS need confirmed)
+- [x] Replace `.cargo/config.toml` with the per-target form below, regardless
       of pre-verify outcome (Doodlestein regret: per-target is preferred as
       the durable shape; if the line turned out unneeded today, future
       dep upgrades will likely re-surface the need):
@@ -74,13 +73,9 @@ CFLAGS_x86_64_apple_darwin = "-isysroot /Applications/Xcode.app/Contents/Develop
 CFLAGS_aarch64_apple_darwin = "-isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
 ```
 
-- [ ] Verify no `-isysroot` leak to Linux target via **log inspection** (not exit code — bare `cargo build --target x86_64-unknown-linux-gnu` on macOS typically fails to LINK without a Linux linker, independent of this fix):
-      `cargo clean && cargo build --target x86_64-unknown-linux-gnu -vv 2>&1 | tee /tmp/mengdie-xbuild.log; rg -c 'running:.*isysroot' /tmp/mengdie-xbuild.log`
-      — expect zero occurrences of `running:.*isysroot` (cc invocation lines).
-      Link failure downstream is acceptable for this check; only the cc
-      invocation contents matter.
-- [ ] Run `cargo build && cargo test` locally on Mac mini (native macOS host, not cross-compile) — confirm still green
-- [ ] Commit the `.cargo/config.toml` change on a feature branch (not main — see Step 4 for why) with a message referencing discussion 020
+- [x] Verify no `-isysroot` leak to Linux target via **log inspection** — **result: 0 matches** in `/tmp/mengdie-xbuild.log` (build fails at link as expected; cc invocations clean)
+- [x] Run `cargo build && cargo test` locally — confirm still green — **228 passed, 5 ignored, 8.64s build**
+- [x] Commit the `.cargo/config.toml` change on feature branch `plan-014-ci-fix` — **commit 1780198**
 
 **Expected files**: `.cargo/config.toml`
 
@@ -102,13 +97,13 @@ CPPFLAGS LDFLAGS` blocks, `env: SDKROOT: ''` at job level, `env | sort`
 debug step, `CC_x86_64_unknown_linux_gnu` overrides). Use the existing
 fmt-only `ci.yml` as the base (44 lines) and add jobs.
 
-- [ ] Remove the inline "Revisit when: the CFLAGS leak source is identified"
+- [x] Remove the inline "Revisit when: the CFLAGS leak source is identified"
       comment block from `ci.yml` (lines 15–32 of current file) — obsolete
-- [ ] Add a `clippy` job running `cargo clippy --all-targets -- -D warnings`
+- [x] Add a `clippy` job running `cargo clippy --all-targets -- -D warnings`
       (matches plan 008's `-D warnings --all-targets` policy)
-- [ ] Add a `test` job running `cargo test` (on the host, no cross-compile
+- [x] Add a `test` job running `cargo test` (on the host, no cross-compile
       needed — the runner is macOS, binary runs there natively)
-- [ ] Add a `cross-check` job running `cargo check --target x86_64-unknown-linux-gnu`.
+- [x] Add a `cross-check` job running `cargo check --target x86_64-unknown-linux-gnu`.
       **Purpose**: mechanical enforcement of the `.cargo/config.toml`
       `[env]` scoping discipline from discussion 020. Compile-phase only
       (no link), so it works on the Mac mini without a Linux linker. If a
@@ -117,16 +112,16 @@ fmt-only `ci.yml` as the base (44 lines) and add jobs.
       catching the leak automatically rather than relying on developers
       remembering to grep. Covers the monitoring gap flagged by
       dependency-analyst.
-- [ ] All four jobs (fmt, clippy, test, cross-check) run on `push` to all
+- [x] All four jobs (fmt, clippy, test, cross-check) run on `push` to all
       branches and on `pull_request` (matches current `on:` trigger shape)
-- [ ] Each job uses `source ~/.cargo/env` before cargo invocations (plan
+- [x] Each job uses `source ~/.cargo/env` before cargo invocations (plan
       008 host-mode idiom; matches `release.yml`)
-- [ ] NO env manipulation (`CARGO_BUILD_TARGET`, `SDKROOT`, `CFLAGS`,
+- [x] NO env manipulation (`CARGO_BUILD_TARGET`, `SDKROOT`, `CFLAGS`,
       `CC_x86_64_unknown_linux_gnu`) — the `.cargo/config.toml` fix from
       Step 1 makes all of that unnecessary
-- [ ] NO debug/diagnostic steps (`env | sort`, `rustup show`, etc.) — the
+- [x] NO debug/diagnostic steps (`env | sort`, `rustup show`, etc.) — the
       workflow is production, not investigation
-- [ ] Run `.githooks/pre-commit` locally before committing to confirm the
+- [x] Run `.githooks/pre-commit` locally before committing to confirm the
       workflow file itself doesn't break fmt/clippy on any workflow-
       adjacent Rust file
 
@@ -138,11 +133,11 @@ The pre-Step-3 shape of `release.yml` shipped on 2026-04-17 has independent
 `test:` and `build-linux:` jobs with no `needs:` dependency — release
 binaries can ship before/while tests finish. 2-line fix.
 
-- [ ] Add `needs: [test]` to `build-linux:` job (preferred — simpler than
+- [x] Add `needs: [test]` to `build-linux:` job (preferred — simpler than
       inlining the gate; keeps the two jobs modular)
-- [ ] Verify that adding `needs:` doesn't break the existing `FORGEJO_TOKEN`
-      secret scoping or the release asset upload block
-- [ ] No other changes to `release.yml` — this is strictly the race fix
+- [x] Verify that adding `needs:` doesn't break the existing `FORGEJO_TOKEN`
+      secret scoping or the release asset upload block (verified: needs: sits on the job, not on env/steps; no interaction)
+- [x] No other changes to `release.yml` — this is strictly the race fix
 
 **Expected files**: `.forgejo/workflows/release.yml`
 

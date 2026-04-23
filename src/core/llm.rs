@@ -666,13 +666,35 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_elapses_and_reaps_child() {
-        // /usr/bin/yes writes forever, never reads stdin, never exits on its
-        // own. Our 100ms timeout must fire; kill_on_drop must reap the
-        // child — otherwise this test hangs the suite.
-        let p = direct_provider("/usr/bin/yes", Duration::from_millis(100));
+        // Cross-platform forever-loop: a shell script that ignores all
+        // argv and writes to stdout forever, never reads stdin, never
+        // exits on its own. Our 100ms timeout must fire; kill_on_drop
+        // must reap the child — otherwise this test hangs the suite.
+        //
+        // History: originally used `/usr/bin/yes` directly. macOS's yes
+        // is permissive (prints any arg string forever), but GNU yes on
+        // Linux strictly parses options and errors on `-p` (which
+        // `build_command` prepends as Claude CLI's --print flag). Test
+        // failed on Linux runners. See discussion 020 Step 4 + plan 014.
+        use std::os::unix::fs::PermissionsExt;
+        let script = std::env::temp_dir().join(format!(
+            "mengdie-forever-{}-{}.sh",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&script, "#!/bin/sh\nwhile :; do echo x; done\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let p = direct_provider(script.to_str().unwrap(), Duration::from_millis(100));
         let start = std::time::Instant::now();
         let err = p.complete("sys", "prompt").await.unwrap_err();
         let elapsed = start.elapsed();
+
+        let _ = std::fs::remove_file(&script);
+
         assert!(matches!(err, LlmError::Timeout(_)), "got {err:?}");
         assert!(
             elapsed < Duration::from_secs(2),

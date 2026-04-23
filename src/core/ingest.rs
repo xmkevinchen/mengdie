@@ -4,7 +4,7 @@ use anyhow::Context;
 
 use super::contradiction::Conflict;
 use super::db::{Db, NewMemory};
-use super::embeddings::{embedding_to_blob, Embedder, EmbeddingContext};
+use super::embeddings::{embedding_to_blob, Embed, EmbeddingContext};
 use super::parser::{parse_ae_file, ParsedDocument};
 
 /// Result of ingesting a document, including any detected contradictions.
@@ -16,7 +16,7 @@ pub struct IngestResult {
 /// Ingest a parsed document into the database with embedding.
 pub fn ingest_document(
     db: &Db,
-    embedder: &mut Embedder,
+    embedder: &mut dyn Embed,
     doc: &ParsedDocument,
     project_id: &str,
 ) -> anyhow::Result<IngestResult> {
@@ -71,7 +71,7 @@ pub fn ingest_document(
 /// Parse and ingest a file from disk.
 pub fn ingest_file(
     db: &Db,
-    embedder: &mut Embedder,
+    embedder: &mut dyn Embed,
     path: &Path,
     project_id: &str,
 ) -> anyhow::Result<IngestResult> {
@@ -84,8 +84,20 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // Note: these tests require the fastembed model (~90MB download on first run).
-    // They are ignored by default and run with `cargo test -- --ignored`.
+    /// Test double for `Embed` that returns a fixed 384-dim zero vector.
+    /// Lets ingestion pipeline tests run without loading fastembed's ORT
+    /// library (which requires AVX2 at init — see discussion 020).
+    struct MockEmbedder;
+
+    impl Embed for MockEmbedder {
+        fn embed_with_context(
+            &mut self,
+            _content: &str,
+            _ctx: &EmbeddingContext,
+        ) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0_f32; 384])
+        }
+    }
 
     #[test]
     fn test_ingest_file_e2e() {
@@ -99,7 +111,7 @@ mod tests {
         .unwrap();
 
         let db = Db::open_in_memory().unwrap();
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = MockEmbedder;
 
         let result = ingest_file(&db, &mut embedder, &path, "test-project").unwrap();
         let entry = db.get_memory(&result.entry_id).unwrap().unwrap();
