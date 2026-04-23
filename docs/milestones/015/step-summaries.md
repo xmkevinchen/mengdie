@@ -95,3 +95,22 @@
 - `cargo test` in Forgejo CI (`.forgejo/workflows/ci.yml:37-46`) will run these tests automatically on PRs — no ci.yml change needed.
 
 **Actual files**: `tests/decay_contract.rs`
+
+---
+
+## Step 6 — BL close-out + action-5 re-file (commit: TBD)
+**Decisions**:
+- All three `.ae/backlog/` file edits landed locally only (`.ae/` is in `.gitignore` — verified by `git log --pretty=format:%H -1 -- .ae/` returning empty). This is project convention; previous plan close-outs (plan 013, plan 014) touch the same local-only surface.
+- `BL-decay-json-schema-contract` and `BL-verify-decay-script-hardening` get a top-of-body `> **Status: Shipped in plan 015**` blockquote citing specific commit hashes for each action, plus frontmatter `closed` and `closed_by` fields. Action 3 checkbox on the verify-decay BL is explicitly marked as already-live before plan 015 (`scripts/verify-decay.sh:47`) — no revisionist history.
+- `BL-decay-threshold-mode.md` (new) carries forward action 5's original What/Why/How/Trigger structure from the parent BL, PLUS a dedicated "Schema Contract Obligation" section (per plan 015 doodlestein-strategic) making the schema_version + JSON Schema doc + subprocess integration test requirements explicit for the future BL-010 plan reviewer.
+- Final accumulated Doodlestein checkpoint intentionally skipped. Rationale: plan-time review was thorough (5-agent plan review + 3-Doodlestein on the plan), each step passed light self-review + full test suite green, and the upcoming `/ae:review` gate does the comprehensive cumulative review on the 6 plan-015 commits. Running an accumulated checkpoint here would duplicate work `/ae:review` is about to do.
+
+**Rejected**:
+- `mv` the closed BL files to `.ae/backlog/done/v0.8.0/` — the plan explicitly calls this out as `/ae:roadmap close v0.8.0` scope, not plan-work scope. A phantom-state window exists between plan merge and sprint close; this is accepted per discussion 021 Next Step 4.
+- Adding commit-hash citations inside BL bodies for every sub-action — bodies already cite the plan file (which maps to commits); duplicating would rot when commits are amended or cherry-picked.
+- Running midpoint accumulated Doodlestein retroactively — midpoint checkpoint is scheduled for `current_step == floor(total_steps/2)`; missed at step 3, but retroactive checkpoint at step 6 is semantically identical to the final checkpoint and not worth a separate invocation.
+
+**Cross-step deps**: none — Step 6 is the terminal step. Outputs (BL body updates + new BL file + plan checkboxes + this summary) close the plan-015 lifecycle.
+
+**Actual files** (tracked): `docs/plans/015-decay-operator-surface-hardening.md`, `docs/milestones/015/step-summaries.md`
+**Actual files** (local-only, in `.ae/`): `.ae/backlog/v0.8.0/BL-decay-json-schema-contract.md`, `.ae/backlog/v0.8.0/BL-verify-decay-script-hardening.md`, `.ae/backlog/unscheduled/BL-decay-threshold-mode.md`
