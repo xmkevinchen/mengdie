@@ -1,6 +1,18 @@
 use anyhow::Context;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
+/// Embedding behavior needed by the ingestion pipeline. Extracted as a
+/// trait so tests can substitute a mock without loading the fastembed
+/// ORT library (which SIGILLs on pre-AVX2 CPUs — see discussion 020 and
+/// plan 014). Production code uses `Embedder`, tests use `MockEmbedder`.
+pub trait Embed {
+    fn embed_with_context(
+        &mut self,
+        content: &str,
+        ctx: &EmbeddingContext,
+    ) -> anyhow::Result<Vec<f32>>;
+}
+
 /// Wrapper around fastembed for generating text embeddings.
 pub struct Embedder {
     model: TextEmbedding,
@@ -13,6 +25,17 @@ pub struct EmbeddingContext {
     pub entities: String,
     pub project_id: String,
     pub title: String,
+}
+
+impl Embed for Embedder {
+    fn embed_with_context(
+        &mut self,
+        content: &str,
+        ctx: &EmbeddingContext,
+    ) -> anyhow::Result<Vec<f32>> {
+        // Delegate to the inherent method below.
+        Embedder::embed_with_context(self, content, ctx)
+    }
 }
 
 impl Embedder {
