@@ -97,13 +97,13 @@ CPPFLAGS LDFLAGS` blocks, `env: SDKROOT: ''` at job level, `env | sort`
 debug step, `CC_x86_64_unknown_linux_gnu` overrides). Use the existing
 fmt-only `ci.yml` as the base (44 lines) and add jobs.
 
-- [ ] Remove the inline "Revisit when: the CFLAGS leak source is identified"
+- [x] Remove the inline "Revisit when: the CFLAGS leak source is identified"
       comment block from `ci.yml` (lines 15–32 of current file) — obsolete
-- [ ] Add a `clippy` job running `cargo clippy --all-targets -- -D warnings`
+- [x] Add a `clippy` job running `cargo clippy --all-targets -- -D warnings`
       (matches plan 008's `-D warnings --all-targets` policy)
-- [ ] Add a `test` job running `cargo test` (on the host, no cross-compile
+- [x] Add a `test` job running `cargo test` (on the host, no cross-compile
       needed — the runner is macOS, binary runs there natively)
-- [ ] Add a `cross-check` job running `cargo check --target x86_64-unknown-linux-gnu`.
+- [x] Add a `cross-check` job running `cargo check --target x86_64-unknown-linux-gnu`.
       **Purpose**: mechanical enforcement of the `.cargo/config.toml`
       `[env]` scoping discipline from discussion 020. Compile-phase only
       (no link), so it works on the Mac mini without a Linux linker. If a
@@ -112,16 +112,16 @@ fmt-only `ci.yml` as the base (44 lines) and add jobs.
       catching the leak automatically rather than relying on developers
       remembering to grep. Covers the monitoring gap flagged by
       dependency-analyst.
-- [ ] All four jobs (fmt, clippy, test, cross-check) run on `push` to all
+- [x] All four jobs (fmt, clippy, test, cross-check) run on `push` to all
       branches and on `pull_request` (matches current `on:` trigger shape)
-- [ ] Each job uses `source ~/.cargo/env` before cargo invocations (plan
+- [x] Each job uses `source ~/.cargo/env` before cargo invocations (plan
       008 host-mode idiom; matches `release.yml`)
-- [ ] NO env manipulation (`CARGO_BUILD_TARGET`, `SDKROOT`, `CFLAGS`,
+- [x] NO env manipulation (`CARGO_BUILD_TARGET`, `SDKROOT`, `CFLAGS`,
       `CC_x86_64_unknown_linux_gnu`) — the `.cargo/config.toml` fix from
       Step 1 makes all of that unnecessary
-- [ ] NO debug/diagnostic steps (`env | sort`, `rustup show`, etc.) — the
+- [x] NO debug/diagnostic steps (`env | sort`, `rustup show`, etc.) — the
       workflow is production, not investigation
-- [ ] Run `.githooks/pre-commit` locally before committing to confirm the
+- [x] Run `.githooks/pre-commit` locally before committing to confirm the
       workflow file itself doesn't break fmt/clippy on any workflow-
       adjacent Rust file
 
@@ -133,11 +133,11 @@ The pre-Step-3 shape of `release.yml` shipped on 2026-04-17 has independent
 `test:` and `build-linux:` jobs with no `needs:` dependency — release
 binaries can ship before/while tests finish. 2-line fix.
 
-- [ ] Add `needs: [test]` to `build-linux:` job (preferred — simpler than
+- [x] Add `needs: [test]` to `build-linux:` job (preferred — simpler than
       inlining the gate; keeps the two jobs modular)
-- [ ] Verify that adding `needs:` doesn't break the existing `FORGEJO_TOKEN`
-      secret scoping or the release asset upload block
-- [ ] No other changes to `release.yml` — this is strictly the race fix
+- [x] Verify that adding `needs:` doesn't break the existing `FORGEJO_TOKEN`
+      secret scoping or the release asset upload block (verified: needs: sits on the job, not on env/steps; no interaction)
+- [x] No other changes to `release.yml` — this is strictly the race fix
 
 **Expected files**: `.forgejo/workflows/release.yml`
 
