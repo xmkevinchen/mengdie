@@ -68,15 +68,15 @@ Expected files: `scripts/verify-decay.sh` (only)
 
 ### Step 5: CI integration test invoking verify-decay.sh (AC4, AC5) — BL-verify action 4
 
-- [ ] **Default: extend `tests/decay_contract.rs`** from Step 2 with a new `#[cfg(unix)]` module for the shell-script tests. Rationale: seed helpers, `CARGO_BIN_EXE_mengdie` lookup, and tempfile setup are all already in `decay_contract.rs`; a separate file would duplicate them. Only create `tests/verify_decay_script.rs` as a new file if the `#[cfg(unix)]` module makes `decay_contract.rs` exceed ~300 lines or if helper reuse proves awkward.
-- [ ] Test shells out to `scripts/verify-decay.sh --db-path <tmp-seeded-db>` with and without `--i-reviewed-each`, asserting the exit-code matrix:
+- [x] **Default: extend `tests/decay_contract.rs`** from Step 2 with a new `#[cfg(unix)]` module for the shell-script tests. Rationale: seed helpers, `CARGO_BIN_EXE_mengdie` lookup, and tempfile setup are all already in `decay_contract.rs`; a separate file would duplicate them. Only create `tests/verify_decay_script.rs` as a new file if the `#[cfg(unix)]` module makes `decay_contract.rs` exceed ~300 lines or if helper reuse proves awkward.
+- [x] Test shells out to `scripts/verify-decay.sh --db-path <tmp-seeded-db>` with and without `--i-reviewed-each`, asserting the exit-code matrix:
   - No breaches, no flag → exit 0
   - Breaches, no flag → exit 1
   - Breaches, `--i-reviewed-each` → exit 0
   - Unparseable JSON + `--i-reviewed-each` → exit 2 (regression guard for Step 3's silent-bypass fix — **this is why Step 5 depends on Step 3 as well as Step 4**; see dependency graph below)
-- [ ] For the "unparseable JSON" test case, place a shim `mengdie` executable earlier in `$PATH` than the real binary — shim exits 0 with empty stderr. Script must then see empty `JSON_LINE` and exit 2 per Step 3's hardening. **Record the exact shim construction in the test** so AC4's verification procedure is reproducible (fixes the `$PATH_HEAD` issue in AC4's sample).
-- [ ] Test must use `--db-path` for the seeded-DB cases (Step 4 dependency) to isolate from operator's real DB.
-- [ ] No changes to `.forgejo/workflows/ci.yml` required — the `cargo test` job at `.forgejo/workflows/ci.yml:37-46` already runs integration tests; this test lands inside that job automatically.
+- [x] For the "unparseable JSON" test case, place a shim `mengdie` executable earlier in `$PATH` than the real binary — shim exits 0 with empty stderr. Script must then see empty `JSON_LINE` and exit 2 per Step 3's hardening. **Record the exact shim construction in the test** so AC4's verification procedure is reproducible (fixes the `$PATH_HEAD` issue in AC4's sample).
+- [x] Test must use `--db-path` for the seeded-DB cases (Step 4 dependency) to isolate from operator's real DB.
+- [x] No changes to `.forgejo/workflows/ci.yml` required — the `cargo test` job at `.forgejo/workflows/ci.yml:37-46` already runs integration tests; this test lands inside that job automatically.
 
 Expected files: `tests/decay_contract.rs` (extended) OR `tests/verify_decay_script.rs` (new, fallback only)
 

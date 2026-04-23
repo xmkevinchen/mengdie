@@ -19,7 +19,7 @@
 
 ---
 
-## Step 2 — Stderr-JSON contract integration test (commit: TBD)
+## Step 2 — Stderr-JSON contract integration test (commit: 4199e32)
 **Decisions**:
 - Test lives at `tests/decay_contract.rs` as a standalone file. Step 5 will extend this same file with `#[cfg(unix)]` module for shell-script tests (plan default per architect C1).
 - Seeded fixture: one long-term memory at `avg_relevance = 0.5`, `last_recalled = now - 30d`. Produces `avg_effective = 0.5 × 2^(-30/60) ≈ 0.354` — non-zero, proves computation path (not null-guard).
@@ -38,7 +38,7 @@
 
 ---
 
-## Step 3 — Harden verify-decay.sh silent-bypass on unparseable JSON (commit: TBD)
+## Step 3 — Harden verify-decay.sh silent-bypass on unparseable JSON (commit: cb1d1d1)
 **Decisions**:
 - Unconditional `exit 2` when `JSON_LINE` is empty — no `--i-reviewed-each` bypass. Approval-gate invariant: operator cannot "approve" a breach list they cannot see.
 - Error messages branch on `[[ -s "$TMP_ERR" ]]` — `TMP_ERR` non-empty = schema regression hint; `TMP_ERR` empty = transient binary-crash hint with escalation note pointing at BL-010 daemon replacement.
@@ -57,7 +57,7 @@
 
 ---
 
-## Step 4 — Add --db-path flag to verify-decay.sh (commit: TBD)
+## Step 4 — Add --db-path flag to verify-decay.sh (commit: 68c6bb4)
 **Decisions**:
 - Arg-parse switched from simple `for arg in "$@"` loop to `while [[ $# -gt 0 ]] ... shift` pattern — needed because `--db-path` takes a positional value (two-word arg). Validation: `--db-path` without a subsequent value exits 2 with an explicit error.
 - Mengdie invocation splits into two branches (with vs without `--db-path`) rather than always passing `--db-path ""` — an empty path would override the binary's default, not preserve it. Explicit conditional is clearer and matches the Option semantics of the Rust-side flag (`Option<PathBuf>`).
@@ -73,3 +73,25 @@
 - Step 5's "unparseable JSON + --i-reviewed-each → exit 2" regression-guard case also depends on Step 3's exit-2 behavior being in place (already merged).
 
 **Actual files**: `scripts/verify-decay.sh`
+
+---
+
+## Step 5 — CI integration tests for verify-decay.sh (commit: TBD)
+**Decisions**:
+- Extended `tests/decay_contract.rs` with a `#[cfg(unix)]` mod `verify_decay_script` containing 4 new tests — the default path per plan + architect C1. File size still reasonable (~220 lines).
+- Path helpers: `CARGO_MANIFEST_DIR` resolves `scripts/verify-decay.sh`; `CARGO_BIN_EXE_mengdie` gives the debug binary, and `dirname` of that is prepended to PATH so the script's bare `mengdie` invocation resolves to the cargo-built debug binary.
+- Breach-triggering fixture: `avg=0.487, days_ago=78` produces `effective ≈ 0.1977` (< 0.20 floor → breach). Matches the `d78` fixture at `tests/e2e.rs:187`.
+- No-breach fixture: `avg=0.5, days_ago=15` produces `effective ≈ 0.421` (> 0.20 floor → no breach).
+- Shim test uses `tempfile::tempdir()` for the shim directory + `std::os::unix::fs::PermissionsExt::set_mode(0o755)` to chmod +x. Shim dir prepended to PATH **before** the real-binary dir so it shadows. This is the exact construction from the AC4 verification procedure, now codified in a test.
+- All 4 shell tests + the original contract test (5 total) pass in one `cargo test --test decay_contract` invocation — ~0.06s runtime.
+
+**Rejected**:
+- Creating `tests/verify_decay_script.rs` as a separate file — file would duplicate helpers; architect's "extend existing" default applies cleanly.
+- Using `assert_cmd` or `escargot` crates — project avoids new test-harness deps; std `Command` + `env!` is sufficient.
+- Test for the "binary exits non-zero" path (lines 56-60 of verify-decay.sh) — that's not an AC target; adding it would be scope creep. Existing path is unchanged by plan 015.
+
+**Cross-step deps**:
+- This is the last test-adding step. Step 6 (BL close-out) is pure documentation; no test changes.
+- `cargo test` in Forgejo CI (`.forgejo/workflows/ci.yml:37-46`) will run these tests automatically on PRs — no ci.yml change needed.
+
+**Actual files**: `tests/decay_contract.rs`
