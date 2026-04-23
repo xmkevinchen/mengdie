@@ -3,7 +3,7 @@ id: "014"
 title: "CI Runner Env Fix — remove `.cargo/config.toml` unscoped CFLAGS + expand ci.yml"
 type: plan
 created: 2026-04-22
-status: reviewed
+status: done
 discussion: "docs/discussions/020-ci-runner-env-cleanup/"
 ---
 
@@ -148,16 +148,16 @@ Trigger the runner to exercise the expanded workflow against the fixed
 fails on the expanded workflow, rollback is a branch delete, not a
 forced-push on main.
 
-- [ ] Steps 1–3 should be on a feature branch (e.g., `plan-014-ci-fix`);
+- [x] Steps 1–3 should be on a feature branch (e.g., `plan-014-ci-fix`);
       Step 4's trigger push is a push to that branch or a PR open.
       If the feature branch already has a meaningful diff from Steps 1–3,
       no additional trigger commit is needed — pushing the branch triggers
       CI. If not, add a trivial source-file comment touch (exercises
       pre-commit hook path too); revert that touch after verification.
-- [ ] Push (or open PR). Record the commit SHA that triggered the run
-- [ ] Wait for all four jobs (fmt, clippy, test, cross-check) to complete
-      on the Forgejo Actions runner
-- [ ] Pull each of the four raw logs and grep. Two executable paths:
+- [x] Push (or open PR). Record the commit SHA that triggered the run (final verified SHA: `827a578e`)
+- [x] Wait for all four jobs (fmt, clippy, test, cross-check) to complete
+      on the Forgejo Actions runner — 4th run all green
+- [x] Pull each of the four raw logs and grep. Two executable paths:
 
       **Path A — UI download** (simplest):
       1. In the Forgejo Actions run page for the triggering commit,
@@ -176,12 +176,14 @@ forced-push on main.
       in `release.yml` secrets). Path A is preferred for a one-off
       verification; don't build a script unless this gate is going to
       be repeated.
-- [ ] If any job fails (non-success status) or any `rg` returns non-zero:
+- [x] If any job fails (non-success status) or any `rg` returns non-zero:
       record the failure mode (compile error / clippy warn-as-error /
       test failure / cross-check failure / `-isysroot` appearance) and
-      execute Rollback. Do NOT proceed to Step 5
-- [ ] If all four jobs green AND all four `rg` checks return zero:
-      merge the feature branch to main
+      execute Rollback. Do NOT proceed to Step 5 — 3 prior CI runs were
+      red, each traced to a distinct issue in turn (yes-portability
+      then ORT/AVX2), fixed iteratively via 2 fixup commits + 1 refactor
+- [x] If all four jobs green AND all four `rg` checks return zero:
+      merge the feature branch to main — merged 2026-04-22 via --no-ff
 
 **Expected files**: (CI verification step — no code changes in this step
 unless a trigger commit is needed; the files actually changing are the
@@ -200,19 +202,19 @@ not silently pass on the native-macOS `test` job.
 
 **Dependency**: do NOT execute Step 5 until Step 4's three `rg -c 'running:.*isysroot'` checks all return zero AND all three CI jobs land green. If Step 4 fails, execute Rollback — do not close out.
 
-- [ ] Set `status: done` in `.ae/backlog/v0.8.0/006-ci-runner-env-cleanup.md`
+- [x] Set `status: done` in `.ae/backlog/v0.8.0/006-ci-runner-env-cleanup.md`
       frontmatter (with a one-line note in the body about the root cause
       being different than documented — `.cargo/config.toml` `[env]`, not
       a runner env issue)
-- [ ] Set `status: done` in `.ae/backlog/v0.8.0/BL-ci-full-clippy-test.md`
+- [x] Set `status: done` in `.ae/backlog/v0.8.0/BL-ci-full-clippy-test.md`
       frontmatter
-- [ ] Append two `close-scope-delta` lines to `.ae/roadmaps/v0.8.0.md`
+- [x] Append two `close-scope-delta` lines to `.ae/roadmaps/v0.8.0.md`
       `## Notes`:
       ```
       - 2026-04-XX | close-scope-delta | 006-ci-runner-env-cleanup | superseded — root cause was .cargo/config.toml [env] CFLAGS, not runner/act env leak; same fix closed both items
       - 2026-04-XX | close-scope-delta | BL-ci-full-clippy-test | plan 014 expanded ci.yml with clippy + cargo test jobs
       ```
-- [ ] Update `docs/discussions/020-ci-runner-env-cleanup/index.md` frontmatter
+- [x] Update `docs/discussions/020-ci-runner-env-cleanup/index.md` frontmatter
       `plan:` to `"docs/plans/014-ci-runner-env-fix.md"` and `pipeline.work: done`
 
 **Expected files**: `.ae/backlog/v0.8.0/006-ci-runner-env-cleanup.md`,

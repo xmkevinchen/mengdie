@@ -1,13 +1,13 @@
 ---
 id: "020"
 title: "CI Runner Env Cleanup — root-cause or bypass the `-isysroot` leak"
-status: active
+status: done
 created: 2026-04-22
 pipeline:
   analyze: done
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/014-ci-runner-env-fix.md"
 tags: [ci, forgejo, act, ring, cc-rs, runner-env, isysroot, cross-compile]
 ---
