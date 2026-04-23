@@ -54,3 +54,22 @@
 - `scripts/verify-decay.sh` line numbers shifted by 11 lines (header expansion + block replacement) — Step 4's arg-parse edits happen at lines 23-33 of the updated file; no conflict.
 
 **Actual files**: `scripts/verify-decay.sh`
+
+---
+
+## Step 4 — Add --db-path flag to verify-decay.sh (commit: TBD)
+**Decisions**:
+- Arg-parse switched from simple `for arg in "$@"` loop to `while [[ $# -gt 0 ]] ... shift` pattern — needed because `--db-path` takes a positional value (two-word arg). Validation: `--db-path` without a subsequent value exits 2 with an explicit error.
+- Mengdie invocation splits into two branches (with vs without `--db-path`) rather than always passing `--db-path ""` — an empty path would override the binary's default, not preserve it. Explicit conditional is clearer and matches the Option semantics of the Rust-side flag (`Option<PathBuf>`).
+- `--help` display range expanded from `2,20p` to `2,28p` to cover the approval-gate invariant block (Step 3 additions). Otherwise `--help` would hide critical invariant docs.
+- Default is empty string sentinel rather than expanded `~/.mengdie/db.sqlite` — letting the binary own its default avoids drift if the Rust-side default ever changes.
+
+**Rejected**:
+- Adding a new Rust flag on the binary side — architect M2 + dep-analyst #4 + challenger all converged on: the global `--db-path` already exists at cli.rs:17-18. Not duplicating.
+- Updating `docs/operations/dreaming-decay.md` — Gemini Q5 scope-creep flag; that edit is Plan B scope per discussion 021.
+
+**Cross-step deps**:
+- Step 5's CI test uses `--db-path <tempfile>` to isolate from operator's real DB — depends on this step.
+- Step 5's "unparseable JSON + --i-reviewed-each → exit 2" regression-guard case also depends on Step 3's exit-2 behavior being in place (already merged).
+
+**Actual files**: `scripts/verify-decay.sh`

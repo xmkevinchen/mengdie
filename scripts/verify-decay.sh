@@ -11,8 +11,11 @@
 # cleanliness; the approval gate is the durable signal).
 #
 # Usage:
-#   scripts/verify-decay.sh                       # report only; exits 1 if breaches > 0
-#   scripts/verify-decay.sh --i-reviewed-each     # explicit approval; exits 0 regardless
+#   scripts/verify-decay.sh                         # report only; exits 1 if breaches > 0
+#   scripts/verify-decay.sh --i-reviewed-each       # explicit approval; exits 0 regardless
+#   scripts/verify-decay.sh --db-path <path>        # use non-default DB (default: ~/.mengdie/db.sqlite)
+#   scripts/verify-decay.sh --db-path /tmp/test.db --i-reviewed-each
+#                                                   # both flags compose
 #
 # Approval-gate invariant (plan 015 Step 3):
 #   `--i-reviewed-each` requires a PARSEABLE structured-JSON line from
@@ -29,14 +32,23 @@
 set -euo pipefail
 
 APPROVED=0
-for arg in "$@"; do
-  case "$arg" in
-    --i-reviewed-each) APPROVED=1 ;;
+DB_PATH=""   # empty = let mengdie use its compiled-in default (~/.mengdie/db.sqlite)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --i-reviewed-each) APPROVED=1; shift ;;
+    --db-path)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --db-path requires a value" >&2
+        exit 2
+      fi
+      DB_PATH="$2"
+      shift 2
+      ;;
     --help|-h)
-      sed -n '2,20p' "$0"
+      sed -n '2,28p' "$0"
       exit 0
       ;;
-    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
@@ -52,12 +64,23 @@ TMP_ERR=$(mktemp)
 trap 'rm -f "$TMP_OUT" "$TMP_ERR"' EXIT
 
 # RUST_LOG=info ensures the tracing::info! structured line is emitted.
-RUST_LOG="${RUST_LOG:-info}" mengdie dream --decay-dry-run \
-  >"$TMP_OUT" 2>"$TMP_ERR" || {
-  echo "mengdie dream --decay-dry-run failed. stderr follows:" >&2
-  cat "$TMP_ERR" >&2
-  exit 2
-}
+# --db-path is a GLOBAL arg on mengdie (src/bin/cli.rs:17-18), must precede
+# the `dream` subcommand. Empty DB_PATH → let mengdie use its default.
+if [[ -n "$DB_PATH" ]]; then
+  RUST_LOG="${RUST_LOG:-info}" mengdie --db-path "$DB_PATH" dream --decay-dry-run \
+    >"$TMP_OUT" 2>"$TMP_ERR" || {
+    echo "mengdie dream --decay-dry-run failed. stderr follows:" >&2
+    cat "$TMP_ERR" >&2
+    exit 2
+  }
+else
+  RUST_LOG="${RUST_LOG:-info}" mengdie dream --decay-dry-run \
+    >"$TMP_OUT" 2>"$TMP_ERR" || {
+    echo "mengdie dream --decay-dry-run failed. stderr follows:" >&2
+    cat "$TMP_ERR" >&2
+    exit 2
+  }
+fi
 
 echo "=== Human output ==="
 cat "$TMP_OUT"

@@ -59,10 +59,10 @@ Expected files: `scripts/verify-decay.sh`
 
 ### Step 4: Add `--db-path <path>` flag to verify-decay.sh (AC5) — BL-verify action 2
 
-- [ ] Edit `scripts/verify-decay.sh` arg-parse loop (lines 23-33) to accept `--db-path <path>`; default remains `~/.mengdie/db.sqlite` when flag absent. Mirror the CLI's flag name exactly — the shell script's `--db-path` passes through to the binary's `--db-path` global arg.
-- [ ] Thread the path through to the `mengdie dream --decay-dry-run` invocation at line 47 using the **existing** `--db-path` global arg on the binary (confirmed present at `src/bin/cli.rs:17-18` as `#[arg(long, global = true)] db_path: Option<PathBuf>`; clap derives `--db-path` from the field name). **DO NOT add a second flag on the Rust side.** The invocation becomes: `mengdie --db-path "$DB_PATH" dream --decay-dry-run >"$TMP_OUT" 2>"$TMP_ERR"` (global arg before subcommand — position is flexible with `global = true`, but before-subcommand is the conventional placement in this repo's script).
-- [ ] Update script header comment block (lines 1-20) usage block to document the new `--db-path` flag and its default.
-- [ ] Do NOT edit `docs/operations/dreaming-decay.md` in this plan. The ops doc update for the `--db-path` addition (if any operator procedure actually changes) is Plan B / `BL-decay-ops-doc-polish` scope per discussion 021 conclusion. Plan A's doc surface is the script header comment only.
+- [x] Edit `scripts/verify-decay.sh` arg-parse loop (lines 23-33) to accept `--db-path <path>`; default remains `~/.mengdie/db.sqlite` when flag absent. Mirror the CLI's flag name exactly — the shell script's `--db-path` passes through to the binary's `--db-path` global arg.
+- [x] Thread the path through to the `mengdie dream --decay-dry-run` invocation at line 47 using the **existing** `--db-path` global arg on the binary (confirmed present at `src/bin/cli.rs:17-18` as `#[arg(long, global = true)] db_path: Option<PathBuf>`; clap derives `--db-path` from the field name). **DO NOT add a second flag on the Rust side.** The invocation becomes: `mengdie --db-path "$DB_PATH" dream --decay-dry-run >"$TMP_OUT" 2>"$TMP_ERR"` (global arg before subcommand — position is flexible with `global = true`, but before-subcommand is the conventional placement in this repo's script).
+- [x] Update script header comment block (lines 1-20) usage block to document the new `--db-path` flag and its default.
+- [x] Do NOT edit `docs/operations/dreaming-decay.md` in this plan. The ops doc update for the `--db-path` addition (if any operator procedure actually changes) is Plan B / `BL-decay-ops-doc-polish` scope per discussion 021 conclusion. Plan A's doc surface is the script header comment only.
 
 Expected files: `scripts/verify-decay.sh` (only)
 
