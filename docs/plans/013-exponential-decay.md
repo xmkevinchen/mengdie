@@ -190,6 +190,27 @@ Insert two memories with `avg_relevance = 0.50` and `avg_relevance = 0.50`, `is_
 - DB state identical to pre-call (verified by reading all 10 `is_longterm` flags post-call).
 
 ### AC5: CLI output — `demoted` visible, dry-run distinguished, structured line for machines
+
+> **Post-ship correction (2026-04-23, plan 016)**: the human-line regex
+> below tolerates `(?:→|->)` — both Unicode arrow and ASCII fallback —
+> but the actual emitter at `src/bin/cli.rs::format_dreaming_line` emits
+> only `→` (Unicode), and the AC5 regex tests at `src/bin/cli.rs:719-736`
+> assert only the Unicode form. The **rejected alternative** was **dual
+> emission** (emitting both `→` and `->` side-by-side, or a switchable
+> fallback), which would have required format-string + regex-test changes.
+> Unicode-only is an **accepted-risk decision**, not a validated-robustness
+> one — `→` (U+2192, three UTF-8 bytes) can be dropped by `LC_ALL=C`
+> shells, certain `awk`/`sed` locales, or ASCII-normalizing log pipelines.
+> No such incident has been observed, but the risk is not refuted by
+> "no operator-reported issues" (n=1 operator). Reversal path if the
+> pipe-eating scenario materializes: update `format_dreaming_line` to
+> emit both arrows, update the AC5 regex tests to `(?:→|->)`, remove
+> this correction note. Scoped ~10-line diff. Until then, **the test at
+> `src/bin/cli.rs:723` is the source of truth**; this note closes the
+> documentation loop on the AC5 vs. code mismatch. See
+> `docs/plans/016-decay-ops-doc-polish.md` "Decision on action 2,
+> accepted risk" and `.ae/backlog/v0.8.0/BL-decay-ops-doc-polish.md`.
+
 **Human-readable line** (loose regex — tolerates whitespace + decimal-place variation so safe operator-output improvements don't break the AC, per codex blocker):
 - Live: matches `Dreaming pass:\s+\d+\s+promoted,\s+\d+\s+demoted\s+\(\d+\s+floor breaches,\s+avg effective\s+0?\.\d+\s*(?:→|->)\s+0?\.\d+\)`.
 - Dry-run: same shape but `\d+\s+would-demote\s+\(DRY RUN\)` replaces `\d+ demoted`.
