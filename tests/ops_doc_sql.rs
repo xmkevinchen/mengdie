@@ -39,6 +39,16 @@ fn extract_sql_between_markers(doc: &str, begin: &str, end: &str) -> String {
     );
     let section = &doc[begin_pos..end_pos];
 
+    // Single-block invariant: if a future edit introduces a SECOND ```sql
+    // fence between the markers, our "first block" heuristic would silently
+    // pick the wrong one. Fail loudly instead so the doc author notices.
+    let sql_fence_count = section.matches("```sql").count();
+    assert_eq!(
+        sql_fence_count, 1,
+        "expected exactly one ```sql fence between {begin} and {end}, found {sql_fence_count}. \
+         The test-extraction logic assumes a single block; split the doc or update the test."
+    );
+
     // Find the first ```sql fence within the section.
     let sql_start = section
         .find("```sql")

@@ -41,11 +41,14 @@ Before the first live `mengdie dream` after BL-008 lands, an operator MUST:
    to a live pass until the cause is understood.
 
    To compute the threshold without mental math, run the snippet below.
-   It queries the **decay-eligible** long-term count (the filter exactly
-   matches the decay pass's query at `src/core/dreaming.rs:163-167` —
-   `is_longterm = 1 AND valid_until IS NULL AND last_recalled IS NOT NULL`;
-   rows with NULL `last_recalled` are permanently immune to demotion and
-   are correctly excluded from the denominator).
+   It queries the **decay-eligible** long-term count (the three primary
+   predicates — `is_longterm = 1 AND valid_until IS NULL AND last_recalled
+   IS NOT NULL` — match the decay pass's static filter at
+   `src/core/dreaming.rs:163-167`; the pass additionally appends an
+   optional project-scope predicate when `mengdie dream --project <id>` is
+   used, which the default-scope operator procedure does not invoke).
+   Rows with NULL `last_recalled` are permanently immune to demotion and
+   are correctly excluded from the denominator.
 
    <!-- threshold-snippet:begin -->
    ```sql
@@ -66,6 +69,13 @@ Before the first live `mengdie dream` after BL-008 lands, an operator MUST:
         WHERE is_longterm = 1
           AND valid_until IS NULL
           AND last_recalled IS NOT NULL;")
+   # Guard: bail with a clear message if sqlite3 returned non-numeric output
+   # (e.g., "file is not a database" leaks into $count otherwise and the next
+   # line fails with a cryptic "invalid arithmetic operator" error).
+   if ! [[ $count =~ ^[0-9]+$ ]]; then
+     echo "error: sqlite3 returned non-numeric output: '$count'" >&2
+     exit 1
+   fi
    threshold=$(( count / 10 > 10 ? count / 10 : 10 ))
    echo "long_term_eligible=${count}, threshold=${threshold}"
    # Compare: HALT if decay_floor_breaches > $threshold.
@@ -92,12 +102,17 @@ list as a just-recalled piece of context; a BL-010 threshold-alarm future
 triggers on a spike during a known-burst recall pattern.
 
 **Required input**: the `breaches` array from the structured-JSON stderr
-line of the offending pass. The field name in the JSON contract is
-`breaches` (not `breached_ids` — that was a pre-plan-015 documentation
-name; see `docs/schemas/dreaming_pass.json` for the current contract).
-Capture the JSON line at run time (redirect stderr to a file or copy
-from the terminal scrollback) — without it, exact row-level rollback is
-constrained.
+line of the offending pass (see `docs/schemas/dreaming_pass.json` for
+the current JSON contract). Capture the JSON line at run time (redirect
+stderr to a file or copy from the terminal scrollback) — without it,
+exact row-level rollback is constrained.
+
+**Trusted source only**: the `breaches` array must come from a real
+`mengdie dream` invocation, NOT from a hand-edited or externally-supplied
+JSON. IDs in the array are Rust-populated UUIDs emitted by the binary's
+decay pass — the rollback SQL below does NOT defensively escape the
+IDs before splicing them into the SQL string. That is safe IFF the
+source is the binary's own output. Do not bypass this trust assumption.
 
 ### If the breach list is LOST (no captured stderr, no log file)
 
@@ -138,22 +153,32 @@ into SQL, SQLite parses the identifiers as column names, finds none,
 and the UPDATE silently matches zero rows. Convert with:
 
 ```bash
-# Extract breaches, convert double→single quotes for SQL IN clause.
-jq -r '.breaches | map("'" + . + "'") | join(", ")' < dream-pass.json
+# Extract breaches, wrap each in single quotes via jq's @sh filter
+# (idiomatic — jq handles the quoting correctly without bash sandwich tricks).
+jq -r '.breaches | map(@sh) | join(", ")' < dream-pass.json
 # or without jq:
 # echo '...' | sed -n 's/.*"breaches":\[\([^]]*\)\].*/\1/p' | tr '"' "'"
+# Expected output for breaches=["abc-123","def-456"]:
+#   'abc-123', 'def-456'
 ```
 
-Then paste the result into the UPDATE template:
+Then paste the result into the UPDATE template. After running, inspect
+`SELECT changes();` — if it returns 0 you either forgot to substitute
+the example IDs or the IDs aren't in the corpus. A successful rollback
+of N memories should print `N`:
 
 <!-- rollback-snippet:begin -->
+<!-- Reserved: future automation may validate this UPDATE template against a fixture DB — see plan 016 Step 4 deferred bullet. -->
 ```sql
 -- Re-promote memories by ID. Replace the list below with the
 -- jq-converted, single-quoted, comma-separated breach IDs from the
--- captured dream-pass JSON.
+-- captured dream-pass JSON. Running the template LITERALLY against the
+-- example IDs 'abc-123', 'def-456' will match zero rows silently —
+-- use `SELECT changes();` after the UPDATE to catch the no-op.
 UPDATE memory_entries
    SET is_longterm = 1
  WHERE id IN ('abc-123', 'def-456');
+SELECT changes();  -- expected: number of memories re-promoted (NOT 0)
 ```
 <!-- rollback-snippet:end -->
 
@@ -207,10 +232,7 @@ the structured JSON line on stderr.
 
 The `breaches` array in the structured JSON line lists the specific
 memory IDs that fell below floor this pass — use this to inspect
-individual memories via `mengdie list --format json | grep <id>`. (Field
-name per plan 015 contract — `docs/schemas/dreaming_pass.json`. The name
-`breached_ids` in earlier revisions of this doc was a pre-plan-015
-inconsistency fixed during plan 016.)
+individual memories via `mengdie list --format json | grep <id>`.
 
 ## Data freshness: what "corpus age" means
 
