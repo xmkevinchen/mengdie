@@ -209,6 +209,7 @@ fn format_structured_json(
     decay_dry_run: bool,
 ) -> String {
     let v = serde_json::json!({
+        "schema_version": 1,
         "event": "dreaming_pass",
         "promoted": result.promoted,
         "demoted": result.demoted,
@@ -752,6 +753,7 @@ mod tests {
         let line = format_structured_json(&r, true);
         // Must parse as valid JSON
         let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(v["schema_version"], 1);
         assert_eq!(v["event"], "dreaming_pass");
         assert_eq!(v["promoted"], 1);
         assert_eq!(v["demoted"], 2);
@@ -760,6 +762,20 @@ mod tests {
         assert!(v["avg_effective_before"].is_number());
         assert!(v["avg_effective_after"].is_number());
         assert_eq!(v["breaches"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn format_structured_json_emits_schema_version_1() {
+        // Plan 015: schema_version locks the dreaming_pass contract. Any bump
+        // requires coordinated update of docs/schemas/dreaming_pass.json and
+        // scripts/verify-decay.sh field whitelist.
+        let r = sample_result(0, 0, 0.0, 0.0);
+        let line = format_structured_json(&r, false);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["schema_version"], 1,
+            "schema_version must be 1 (plan 015)"
+        );
     }
 
     #[test]

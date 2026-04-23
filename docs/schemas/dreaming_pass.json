@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mengdie/mengdie/docs/schemas/dreaming_pass.json",
+  "title": "dreaming_pass event (stderr structured JSON)",
+  "description": "Machine-readable contract for the single-line JSON event emitted on stderr by `mengdie dream` (decay-pass output). Producer: `src/bin/cli.rs::format_structured_json`. Consumers: `scripts/verify-decay.sh` (operator approval gate until BL-010 daemon lands), and any future daemon/analytics tooling. Locked by plan 015.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event",
+    "promoted",
+    "demoted",
+    "decay_floor_breaches",
+    "avg_effective_before",
+    "avg_effective_after",
+    "dry_run",
+    "breaches"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Contract version. See Bump Rules below."
+    },
+    "event": {
+      "type": "string",
+      "const": "dreaming_pass",
+      "description": "Event discriminator. Fixed string — do NOT rename without bumping schema_version."
+    },
+    "promoted": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Short-term memories promoted to long-term in this pass."
+    },
+    "demoted": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Long-term memories demoted (live mode); always 0 in --decay-dry-run mode."
+    },
+    "decay_floor_breaches": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of long-term memories whose effective_relevance fell below the decay floor (0.20). Equals `breaches.length`."
+    },
+    "avg_effective_before": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Mean effective_relevance across long-term memories BEFORE the decay pass. 0.0 if corpus contains no long-term rows with non-null last_recalled (null-guard at src/core/dreaming.rs:203-206)."
+    },
+    "avg_effective_after": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Mean effective_relevance AFTER the decay pass (identical to before in --decay-dry-run)."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "True when invoked via --decay-dry-run; operator's first-run procedure always sets this."
+    },
+    "breaches": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "Memory ID (UUID v4) of a breached long-term memory."
+      },
+      "description": "IDs of breached memories. Length invariant: equals decay_floor_breaches."
+    }
+  },
+  "$comment": "BUMP RULES (plan 015): Bump `schema_version` when (a) a required field is removed, (b) a field is renamed, or (c) the semantics/units of an existing field change. Do NOT bump for strictly-additive OPTIONAL fields — those remain at v1 and consumers ignore unknown keys. A bump is a coordinated change: this schema doc + `src/bin/cli.rs::format_structured_json` + `scripts/verify-decay.sh` field whitelist must all land in the same plan. Rationale: consumers (verify-decay.sh, future BL-010 daemon) tolerate additive growth but break on rename/remove/semantic drift. See docs/discussions/021-v0.8.0-bl-dependencies/conclusion.md and plan 015 for context."
+}
