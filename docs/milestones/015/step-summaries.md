@@ -37,3 +37,20 @@
 **Actual files**: `tests/decay_contract.rs`, `docs/plans/015-decay-operator-surface-hardening.md`, `docs/milestones/015/step-summaries.md`
 
 ---
+
+## Step 3 — Harden verify-decay.sh silent-bypass on unparseable JSON (commit: TBD)
+**Decisions**:
+- Unconditional `exit 2` when `JSON_LINE` is empty — no `--i-reviewed-each` bypass. Approval-gate invariant: operator cannot "approve" a breach list they cannot see.
+- Error messages branch on `[[ -s "$TMP_ERR" ]]` — `TMP_ERR` non-empty = schema regression hint; `TMP_ERR` empty = transient binary-crash hint with escalation note pointing at BL-010 daemon replacement.
+- Header comment block documents the invariant explicitly (script lines 18-25 new text) so future maintainers don't remove the exit-2 path thinking it's too strict.
+- Manual verification via `/tmp` mengdie shim confirmed both failure paths emit distinct messages and exit code 2 (not 0).
+
+**Rejected**:
+- Granular exit codes (exit 3 for "binary bad JSON" vs exit 2 for "operator error") per Gemini Q4 — overkill for solo-dev operator tool; error messages already distinguish. 3 codes stays sufficient.
+- Keeping the `--i-reviewed-each` bypass as a "force" option with a warning — defeats the whole point of the approval gate. If operator NEEDS to bypass on a transient failure, the right recourse is re-run, not silent approval.
+
+**Cross-step deps**:
+- Step 5's CI test must assert the exit-2 exit code for both shim variants (empty stderr vs stderr-with-no-JSON). The manual verification commands from this step's testing are the direct template.
+- `scripts/verify-decay.sh` line numbers shifted by 11 lines (header expansion + block replacement) — Step 4's arg-parse edits happen at lines 23-33 of the updated file; no conflict.
+
+**Actual files**: `scripts/verify-decay.sh`

@@ -14,10 +14,18 @@
 #   scripts/verify-decay.sh                       # report only; exits 1 if breaches > 0
 #   scripts/verify-decay.sh --i-reviewed-each     # explicit approval; exits 0 regardless
 #
+# Approval-gate invariant (plan 015 Step 3):
+#   `--i-reviewed-each` requires a PARSEABLE structured-JSON line from
+#   `mengdie`. If the binary emits no JSON (crash before flush, format
+#   regression, etc.), the script exits 2 REGARDLESS of --i-reviewed-each —
+#   operator cannot "approve" a breach list they cannot see. A repeated
+#   exit 2 with the "transient failure" message is an escalation signal,
+#   not a script bug.
+#
 # When the launchd daemon (BL-010 in Phase 2.2) takes over Dreaming,
 # this script's interactive gate is replaced by a threshold alarm on
 # `decay_floor_breaches` in the structured-JSON output. See plan 013's
-# "Plan-level revisit trigger" section.
+# "Plan-level revisit trigger" section and BL-decay-threshold-mode.
 set -euo pipefail
 
 APPROVED=0
@@ -62,14 +70,26 @@ cat "$TMP_OUT"
 JSON_LINE=$(grep -E '^\{.*"event":"dreaming_pass".*\}$' "$TMP_ERR" | head -n1 || true)
 
 if [[ -z "$JSON_LINE" ]]; then
-  echo "WARNING: could not parse structured JSON line from stderr. Falling back to human line only." >&2
+  # Plan 015 Step 3: no --i-reviewed-each bypass here. An operator cannot
+  # approve a breach list they cannot see; the silent exit-0 path has been
+  # removed. Distinguish two failure causes via $TMP_ERR's presence:
+  if [[ -s "$TMP_ERR" ]]; then
+    # Binary emitted SOMETHING but no dreaming_pass line — format regression.
+    echo "ERROR: mengdie emitted stderr but no dreaming_pass JSON line." >&2
+    echo "       This is likely a schema contract regression — verify the mengdie" >&2
+    echo "       binary's output format against docs/schemas/dreaming_pass.json." >&2
+  else
+    # Binary exited 0 with empty stderr — it died before emitting the event
+    # (OOM, SIGPIPE during flush, disk-full, etc.). Transient, not a script bug.
+    echo "ERROR: mengdie produced no stderr output." >&2
+    echo "       Binary may have crashed before emitting the dreaming_pass event." >&2
+    echo "       Retry the script; if it persists, escalate (BL-010 daemon will" >&2
+    echo "       replace this interactive gate with a threshold alarm)." >&2
+  fi
   echo "Raw stderr:" >&2
   cat "$TMP_ERR" >&2
-  if [[ $APPROVED -eq 1 ]]; then
-    echo "(Proceeding anyway: --i-reviewed-each was passed.)" >&2
-    exit 0
-  fi
-  exit 1
+  # Approval-gate invariant: exit 2 regardless of --i-reviewed-each.
+  exit 2
 fi
 
 # Parse with jq if available; fallback to crude grep.
