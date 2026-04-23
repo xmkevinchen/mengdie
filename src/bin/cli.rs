@@ -327,11 +327,9 @@ async fn cmd_dream(
     // Plan 012 / BL-synthesis-cli-skip-metric fix. Format string shape
     // stays "{S_all} LLM-skipped ({S_pair}/{P} pair-clusters = {X}%)" —
     // if a downstream parser depends on this shape, update this comment.
-    let pair_skip_pct = if syn.pair_clusters_processed == 0 {
-        0
-    } else {
-        (syn.pair_clusters_skipped * 100) / syn.pair_clusters_processed
-    };
+    let pair_skip_pct = (syn.pair_clusters_skipped * 100)
+        .checked_div(syn.pair_clusters_processed)
+        .unwrap_or(0);
     println!(
         "Synthesis: {} syntheses created from {} clusters \
          ({} residuals skipped, {} LLM-skipped ({}/{} pair-clusters = {}%), \
