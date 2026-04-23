@@ -3,7 +3,7 @@ id: "016"
 title: "Decay ops doc polish — actionable threshold, rollback, AC5 correction note"
 type: plan
 created: 2026-04-23
-status: reviewed
+status: done
 discussion: "docs/discussions/021-v0.8.0-bl-dependencies/"
 ---
 
