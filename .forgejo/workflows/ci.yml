@@ -43,13 +43,19 @@ jobs:
           source ~/.cargo/env
           cargo test
 
-  # Mechanical regression guard for discussion 020's `.cargo/config.toml`
-  # `[env]` scoping discipline. `cargo check` is compile-phase only (no
-  # link), so the Mac mini host-mode runner exercises the ring/cc-rs path
-  # without needing a Linux linker. If a future change reintroduces an
-  # unscoped CFLAGS/CPPFLAGS/SDKROOT in `.cargo/config.toml`, this job
-  # fails at the ring cc step exactly as plan 008 Step 3's failures did —
-  # catching the leak automatically. See
+  # Cross-target compile check. `cargo check` with `--target` is
+  # compile-phase only (no link), so this runs without a Linux linker.
+  #
+  # Value on the CURRENT runner (ckai-macmini.local, Linux x86_64):
+  # because host == target, this is essentially equivalent to plain
+  # `cargo check`. No extra regression guard today.
+  #
+  # Value if the runner EVER moves to macOS host: this job catches any
+  # reintroduction of an unscoped `[env] CFLAGS` in `.cargo/config.toml`
+  # (the discussion-020 root cause class) because the Linux target would
+  # receive the macOS-flavored flag. On macOS host it's a real guard;
+  # on Linux host it's redundant-but-cheap. Keeping it so the guard is
+  # already in place if the runner topology shifts. See
   # docs/discussions/020-ci-runner-env-cleanup/conclusion.md.
   cross-check:
     runs-on: ubuntu-latest

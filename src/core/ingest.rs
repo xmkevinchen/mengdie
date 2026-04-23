@@ -84,23 +84,44 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// Test double for `Embed` that returns a fixed 384-dim zero vector.
-    /// Lets ingestion pipeline tests run without loading fastembed's ORT
-    /// library (which requires AVX2 at init — see discussion 020).
+    /// Test double for `Embed` that returns a deterministic 384-dim
+    /// non-zero vector derived from the content's bytes. Lets ingestion
+    /// pipeline tests run without loading fastembed's ORT library (which
+    /// requires AVX2 at init — see discussion 020).
+    ///
+    /// Uses non-zero values so downstream cosine similarity paths
+    /// (contradiction detection, vector search) exercise real math
+    /// rather than short-circuiting on zero-norm guards — a zero vector
+    /// would silently disable half the ingestion logic under test.
     struct MockEmbedder;
 
     impl Embed for MockEmbedder {
         fn embed_with_context(
             &mut self,
-            _content: &str,
+            content: &str,
             _ctx: &EmbeddingContext,
         ) -> anyhow::Result<Vec<f32>> {
-            Ok(vec![0.0_f32; 384])
+            // Deterministic content-derived embedding: cycle content bytes
+            // across 384 dimensions, normalize to unit-length-ish range.
+            // Collisions between different contents are OK for tests that
+            // only check presence + dim; tests that care about distinct
+            // vectors use this shape to get reproducible pairwise diffs.
+            let bytes = content.as_bytes();
+            if bytes.is_empty() {
+                return Ok(vec![0.5_f32; 384]);
+            }
+            let vec: Vec<f32> = (0..384)
+                .map(|i| {
+                    let b = bytes[i % bytes.len()] as f32;
+                    (b / 255.0) - 0.5
+                })
+                .collect();
+            Ok(vec)
         }
     }
 
     #[test]
-    fn test_ingest_file_e2e() {
+    fn test_ingest_file_pipeline_smoke() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("conclusion.md");
         let mut f = std::fs::File::create(&path).unwrap();

@@ -5,6 +5,15 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 /// trait so tests can substitute a mock without loading the fastembed
 /// ORT library (which SIGILLs on pre-AVX2 CPUs — see discussion 020 and
 /// plan 014). Production code uses `Embedder`, tests use `MockEmbedder`.
+///
+/// NOTE (plan 014 /ae:review — architecture-reviewer P2#2, challenger
+/// #2): the trait impl and the inherent `Embedder::embed_with_context`
+/// are identical by construction — the trait delegates to the inherent
+/// method. Do NOT add logic (caching, retries, etc.) to one side
+/// without mirroring it on the other; divergence would silently produce
+/// inconsistent behavior between test-seam callers (`&mut dyn Embed`)
+/// and direct callers (`&mut Embedder`). If that happens, either mirror
+/// or collapse the inherent method into the trait impl.
 pub trait Embed {
     fn embed_with_context(
         &mut self,
