@@ -56,3 +56,25 @@
 
 **Actual files** (tracked): `docs/plans/013-exponential-decay.md`
 **Actual files** (local-only, in `.ae/`): `.ae/backlog/v0.8.0/BL-decay-ops-doc-polish.md`
+
+---
+
+## Step 4 — Doc-SQL verification test (commit: TBD)
+**Decisions**:
+- `tests/ops_doc_sql.rs` has 2 tests: `threshold_snippet_contains_required_filter_triple` (structural — literal-substring checks on is_longterm/valid_until/last_recalled) and `threshold_snippet_counts_only_decay_eligible_rows` (semantic — runs the extracted SQL against a 3-row fixture DB and asserts count == 1).
+- SQL extraction via two-step parse: find the marker pair, then find the first ```sql fence within the marker block and extract content up to the closing ```. Literal-string approach is simpler than a markdown parser dep and robust enough for the locked-marker invariant.
+- Fixture design: 3 rows with DISTINCT content (to avoid the UPSERT collapse via `insert_memory`'s `ON CONFLICT(project_id, content_hash)` — discovered during test implementation, see Step 4 Rejected below). Row 1 = decay-eligible; row 2 = NULL-`last_recalled` immune; row 3 = invalidated (`valid_until` set).
+- Debug dump of all 3 rows included in the panic message so future regressions pin the failure to a specific row/column rather than "count was 0".
+- NO `run_dreaming_with_config` cross-check per plan 016 Doodlestein regret — docs test stays doc-facing, avoids coupling to internal DreamingResult field names that are likely to evolve in Phase 2.
+- Rollback-snippet parallel test deferred — non-blocking per plan step-4 bullet (30-40 LOC of substitution-helper plumbing for marginal coverage; the threshold-snippet test catches the P1 class; rollback template substitution is exercised at any real call site).
+
+**Rejected**:
+- Running three insert calls with identical `content: "seed"` — UPSERTs on (project_id, content_hash) collapsed all three into one row. Debug dump caught the issue; fix was per-row unique content derived from title.
+- A markdown parser dep (pulldown-cmark) for SQL extraction — overkill for our locked-marker invariant; plain string slicing is sufficient and reduces test footprint.
+- Calling `Db::open` and re-using its connection for the UPDATE — separate rusqlite connection mirrors the `tests/decay_contract.rs::verify_decay_script::seed_longterm` pattern that already works. SQLite handles multiple connections to the same file.
+
+**Cross-step deps**:
+- This is the terminal step. No further cross-step deps.
+- Test pins the marker names (`threshold-snippet:begin/end`) as the CI-enforced contract — any doc edit that renames the markers must also update the test file.
+
+**Actual files**: `tests/ops_doc_sql.rs`
