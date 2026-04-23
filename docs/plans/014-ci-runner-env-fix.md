@@ -50,11 +50,10 @@ and `BL-ci-full-clippy-test` in one plan.
 Determine whether the unscoped `CFLAGS` line is needed for local macOS builds
 at all, then apply the preferred durable form regardless.
 
-- [ ] On Mac mini (local, not via CI): `mv .cargo/config.toml /tmp/mengdie-cargo-config.bak`
-- [ ] Run `cargo clean && cargo build` — record whether ring / libsqlite3-sys
-      / other cc-using crates build cleanly without the `[env]` block
-- [ ] Run `cargo test` — record pass/fail
-- [ ] Replace `.cargo/config.toml` with the per-target form below, regardless
+- [x] On Mac mini (local, not via CI): `mv .cargo/config.toml /tmp/mengdie-cargo-config.bak` (executed on M4 Max `ckai-m4x`, not Mac mini — same impact for local dev workflow)
+- [x] Run `cargo clean && cargo build` — **ring failed: `'TargetConditionals.h' file not found`** (validates need for CFLAGS)
+- [x] Run `cargo test` — not executed (build already failed; CFLAGS need confirmed)
+- [x] Replace `.cargo/config.toml` with the per-target form below, regardless
       of pre-verify outcome (Doodlestein regret: per-target is preferred as
       the durable shape; if the line turned out unneeded today, future
       dep upgrades will likely re-surface the need):
@@ -74,13 +73,9 @@ CFLAGS_x86_64_apple_darwin = "-isysroot /Applications/Xcode.app/Contents/Develop
 CFLAGS_aarch64_apple_darwin = "-isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
 ```
 
-- [ ] Verify no `-isysroot` leak to Linux target via **log inspection** (not exit code — bare `cargo build --target x86_64-unknown-linux-gnu` on macOS typically fails to LINK without a Linux linker, independent of this fix):
-      `cargo clean && cargo build --target x86_64-unknown-linux-gnu -vv 2>&1 | tee /tmp/mengdie-xbuild.log; rg -c 'running:.*isysroot' /tmp/mengdie-xbuild.log`
-      — expect zero occurrences of `running:.*isysroot` (cc invocation lines).
-      Link failure downstream is acceptable for this check; only the cc
-      invocation contents matter.
-- [ ] Run `cargo build && cargo test` locally on Mac mini (native macOS host, not cross-compile) — confirm still green
-- [ ] Commit the `.cargo/config.toml` change on a feature branch (not main — see Step 4 for why) with a message referencing discussion 020
+- [x] Verify no `-isysroot` leak to Linux target via **log inspection** — **result: 0 matches** in `/tmp/mengdie-xbuild.log` (build fails at link as expected; cc invocations clean)
+- [x] Run `cargo build && cargo test` locally — confirm still green — **228 passed, 5 ignored, 8.64s build**
+- [x] Commit the `.cargo/config.toml` change on feature branch `plan-014-ci-fix` — **commit 1780198**
 
 **Expected files**: `.cargo/config.toml`
 
