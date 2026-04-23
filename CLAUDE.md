@@ -166,6 +166,15 @@ Key notes:
 The test: **does the finding contain "but"?** If yes → backlog. If no → done.
 Backlog items always have: what to do, why it matters, when to revisit (trigger).
 
+**Sprint-plan discipline** (from discussion 021 Topic 4): before running
+`/ae:roadmap plan v<ver>`, skim candidate BL bodies for explicit "not now" /
+"filed for trigger" language. `/ae:roadmap remove` such items before
+sprint-commit. Avoids repeating the v0.8.0 pattern where 2 defer-trigger
+BLs got committed and had to be retroactively removed at close time. When
+the upstream AE `admission_status: defer-until-trigger` feature ships (see
+`../agentic-engineering/.ae/backlog/unscheduled/BL-admission-status-defer-until-trigger.md`),
+mark new BLs whose body says "not now" with that frontmatter field.
+
 ## Project Status
 
 Phase 1 complete, Phase 2 in progress. The intelligence layer (LLM synthesis
