@@ -40,6 +40,38 @@ Before the first live `mengdie dream` after BL-008 lands, an operator MUST:
    this large on a young corpus means distribution drift; do not proceed
    to a live pass until the cause is understood.
 
+   To compute the threshold without mental math, run the snippet below.
+   It queries the **decay-eligible** long-term count (the filter exactly
+   matches the decay pass's query at `src/core/dreaming.rs:163-167` —
+   `is_longterm = 1 AND valid_until IS NULL AND last_recalled IS NOT NULL`;
+   rows with NULL `last_recalled` are permanently immune to demotion and
+   are correctly excluded from the denominator).
+
+   <!-- threshold-snippet:begin -->
+   ```sql
+   -- Decay-eligible long-term count (denominator for the 10% threshold).
+   -- Filter mirrors src/core/dreaming.rs:163-167.
+   SELECT COUNT(*) FROM memory_entries
+     WHERE is_longterm = 1
+       AND valid_until IS NULL
+       AND last_recalled IS NOT NULL;
+   ```
+
+   ```bash
+   # Run the threshold computation and print both values side-by-side.
+   # Pipe breach_count from the `mengdie dream --decay-dry-run` JSON line
+   # into the comparison. Threshold = max(10, count/10).
+   count=$(sqlite3 ~/.mengdie/db.sqlite \
+     "SELECT COUNT(*) FROM memory_entries
+        WHERE is_longterm = 1
+          AND valid_until IS NULL
+          AND last_recalled IS NOT NULL;")
+   threshold=$(( count / 10 > 10 ? count / 10 : 10 ))
+   echo "long_term_eligible=${count}, threshold=${threshold}"
+   # Compare: HALT if decay_floor_breaches > $threshold.
+   ```
+   <!-- threshold-snippet:end -->
+
 4. If the breach count is within tolerance, proceed with a live
    `mengdie dream`. The human line will now show `N demoted` instead of
    `N would-demote (DRY RUN)`.
