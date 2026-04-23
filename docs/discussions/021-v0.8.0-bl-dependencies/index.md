@@ -1,13 +1,13 @@
 ---
 id: "021"
 title: "v0.8.0 — dependency map for remaining 7 open BLs"
-status: active
+status: concluded
 created: 2026-04-23
 pipeline:
   analyze: done
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/015-decay-operator-surface-hardening.md"
 tags: [v0.8.0, sprint-planning, dependency-analysis, decay, synthesis]
 ---
