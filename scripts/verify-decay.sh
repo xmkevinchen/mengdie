@@ -57,30 +57,47 @@ if ! command -v mengdie >/dev/null 2>&1; then
   exit 2
 fi
 
+# P1 (plan 015 review) — refuse to run the approval gate against a DB that
+# doesn't exist. rusqlite's `Connection::open` silently creates the file if
+# it's missing; without this check, a typoed `--db-path /tmp/typo.db` would
+# operate against an empty corpus, produce 0 breaches, and exit 0 — silently
+# approving nothing. The whole point of the approval gate is to prevent
+# silent approval of unseen state.
+if [[ -n "$DB_PATH" ]] && [[ ! -f "$DB_PATH" ]]; then
+  echo "error: --db-path \"$DB_PATH\" does not exist." >&2
+  echo "       Refusing to create an empty DB for the approval gate." >&2
+  echo "       Verify the path is correct, or run 'mengdie import' to" >&2
+  echo "       populate the corpus before running the approval gate." >&2
+  exit 2
+fi
+
 # Capture both streams separately: stdout has the human line; stderr
 # carries the structured-JSON event + any tracing noise.
+# ${VAR:-} in the trap is defensive (handles the edge where the script exits
+# between the mktemp calls and the trap install — unlikely under current
+# `set -e` ordering, but cheap belt-and-braces).
 TMP_OUT=$(mktemp)
 TMP_ERR=$(mktemp)
-trap 'rm -f "$TMP_OUT" "$TMP_ERR"' EXIT
+trap 'rm -f "${TMP_OUT:-}" "${TMP_ERR:-}"' EXIT
+
+# Build the mengdie invocation arg array. --db-path is a GLOBAL arg on the
+# binary (src/bin/cli.rs:17-18) and must precede the `dream` subcommand.
+# Empty DB_PATH → omit the flag so mengdie's compiled default applies.
+# Single invocation via arg array removes the dual-branch duplication from
+# the initial Step 4 draft (plan 015 code-review P2).
+MENGDIE_ARGS=()
+if [[ -n "$DB_PATH" ]]; then
+  MENGDIE_ARGS+=("--db-path" "$DB_PATH")
+fi
+MENGDIE_ARGS+=("dream" "--decay-dry-run")
 
 # RUST_LOG=info ensures the tracing::info! structured line is emitted.
-# --db-path is a GLOBAL arg on mengdie (src/bin/cli.rs:17-18), must precede
-# the `dream` subcommand. Empty DB_PATH → let mengdie use its default.
-if [[ -n "$DB_PATH" ]]; then
-  RUST_LOG="${RUST_LOG:-info}" mengdie --db-path "$DB_PATH" dream --decay-dry-run \
-    >"$TMP_OUT" 2>"$TMP_ERR" || {
-    echo "mengdie dream --decay-dry-run failed. stderr follows:" >&2
-    cat "$TMP_ERR" >&2
-    exit 2
-  }
-else
-  RUST_LOG="${RUST_LOG:-info}" mengdie dream --decay-dry-run \
-    >"$TMP_OUT" 2>"$TMP_ERR" || {
-    echo "mengdie dream --decay-dry-run failed. stderr follows:" >&2
-    cat "$TMP_ERR" >&2
-    exit 2
-  }
-fi
+RUST_LOG="${RUST_LOG:-info}" mengdie "${MENGDIE_ARGS[@]}" \
+  >"$TMP_OUT" 2>"$TMP_ERR" || {
+  echo "mengdie dream --decay-dry-run failed. stderr follows:" >&2
+  cat "$TMP_ERR" >&2
+  exit 2
+}
 
 echo "=== Human output ==="
 cat "$TMP_OUT"

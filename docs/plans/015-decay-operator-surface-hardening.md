@@ -200,6 +200,20 @@ None within `/ae:work` — the step chain is linear per the dependency graph. No
 - Synthesis cluster planning — discussion 021 Next Step 7 requires a separate mini-discuss on provenance options first
 - Updating `.ae/roadmaps/v0.8.0.md` gate text or issuing `/ae:roadmap remove` for the 2 defer-items — those are Next Step 3 + 4 of discussion 021, NOT part of this plan
 
+## Methodology Carryforward for BL-010 (tracked duplicate — durability hedge)
+
+Per plan 015 review (challenger C3): `.ae/backlog/unscheduled/BL-decay-threshold-mode.md` holds the Schema Contract Obligation for the future `decay_spike` event, but `.ae/` is gitignored. The file can be lost silently (fresh clone, machine wipe, accidental delete). To preserve the obligation durably, the clause is duplicated here in the tracked plan file:
+
+**Schema Contract Obligation for BL-decay-threshold-mode (copy — source of truth is the BL body)**:
+
+When BL-decay-threshold-mode ships, the `decay_spike` event MUST follow the schema-contract methodology established by plan 015:
+
+1. **Schema versioning**: include a top-level `schema_version: 1` field on the `decay_spike` event.
+2. **JSON Schema doc**: publish `docs/schemas/decay_spike.json` (draft-07, `additionalProperties: false`) alongside the code. Include the same Bump Rules `$comment` block (expanded form) that `docs/schemas/dreaming_pass.json` uses — bump on remove/rename/semantics-change/type-drift/invariant-change; no bump for strictly-additive optional fields.
+3. **Subprocess integration test**: add a test to `tests/decay_contract.rs` (or extend it) that spawns the binary, triggers a `decay_spike`, captures stderr, and asserts the full field contract — including the `additionalProperties:false` enforcement (expected-key-set check, per plan 015 review P2.1).
+
+Rationale: without this clause the deferred work could reinvent the exact regression plan 015 was written to prevent. Lesson codified in `docs/reviews/011-bl008-exponential-decay.md` ("stderr-JSON contract tests must spawn the CLI").
+
 ## Known Risk / Review Focus
 
 - **First-ever CLI subprocess test in this repo**: `tests/decay_contract.rs` establishes the `env!("CARGO_BIN_EXE_mengdie")` pattern. Cargo auto-generates this env var for integration test binaries when `[[bin]]` declares `mengdie` in `Cargo.toml` — confirm that name first (Step 2 subtask). Forgejo CI runs `cargo test` on `ubuntu-latest` (Linux x86_64 native, no cross-compile per discussion 017 platform matrix) — the pattern works on the same host the binary is built and tested on. No cross-compilation adapter needed.

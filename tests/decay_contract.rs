@@ -137,6 +137,42 @@ fn dreaming_pass_stderr_json_matches_plan_015_contract() {
     );
     assert!(v["breaches"].is_array(), "breaches must be an array");
 
+    // Plan 015 review P2.1 — enforce additionalProperties:false at the test
+    // level. docs/schemas/dreaming_pass.json declares the contract closed
+    // (additionalProperties:false), but nothing validates live output against
+    // the schema doc. This assertion makes any new field show up loudly in
+    // CI rather than silently slipping through.
+    let expected_keys: std::collections::HashSet<&str> = [
+        "schema_version",
+        "event",
+        "promoted",
+        "demoted",
+        "decay_floor_breaches",
+        "avg_effective_before",
+        "avg_effective_after",
+        "dry_run",
+        "breaches",
+    ]
+    .into_iter()
+    .collect();
+    let actual_keys: std::collections::HashSet<String> = v
+        .as_object()
+        .expect("event is a JSON object")
+        .keys()
+        .cloned()
+        .collect();
+    let unexpected: Vec<&String> = actual_keys
+        .iter()
+        .filter(|k| !expected_keys.contains(k.as_str()))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "dreaming_pass event has unexpected fields (schema drift — add to \
+         docs/schemas/dreaming_pass.json AND bump schema_version per Bump Rules, \
+         or remove from format_structured_json): {:?}",
+        unexpected
+    );
+
     // Plan 015 dep-analyst requirement: avg_effective_before must be > 0.0
     // to prove the computation path, not just the null-guard. Seeded memory
     // (avg_relevance=0.5, last_recalled=30d ago) produces ~0.354 effective.
@@ -267,8 +303,10 @@ mod verify_decay_script {
     #[test]
     fn breaches_no_flag_exits_one() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        // avg=0.487, days=78 → effective ≈ 0.1977; below 0.20 floor → breach.
-        seed_longterm(tmp.path(), 0.487, 78);
+        // P2.2 fix: avg=0.4, days=80 → effective ≈ 0.159 (firmly below 0.20
+        // floor). Previous fixture (avg=0.487, days=78) produced effective ≈
+        // 0.198 — marginal, could flip under wall-clock drift at day boundaries.
+        seed_longterm(tmp.path(), 0.4, 80);
         let (code, _stdout, _stderr) = run_script(tmp.path(), &[]);
         assert_eq!(
             code, 1,
@@ -279,11 +317,90 @@ mod verify_decay_script {
     #[test]
     fn breaches_with_approval_exits_zero() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        seed_longterm(tmp.path(), 0.487, 78);
+        // Same P2.2-sturdier fixture as breaches_no_flag_exits_one.
+        seed_longterm(tmp.path(), 0.4, 80);
         let (code, _stdout, _stderr) = run_script(tmp.path(), &["--i-reviewed-each"]);
         assert_eq!(
             code, 0,
             "breaches + --i-reviewed-each should exit 0 (operator approved)"
+        );
+    }
+
+    /// Plan 015 review P1: typoed `--db-path` to a nonexistent file must
+    /// exit 2. rusqlite would otherwise silently create an empty DB →
+    /// approval gate sees 0 breaches → exits 0 = silent approval of nothing.
+    #[test]
+    fn nonexistent_db_path_exits_two() {
+        // Build a path that definitely does not exist.
+        let ghost = PathBuf::from(format!(
+            "/tmp/plan-015-nonexistent-{}.db",
+            std::process::id()
+        ));
+        assert!(!ghost.exists(), "test precondition: path must not exist");
+        // Pass directly; don't use run_script's existence assumption.
+        let out = Command::new(script_path())
+            .args(["--db-path", ghost.to_str().unwrap()])
+            .env("PATH", path_with_mengdie())
+            .output()
+            .expect("spawn verify-decay.sh");
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "nonexistent --db-path must exit 2, not silently create empty DB. \
+             stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `--db-path` without a value is a usage error → exit 2.
+    #[test]
+    fn db_path_without_value_exits_two() {
+        let out = Command::new(script_path())
+            .args(["--db-path"]) // no value follows
+            .env("PATH", path_with_mengdie())
+            .output()
+            .expect("spawn verify-decay.sh");
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "--db-path without value must exit 2. stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Unknown arg exits 2 (script arg-parse rejects).
+    #[test]
+    fn unknown_arg_exits_two() {
+        let out = Command::new(script_path())
+            .args(["--totally-not-a-real-flag"])
+            .env("PATH", path_with_mengdie())
+            .output()
+            .expect("spawn verify-decay.sh");
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "unknown arg must exit 2. stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// When `mengdie` is absent from PATH, the preflight at
+    /// `scripts/verify-decay.sh:55-58` must exit 2 with an actionable message.
+    /// PATH is set to system dirs that contain bash+coreutils but not mengdie
+    /// (tests/runners typically don't have mengdie installed in /bin|/usr/bin).
+    #[test]
+    fn missing_mengdie_on_path_exits_two() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let out = Command::new(script_path())
+            .args(["--db-path", tmp.path().to_str().unwrap()])
+            .env("PATH", "/usr/bin:/bin") // bash+coreutils findable, mengdie isn't
+            .output()
+            .expect("spawn verify-decay.sh");
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "missing mengdie on PATH must exit 2. stderr={}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 
