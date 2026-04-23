@@ -3,7 +3,7 @@ id: "015"
 title: "Decay operator surface hardening — JSON schema contract + verify-decay-sh actions 1+2+4"
 type: plan
 created: 2026-04-23
-status: reviewed
+status: done
 discussion: "docs/discussions/021-v0.8.0-bl-dependencies/"
 ---
 
