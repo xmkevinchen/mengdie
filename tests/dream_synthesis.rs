@@ -155,3 +155,191 @@ async fn end_to_end_dream_synthesis_writes_one_row_with_six_links() {
     let title_head: String = syn.title.chars().take(40).collect();
     eprintln!("[PASS] model={model} title[:40]={title_head:?}");
 }
+
+// ---- Plan 017 Step 3: synthesis-audit subcommand (no LLM required) --------
+
+use std::process::Command as StdCommand;
+
+/// Seed a synthesis + N source memories into the given DB via direct
+/// `insert_synthesis_with_links` (no LLM call).
+fn seed_synthesis_for_audit(db: &Db) -> String {
+    let src1 = db
+        .insert_memory(NewMemory {
+            project_id: "audit-test".to_string(),
+            source_file: "src-a.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "First source title".to_string(),
+            content: "First source content — about X.".to_string(),
+            entities: "x".to_string(),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+        })
+        .unwrap();
+    let src2 = db
+        .insert_memory(NewMemory {
+            project_id: "audit-test".to_string(),
+            source_file: "src-b.md".to_string(),
+            source_type: "review".to_string(),
+            knowledge_type: "experiential".to_string(),
+            title: "Second source title".to_string(),
+            content: "Second source content — about Y.".to_string(),
+            entities: "y".to_string(),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+        })
+        .unwrap();
+
+    db.insert_synthesis_with_links(
+        NewMemory {
+            project_id: "audit-test".to_string(),
+            source_file: "syn.md".to_string(),
+            source_type: "synthesis".to_string(),
+            knowledge_type: "factual".to_string(),
+            title: "Audit fixture synthesis".to_string(),
+            content: "Synthesized content mentioning X and Y.".to_string(),
+            entities: "x,y".to_string(),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+        },
+        &[src1, src2],
+    )
+    .unwrap()
+}
+
+#[test]
+fn synthesis_audit_subcommand_prints_synthesis_and_sources() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+
+    let syn_id = {
+        let db = Db::open(&db_path).unwrap();
+        seed_synthesis_for_audit(&db)
+    };
+
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_mengdie"))
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "synthesis-audit",
+            &syn_id,
+        ])
+        .output()
+        .expect("spawn mengdie");
+
+    assert!(
+        output.status.success(),
+        "synthesis-audit exit={:?}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(
+        stdout.contains("=== Synthesis ==="),
+        "missing header: {stdout}"
+    );
+    assert!(
+        stdout.contains("Audit fixture synthesis"),
+        "missing synthesis title: {stdout}"
+    );
+    assert!(
+        stdout.contains("Sources (2)"),
+        "missing source count: {stdout}"
+    );
+    assert!(
+        stdout.contains("First source title"),
+        "missing source 1: {stdout}"
+    );
+    assert!(
+        stdout.contains("Second source title"),
+        "missing source 2: {stdout}"
+    );
+    assert!(
+        stdout.contains("Type:   conclusion"),
+        "missing source 1 type: {stdout}"
+    );
+    assert!(
+        stdout.contains("Type:   review"),
+        "missing source 2 type: {stdout}"
+    );
+
+    drop(tmp);
+}
+
+#[test]
+fn synthesis_audit_subcommand_errors_on_non_synthesis_id() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+
+    let src_id = {
+        let db = Db::open(&db_path).unwrap();
+        db.insert_memory(NewMemory {
+            project_id: "audit-test".to_string(),
+            source_file: "only.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "A primary source, not a synthesis".to_string(),
+            content: "content".to_string(),
+            entities: "".to_string(),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+        })
+        .unwrap()
+    };
+
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_mengdie"))
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "synthesis-audit",
+            &src_id,
+        ])
+        .output()
+        .expect("spawn mengdie");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for non-synthesis id"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not a synthesis row"),
+        "expected clear error message, got stderr: {stderr}"
+    );
+
+    drop(tmp);
+}
+
+#[test]
+fn synthesis_audit_subcommand_errors_on_unknown_id() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+    let _db = Db::open(&db_path).unwrap();
+
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_mengdie"))
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "synthesis-audit",
+            "definitely-not-a-real-id",
+        ])
+        .output()
+        .expect("spawn mengdie");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for unknown id"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "expected 'not found' error, got: {stderr}"
+    );
+
+    drop(tmp);
+}

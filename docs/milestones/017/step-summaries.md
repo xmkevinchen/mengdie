@@ -44,3 +44,25 @@
 - `insert_synthesis_with_links_rejects_empty_source_ids`
 
 **Actual files**: `src/core/schema.rs`, `src/core/db.rs`
+
+---
+
+## Step 3 — synthesis-audit subcommand (commit: TBD)
+
+**Decisions**:
+- `SynthesisAudit { id: String }` flat subcommand at `src/bin/cli.rs:145` — matches existing flat-Commands convention. Usage: `mengdie synthesis-audit <id>`.
+- New `Db::get_synthesis_with_sources(id)` helper at `src/core/db.rs:398` joins `memory_entries` with `memory_synthesis_links`. Returns `(synthesis, sources)`. Errors with clear messages on unknown id and non-synthesis id. For a linked source memory that's been hard-deleted, returns a placeholder `MemoryEntry` with title `"<deleted: {id}>"` rather than aborting — graceful degradation.
+- Output format: `=== Synthesis ===` header + ID/Title/Project/Entities/Recalled/Long-term + indented Content, then per-source `--- Source N/M ---` + ID/Type/Title/Preview (first 200 chars with `[…]` truncation indicator).
+- Integration tests append to existing `tests/dream_synthesis.rs` (file already covers `e2e` with `#[ignore]`; new tests are NOT ignored — they seed via `insert_*` directly, no LLM required — dep-analyst Q4 confirmed).
+
+**Rejected**:
+- Nested `Synthesis { subcommand: SynthesisSubcommand }` pattern — architect Q4; no nesting precedent, single leaf command today.
+- Abort on hard-deleted source memories — chose placeholder instead so audit output is still usable on a corrupted DB.
+
+**Cross-step deps**:
+- `get_synthesis_with_sources` helper could be reused by Step 4's source_type formatter if it ever shows linked sources (not currently — Step 4 is just displaying `source_type` on the row itself).
+- Integration test fixture pattern (tempfile + `env!("CARGO_BIN_EXE_mengdie")` + subprocess) available as template for Step 5's regression tests.
+
+**Real-world signal captured during manual smoke test**: the user's production DB at `~/.mengdie/db.sqlite` has an existing synthesis row (`529d3212-e809-4b81-a1f5-e15143df5128`) with zero entries in `memory_synthesis_links`. Running `./target/debug/mengdie synthesis-audit <any-id>` triggers the v5 migration on that DB, and the zero-link pre-check fires with a clear error. This is the migration safety net working exactly as designed — documented in the commit message as a real-world datum for the user to resolve (delete the orphan synthesis or restore its links) before the production migration runs.
+
+**Actual files**: `src/core/db.rs` (helper), `src/bin/cli.rs` (subcommand + cmd function), `tests/dream_synthesis.rs` (3 integration tests)

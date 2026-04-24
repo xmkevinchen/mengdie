@@ -416,6 +416,102 @@ impl Db {
         Ok(returned_id)
     }
 
+    /// Fetch a synthesis memory + its linked source memories for audit (plan 017 Step 3).
+    ///
+    /// Returns `(synthesis, sources)` where `sources` follows the link-table
+    /// order (no specific ordering guarantee beyond that — sources are an
+    /// unordered set of inputs). If a linked source row has been hard-deleted
+    /// (shouldn't happen under current invariants; FKs are declared but not
+    /// enforced), returns a placeholder `MemoryEntry` with title
+    /// `"<deleted: {id}>"` rather than aborting — graceful degradation for
+    /// the audit use case.
+    ///
+    /// Errors:
+    /// - `id` not found in memory_entries.
+    /// - row exists but `source_type != "synthesis"` (wrong row type).
+    pub fn get_synthesis_with_sources(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<(MemoryEntry, Vec<MemoryEntry>)> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+
+        let synthesis: MemoryEntry = conn
+            .query_row(
+                "SELECT id, project_id, source_file, source_type, knowledge_type,
+                        title, content, entities, valid_from, valid_until,
+                        superseded_by, recall_count, avg_relevance, last_recalled,
+                        embedding, embedding_dim, is_longterm, created_at
+                 FROM memory_entries WHERE id = ?1",
+                params![id],
+                row_to_entry,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    anyhow::anyhow!("synthesis id not found: {id}")
+                }
+                other => anyhow::anyhow!("query synthesis {id}: {other}"),
+            })?;
+
+        if synthesis.source_type != "synthesis" {
+            anyhow::bail!(
+                "id {id} is not a synthesis row (source_type = '{}')",
+                synthesis.source_type
+            );
+        }
+
+        // Fetch the source IDs from the link table.
+        let mut stmt = conn.prepare(
+            "SELECT source_memory_id FROM memory_synthesis_links
+             WHERE synthesis_memory_id = ?1",
+        )?;
+        let source_ids: Vec<String> = stmt
+            .query_map(params![id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        // Fetch each source memory. Missing rows become placeholders.
+        let mut sources: Vec<MemoryEntry> = Vec::with_capacity(source_ids.len());
+        for src_id in &source_ids {
+            let fetched: Option<MemoryEntry> = conn
+                .query_row(
+                    "SELECT id, project_id, source_file, source_type, knowledge_type,
+                            title, content, entities, valid_from, valid_until,
+                            superseded_by, recall_count, avg_relevance, last_recalled,
+                            embedding, embedding_dim, is_longterm, created_at
+                     FROM memory_entries WHERE id = ?1",
+                    params![src_id],
+                    row_to_entry,
+                )
+                .optional()?;
+            match fetched {
+                Some(entry) => sources.push(entry),
+                None => sources.push(MemoryEntry {
+                    id: src_id.clone(),
+                    project_id: String::new(),
+                    source_file: String::new(),
+                    source_type: "<deleted>".to_string(),
+                    knowledge_type: String::new(),
+                    title: format!("<deleted: {src_id}>"),
+                    content: String::new(),
+                    entities: String::new(),
+                    valid_from: String::new(),
+                    valid_until: None,
+                    superseded_by: None,
+                    recall_count: 0,
+                    avg_relevance: 0.0,
+                    last_recalled: None,
+                    embedding: None,
+                    embedding_dim: None,
+                    is_longterm: false,
+                    created_at: String::new(),
+                }),
+            }
+        }
+
+        Ok((synthesis, sources))
+    }
+
     /// Count synthesis link rows pointing at a given synthesis memory.
     /// Used by unit + external integration tests; kept `pub` because
     /// `tests/dream_synthesis.rs` is an external crate and can't reach

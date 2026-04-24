@@ -138,6 +138,14 @@ enum Commands {
 
     /// Print observability metrics
     Stats,
+
+    /// Read-only audit of a synthesis row + its source memories.
+    /// Scaffolding for future Options 2/3 ship-gate data collection
+    /// (plan 017, discussion 022) — operator eyeballs fidelity.
+    SynthesisAudit {
+        /// Synthesis memory id to inspect.
+        id: String,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -197,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
             min_score,
         } => cmd_search(&db, &query, global, limit, min_score),
         Commands::Stats => cmd_stats(&db),
+        Commands::SynthesisAudit { id } => cmd_synthesis_audit(&db, &id),
     }
 }
 
@@ -694,6 +703,49 @@ fn walkdir(dir: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+/// Audit a synthesis row + its linked source memories (plan 017 Step 3).
+///
+/// Read-only. Prints the synthesis's title + full content, then each
+/// linked source memory with source_type + first 200 chars of content.
+/// Intended as scaffolding for future Options 2/3 ship-gate data
+/// collection (discussion 022). Does NOT embed any fidelity judgment —
+/// the operator reads both and decides.
+fn cmd_synthesis_audit(db: &Db, id: &str) -> anyhow::Result<()> {
+    let (synthesis, sources) = db.get_synthesis_with_sources(id)?;
+
+    println!("=== Synthesis ===");
+    println!("ID:      {}", synthesis.id);
+    println!("Title:   {}", synthesis.title);
+    println!(
+        "Project: {} | Entities: {} | Recalled: {}x | Long-term: {}",
+        synthesis.project_id, synthesis.entities, synthesis.recall_count, synthesis.is_longterm
+    );
+    println!("Content:");
+    for line in synthesis.content.lines() {
+        println!("  {line}");
+    }
+
+    let n = sources.len();
+    println!();
+    println!("Sources ({n}):");
+    for (i, src) in sources.iter().enumerate() {
+        println!();
+        println!("--- Source {}/{} ---", i + 1, n);
+        println!("ID:     {}", src.id);
+        println!("Type:   {}", src.source_type);
+        println!("Title:  {}", src.title);
+        let preview: String = src.content.chars().take(200).collect();
+        let truncated = src.content.chars().count() > 200;
+        println!(
+            "Preview: {}{}",
+            preview.replace('\n', " "),
+            if truncated { " […]" } else { "" }
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

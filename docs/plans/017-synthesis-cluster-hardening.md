@@ -151,12 +151,12 @@ Expected files: `src/core/db.rs`
 
 ### Step 3: Add `mengdie synthesis-audit <syn-id>` CLI subcommand (AC4)
 
-- [ ] **Add `SynthesisAudit { id: String }` to `Commands` enum** at `src/bin/cli.rs:24` (flat, not nested — architect Q4). User syntax: `mengdie synthesis-audit <id>`.
-- [ ] **Add `get_synthesis_with_sources(syn_id: &str)` helper** in `src/core/db.rs`. Signature: `fn get_synthesis_with_sources(&self, syn_id: &str) -> anyhow::Result<(MemoryEntry, Vec<MemoryEntry>)>`. Returns the synthesis memory + its N source memories. Errors:
+- [x] **Add `SynthesisAudit { id: String }` to `Commands` enum** at `src/bin/cli.rs:24` (flat, not nested — architect Q4). User syntax: `mengdie synthesis-audit <id>`.
+- [x] **Add `get_synthesis_with_sources(syn_id: &str)` helper** in `src/core/db.rs`. Signature: `fn get_synthesis_with_sources(&self, syn_id: &str) -> anyhow::Result<(MemoryEntry, Vec<MemoryEntry>)>`. Returns the synthesis memory + its N source memories. Errors:
   - `syn_id` not found → `anyhow::bail!("synthesis id not found: {syn_id}")`.
   - Row exists but `source_type != "synthesis"` → `anyhow::bail!("id {syn_id} is not a synthesis row (source_type = {actual})")`.
   - Any linked source memory has been hard-deleted → include a placeholder `MemoryEntry` with title like `"<deleted: id>"` and continue (do NOT abort; matches dep-analyst Q2 graceful-handling note for unenforced FKs).
-- [ ] **Add `cmd_synthesis_audit(db: &Db, id: &str)`** function following the pattern of other `cmd_*` functions. Output format:
+- [x] **Add `cmd_synthesis_audit(db: &Db, id: &str)`** function following the pattern of other `cmd_*` functions. Output format:
   ```
   === Synthesis ===
   Title: <syn.title>
@@ -172,7 +172,7 @@ Expected files: `src/core/db.rs`
   --- Source 2/N ---
   ...
   ```
-- [ ] **Integration test** at `tests/dream_synthesis.rs` (file exists; append to it — new tests NOT `#[ignore]` per dep-analyst Q4): `synthesis_audit_subcommand_prints_synthesis_and_sources`. Pattern from `tests/decay_contract.rs`: seed via `Db::open` + `insert_memory` (for sources) + `insert_synthesis_with_links` (for the synthesis), hold `NamedTempFile` past `Command::output()` (lifetime trap), invoke binary with `synthesis-audit <id>`, assert stdout contains `=== Synthesis ===`, synthesis title, both source titles. Also add a negative-path test: `synthesis_audit_subcommand_errors_on_non_synthesis_id` — call with a primary-source id, assert non-zero exit + clear error message.
+- [x] **Integration test** at `tests/dream_synthesis.rs` (file exists; append to it — new tests NOT `#[ignore]` per dep-analyst Q4): `synthesis_audit_subcommand_prints_synthesis_and_sources`. Pattern from `tests/decay_contract.rs`: seed via `Db::open` + `insert_memory` (for sources) + `insert_synthesis_with_links` (for the synthesis), hold `NamedTempFile` past `Command::output()` (lifetime trap), invoke binary with `synthesis-audit <id>`, assert stdout contains `=== Synthesis ===`, synthesis title, both source titles. Also add a negative-path test: `synthesis_audit_subcommand_errors_on_non_synthesis_id` — call with a primary-source id, assert non-zero exit + clear error message.
 
 Expected files: `src/core/db.rs` (new helper), `src/bin/cli.rs` (subcommand + command function), `tests/dream_synthesis.rs` (2 integration tests)
 
