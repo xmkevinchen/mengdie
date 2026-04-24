@@ -6,9 +6,9 @@ created: 2026-04-23
 pipeline:
   analyze: skipped
   discuss: done
-  plan: pending
+  plan: done
   work: pending
-plan: ""
+plan: "docs/plans/017-synthesis-cluster-hardening.md"
 tags: [v0.8.0, synthesis, provenance, fidelity, search-ranking, mini-discuss]
 ---
 
