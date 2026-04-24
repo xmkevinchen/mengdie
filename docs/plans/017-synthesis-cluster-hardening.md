@@ -178,14 +178,14 @@ Expected files: `src/core/db.rs` (new helper), `src/bin/cli.rs` (subcommand + co
 
 ### Step 4: Surface `source_type` in `mengdie search` and `mengdie list` output + testable formatter (AC5)
 
-- [ ] **Extract `format_search_line` helper** (codex P2b — make AC4 verification automated, not manual): move the formatting logic currently inline at `src/bin/cli.rs:610-625` into a `fn format_search_line(r: &SearchResultItem, index: usize) -> String` that returns the 3 lines as one `\n`-joined string. `cmd_search` calls it in a loop and `println!`s the result.
-- [ ] **Modify the formatter** to include `source_type`: current secondary line is `   source: {file} | entities: {entities} | recalled: {N}x`. New: `   type: {source_type} | source: {file} | entities: {entities} | recalled: {N}x`. The `type:` prefix distinguishes from `source:` (which is the file path).
-- [ ] **Modify `cmd_list` output** at `src/bin/cli.rs:571` similarly. Note dep-analyst Q5: `cmd_list` uses `MemoryEntry` (not `SearchResultItem`); the field name and access are the same but they're different struct types on different code paths. Either extract a shared `format_memory_row` helper covering both (clean), or touch each formatter independently (simpler). Pick the simpler option unless the formatter logic is substantial.
-- [ ] **Unit tests** in the test module at the bottom of `cli.rs`:
+- [x] **Extract `format_search_line` helper** (codex P2b — make AC4 verification automated, not manual): move the formatting logic currently inline at `src/bin/cli.rs:610-625` into a `fn format_search_line(r: &SearchResultItem, index: usize) -> String` that returns the 3 lines as one `\n`-joined string. `cmd_search` calls it in a loop and `println!`s the result.
+- [x] **Modify the formatter** to include `source_type`: current secondary line is `   source: {file} | entities: {entities} | recalled: {N}x`. New: `   type: {source_type} | source: {file} | entities: {entities} | recalled: {N}x`. The `type:` prefix distinguishes from `source:` (which is the file path).
+- [x] **Modify `cmd_list` output** at `src/bin/cli.rs:571` similarly. Note dep-analyst Q5: `cmd_list` uses `MemoryEntry` (not `SearchResultItem`); the field name and access are the same but they're different struct types on different code paths. Either extract a shared `format_memory_row` helper covering both (clean), or touch each formatter independently (simpler). Pick the simpler option unless the formatter logic is substantial.
+- [x] **Unit tests** in the test module at the bottom of `cli.rs`:
   - `format_search_line_includes_source_type_synthesis`: construct a `SearchResultItem` with `source_type = "synthesis"`, assert output contains `"type: synthesis"`.
   - `format_search_line_includes_source_type_conclusion`: same for primary source.
   - If `format_memory_row` extracted: parallel tests for `cmd_list`'s formatter.
-- [ ] **Spot-check** (manual, complementary to tests): `cargo run -- search "test" 2>&1 | head -20` shows the new `type:` column on each result's secondary line.
+- [x] **Spot-check** (manual, complementary to tests): `cargo run -- search "test" 2>&1 | head -20` shows the new `type:` column on each result's secondary line.
 
 Expected files: `src/bin/cli.rs`
 

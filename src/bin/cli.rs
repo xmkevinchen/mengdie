@@ -553,10 +553,10 @@ fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
     } else {
         // Table format
         println!(
-            "{:<8} {:<40} {:<12} {:>6} {:<4} Source",
-            "ID", "Title", "Type", "Recall", "LT"
+            "{:<8} {:<40} {:<12} {:<12} {:>6} {:<4} Source",
+            "ID", "Title", "Knowledge", "Origin", "Recall", "LT"
         );
-        println!("{}", "-".repeat(90));
+        println!("{}", "-".repeat(100));
         for e in &entries {
             let short_id = if e.id.len() > 8 { &e.id[..8] } else { &e.id };
             let title = if e.title.len() > 40 {
@@ -576,8 +576,8 @@ fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
                 source
             };
             println!(
-                "{:<8} {:<40} {:<12} {:>6} {:<4} {}",
-                short_id, title, e.knowledge_type, e.recall_count, lt, source_short
+                "{:<8} {:<40} {:<12} {:<12} {:>6} {:<4} {}",
+                short_id, title, e.knowledge_type, e.source_type, e.recall_count, lt, source_short
             );
         }
         println!("\n{} memories total", entries.len());
@@ -617,23 +617,36 @@ fn cmd_search(
     }
 
     for (i, r) in results.iter().enumerate() {
-        let snippet: String = r.entry.content.chars().take(100).collect();
-        println!(
-            "{}. [score: {:.4}] {} ({})",
-            i + 1,
-            r.score,
-            r.entry.title,
-            r.entry.knowledge_type,
-        );
-        println!(
-            "   source: {} | entities: {} | recalled: {}x",
-            r.entry.source_file, r.entry.entities, r.entry.recall_count,
-        );
-        println!("   {}", snippet.replace('\n', " "));
+        println!("{}", format_search_result(r, i + 1));
         println!();
     }
 
     Ok(())
+}
+
+/// Format a single `SearchResultItem` for `mengdie search` output.
+/// Extracted for testability (plan 017 Step 4, AC5). Returns a 3-line
+/// string (header, metadata, snippet) joined by `\n`. Caller appends a
+/// blank line between results.
+///
+/// Plan 017 Step 4: the metadata line includes `type: {source_type}`
+/// (the provenance-axis field from discussion 022 Option 4 reinterpretation)
+/// alongside the existing `source:` (file path), `entities`, and
+/// `recalled: Nx`. `type:` is deliberately named distinct from `source:`
+/// (which is the file path) to avoid operator confusion.
+pub(crate) fn format_search_result(r: &mengdie::core::search::SearchResult, rank: usize) -> String {
+    let snippet: String = r.entry.content.chars().take(100).collect();
+    format!(
+        "{rank}. [score: {:.4}] {} ({})\n   type: {} | source: {} | entities: {} | recalled: {}x\n   {}",
+        r.score,
+        r.entry.title,
+        r.entry.knowledge_type,
+        r.entry.source_type,
+        r.entry.source_file,
+        r.entry.entities,
+        r.entry.recall_count,
+        snippet.replace('\n', " "),
+    )
 }
 
 fn cmd_stats(db: &Db) -> anyhow::Result<()> {
@@ -751,8 +764,83 @@ fn cmd_synthesis_audit(db: &Db, id: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mengdie::core::db::MemoryEntry;
     use mengdie::core::dreaming::DreamingResult;
+    use mengdie::core::search::SearchResult;
     use regex::Regex;
+
+    fn sample_search_result(source_type: &str, knowledge_type: &str) -> SearchResult {
+        SearchResult {
+            entry: MemoryEntry {
+                id: "abc123def".to_string(),
+                project_id: "proj".to_string(),
+                source_file: "docs/plans/017.md".to_string(),
+                source_type: source_type.to_string(),
+                knowledge_type: knowledge_type.to_string(),
+                title: "Sample title".to_string(),
+                content: "Content that is longer than 100 chars to exercise the 100-char \
+                          preview cap in format_search_result for the snippet field."
+                    .to_string(),
+                entities: "x,y".to_string(),
+                valid_from: "2026-01-01T00:00:00Z".to_string(),
+                valid_until: None,
+                superseded_by: None,
+                recall_count: 3,
+                avg_relevance: 0.7,
+                last_recalled: None,
+                embedding: None,
+                embedding_dim: None,
+                is_longterm: false,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            score: 0.4321,
+        }
+    }
+
+    #[test]
+    fn format_search_result_includes_source_type_synthesis() {
+        let r = sample_search_result("synthesis", "factual");
+        let s = format_search_result(&r, 1);
+        assert!(
+            s.contains("type: synthesis"),
+            "expected source_type 'synthesis' surfaced in metadata line, got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn format_search_result_includes_source_type_conclusion() {
+        let r = sample_search_result("conclusion", "decisional");
+        let s = format_search_result(&r, 1);
+        assert!(
+            s.contains("type: conclusion"),
+            "expected source_type 'conclusion' surfaced in metadata line, got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn format_search_result_distinguishes_type_from_source() {
+        // `type:` (source_type enum) must NOT be confused with `source:` (file path).
+        // Both appear on the metadata line; plan 017 Step 4 picked distinct labels
+        // to avoid operator confusion.
+        let r = sample_search_result("review", "experiential");
+        let s = format_search_result(&r, 1);
+        assert!(s.contains("type: review"));
+        assert!(s.contains("source: docs/plans/017.md"));
+    }
+
+    #[test]
+    fn format_search_result_snippet_is_capped_and_single_line() {
+        let r = sample_search_result("conclusion", "decisional");
+        let s = format_search_result(&r, 1);
+        // The snippet uses `chars().take(100)` + newline replacement; verify
+        // no newlines leaked into the third line of output and the preview
+        // stays bounded.
+        let lines: Vec<&str> = s.split('\n').collect();
+        assert_eq!(lines.len(), 3, "expected 3 lines, got:\n{s}");
+        // Third line ("   <snippet>"): 3-space indent + up to 100 chars.
+        assert!(lines[2].starts_with("   "));
+        assert!(lines[2].len() <= 3 + 100);
+    }
 
     fn sample_result(demoted: usize, breaches: usize, before: f64, after: f64) -> DreamingResult {
         DreamingResult {

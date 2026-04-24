@@ -66,3 +66,21 @@
 **Real-world signal captured during manual smoke test**: the user's production DB at `~/.mengdie/db.sqlite` has an existing synthesis row (`529d3212-e809-4b81-a1f5-e15143df5128`) with zero entries in `memory_synthesis_links`. Running `./target/debug/mengdie synthesis-audit <any-id>` triggers the v5 migration on that DB, and the zero-link pre-check fires with a clear error. This is the migration safety net working exactly as designed — documented in the commit message as a real-world datum for the user to resolve (delete the orphan synthesis or restore its links) before the production migration runs.
 
 **Actual files**: `src/core/db.rs` (helper), `src/bin/cli.rs` (subcommand + cmd function), `tests/dream_synthesis.rs` (3 integration tests)
+
+---
+
+## Step 4 — Surface source_type in mengdie search + list (commit: TBD)
+
+**Decisions**:
+- Extracted `format_search_result(r, rank) -> String` in `src/bin/cli.rs` (pub(crate) for testability — codex P2b mandatory). Returns 3-line joined string; cmd_search loops and `println!`s + blank line.
+- Search output metadata line: `type: {source_type} | source: {source_file} | entities: {e} | recalled: Nx`. `type:` (enum) deliberately distinct label from `source:` (file path) — avoids operator confusion per dep-analyst Q5.
+- `cmd_list` table gains an "Origin" column (source_type) and renames the ambiguous "Type" header to "Knowledge" (knowledge_type). Width bumped from 90 → 100 dashes. Columns: `ID | Title | Knowledge | Origin | Recall | LT | Source`.
+- 4 unit tests on `format_search_result`: `synthesis` surfaces as `type: synthesis`, `conclusion` surfaces identically, `type:` distinguishes from `source:`, snippet stays capped at 100 chars + single-line.
+
+**Rejected**:
+- Shared `format_memory_row` helper covering both cmd_search and cmd_list — they use different types (`SearchResult` vs `MemoryEntry`) and different output shapes (prose vs table). Extracting common code would bloat for marginal reuse; each formatter stays independent.
+- Hardcoded `[SYN]` prefix on title per the BL's literal Option 4 — rejected in discussion 022 Round 2; reinterpretation chosen (surface source_type field via dedicated label).
+
+**Cross-step deps**: none downstream. Step 5's regression test covers different invariants (cluster dedup) and doesn't touch CLI output.
+
+**Actual files**: `src/bin/cli.rs`
