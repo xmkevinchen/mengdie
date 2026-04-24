@@ -1,13 +1,13 @@
 ---
 id: "022"
 title: "Synthesis provenance — pick fix option(s) from BL-synthesis-provenance"
-status: active
+status: concluded
 created: 2026-04-23
 pipeline:
   analyze: skipped
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/017-synthesis-cluster-hardening.md"
 tags: [v0.8.0, synthesis, provenance, fidelity, search-ranking, mini-discuss]
 ---
