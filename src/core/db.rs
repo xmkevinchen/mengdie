@@ -131,7 +131,7 @@ impl Db {
                  title, content, entities, valid_from, embedding, embedding_dim,
                  is_longterm, created_at, content_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-             ON CONFLICT(project_id, content_hash) DO UPDATE SET
+             ON CONFLICT(project_id, content_hash) WHERE source_type != 'synthesis' DO UPDATE SET
                 source_file = excluded.source_file,
                 source_type = excluded.source_type,
                 knowledge_type = excluded.knowledge_type,
@@ -215,7 +215,7 @@ impl Db {
                  title, content, entities, valid_from, embedding, embedding_dim,
                  is_longterm, created_at, content_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-             ON CONFLICT(project_id, content_hash) DO UPDATE SET
+             ON CONFLICT(project_id, content_hash) WHERE source_type != 'synthesis' DO UPDATE SET
                 source_file = excluded.source_file,
                 source_type = excluded.source_type,
                 knowledge_type = excluded.knowledge_type,
@@ -326,17 +326,40 @@ impl Db {
     }
 
     /// Insert a synthesis memory AND its source→synthesis link rows in a single
-    /// SQLite transaction. content_hash ON CONFLICT makes the memory insert
-    /// idempotent across re-runs; link rows use INSERT OR IGNORE on the
-    /// composite PK so repeat sources collapse silently.
+    /// SQLite transaction.
+    ///
+    /// Dedup key (plan 017): `synthesis_cluster_hash` — derived from the
+    /// sorted+deduped `source_ids` via `compute_synthesis_cluster_hash`.
+    /// Re-synthesis of the same cluster (e.g. after a `SYSTEM_PROMPT` edit)
+    /// produces the SAME key and UPSERTS the existing row, preventing zombie
+    /// siblings. Previously this used `content_hash`, which would silently
+    /// create a new row whenever the LLM output text changed.
+    ///
+    /// **`source_type` immutability**: this function writes
+    /// `source_type = 'synthesis'`. Downstream code must NOT reclassify
+    /// synthesis rows — the partial unique indexes `idx_synthesis_cluster`
+    /// (`WHERE source_type = 'synthesis'`) and `idx_memory_content_hash`
+    /// (`WHERE source_type != 'synthesis'`) both depend on this invariant.
+    /// The source_type trigger (plan 017) limits values to the allowlist
+    /// but does not prevent a synthesis row from being UPDATED to another
+    /// allowed value — that stays a convention.
+    ///
+    /// Link rows use INSERT OR IGNORE on the composite PK so repeat sources
+    /// collapse silently.
     pub fn insert_synthesis_with_links(
         &self,
         mem: NewMemory,
         source_ids: &[String],
     ) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            !source_ids.is_empty(),
+            "insert_synthesis_with_links: source_ids must be non-empty (caller must provide at least one source memory)"
+        );
+
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let content_hash = super::schema::compute_content_hash(&mem.content);
+        let cluster_hash = super::schema::compute_synthesis_cluster_hash(source_ids);
         let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         let tx = conn.transaction()?;
 
@@ -344,17 +367,21 @@ impl Db {
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
                  title, content, entities, valid_from, embedding, embedding_dim,
-                 is_longterm, created_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-             ON CONFLICT(project_id, content_hash) DO UPDATE SET
-                source_file = excluded.source_file,
-                source_type = excluded.source_type,
-                knowledge_type = excluded.knowledge_type,
-                title = excluded.title,
-                entities = excluded.entities,
-                embedding = excluded.embedding,
-                embedding_dim = excluded.embedding_dim,
-                is_longterm = excluded.is_longterm
+                 is_longterm, created_at, content_hash, synthesis_cluster_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(project_id, synthesis_cluster_hash)
+                WHERE source_type = 'synthesis' AND synthesis_cluster_hash IS NOT NULL
+                DO UPDATE SET
+                    source_file = excluded.source_file,
+                    source_type = excluded.source_type,
+                    knowledge_type = excluded.knowledge_type,
+                    title = excluded.title,
+                    content = excluded.content,
+                    entities = excluded.entities,
+                    embedding = excluded.embedding,
+                    embedding_dim = excluded.embedding_dim,
+                    is_longterm = excluded.is_longterm,
+                    content_hash = excluded.content_hash
              RETURNING id",
             params![
                 id,
@@ -371,6 +398,7 @@ impl Db {
                 mem.is_longterm as i64,
                 now,
                 content_hash,
+                cluster_hash,
             ],
             |row| row.get(0),
         )?;
@@ -1150,5 +1178,150 @@ mod tests {
         assert!(e.last_recalled_as_datetime().is_none());
         let e = entry_with_last_recalled(Some(String::new()));
         assert!(e.last_recalled_as_datetime().is_none());
+    }
+
+    // ----- Plan 017: cluster-hash dedup semantic tests ---------------------
+
+    /// Seed 3 short-term memories in the test DB, return their IDs.
+    fn seed_three_sources(db: &Db) -> Vec<String> {
+        (0..3)
+            .map(|i| {
+                db.insert_memory(NewMemory {
+                    project_id: "proj".to_string(),
+                    source_file: format!("src-{i}.md"),
+                    source_type: "conclusion".to_string(),
+                    knowledge_type: "decisional".to_string(),
+                    title: format!("source {i}"),
+                    content: format!("source content {i}"),
+                    entities: "tag".to_string(),
+                    embedding: None,
+                    embedding_dim: None,
+                    is_longterm: false,
+                })
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn synthesis_mem(content: &str) -> NewMemory {
+        NewMemory {
+            project_id: "proj".to_string(),
+            source_file: "syn.md".to_string(),
+            source_type: "synthesis".to_string(),
+            knowledge_type: "factual".to_string(),
+            title: "synthesis".to_string(),
+            content: content.to_string(),
+            entities: "tag".to_string(),
+            embedding: None,
+            embedding_dim: None,
+            is_longterm: false,
+        }
+    }
+
+    #[test]
+    fn insert_synthesis_with_links_upserts_on_same_cluster() {
+        let db = test_db();
+        let sources = seed_three_sources(&db);
+
+        let id1 = db
+            .insert_synthesis_with_links(synthesis_mem("V1 content"), &sources)
+            .unwrap();
+        let id2 = db
+            .insert_synthesis_with_links(synthesis_mem("V2 content"), &sources)
+            .unwrap();
+
+        // Invariant: exactly one synthesis row per cluster per project (plan 017 AC3).
+        // This is the COUNT-based invariant, not id-equality (which is only
+        // incidentally true for ON CONFLICT DO UPDATE RETURNING id).
+        let conn = db.lock_conn().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE source_type = 'synthesis' AND project_id = 'proj'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Latest content wins.
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM memory_entries WHERE id = ?1",
+                params![id2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "V2 content");
+
+        // ON CONFLICT DO UPDATE RETURNING id returns the existing row's id
+        // (implementation detail, but nice to assert for documentation).
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn insert_synthesis_with_links_different_clusters_coexist() {
+        let db = test_db();
+        let sources = seed_three_sources(&db);
+
+        let subset_a = vec![sources[0].clone(), sources[1].clone()];
+        let subset_b = vec![sources[1].clone(), sources[2].clone()];
+
+        let id_a = db
+            .insert_synthesis_with_links(synthesis_mem("Different content A"), &subset_a)
+            .unwrap();
+        let id_b = db
+            .insert_synthesis_with_links(synthesis_mem("Different content B"), &subset_b)
+            .unwrap();
+
+        assert_ne!(id_a, id_b, "different clusters must get distinct row ids");
+
+        let conn = db.lock_conn().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE source_type = 'synthesis' AND project_id = 'proj'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "two distinct clusters should yield two rows");
+    }
+
+    #[test]
+    fn insert_synthesis_with_links_source_id_order_independent() {
+        let db = test_db();
+        let sources = seed_three_sources(&db);
+
+        let id1 = db
+            .insert_synthesis_with_links(
+                synthesis_mem("c"),
+                &[sources[0].clone(), sources[1].clone(), sources[2].clone()],
+            )
+            .unwrap();
+        let id2 = db
+            .insert_synthesis_with_links(
+                synthesis_mem("c"),
+                &[sources[2].clone(), sources[0].clone(), sources[1].clone()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            id1, id2,
+            "same source set in different order must dedup to same row"
+        );
+    }
+
+    #[test]
+    fn insert_synthesis_with_links_rejects_empty_source_ids() {
+        let db = test_db();
+        let result = db.insert_synthesis_with_links(synthesis_mem("c"), &[]);
+        assert!(
+            result.is_err(),
+            "empty source_ids should return an error (caller bug)"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("non-empty"),
+            "error should explain the invariant, got: {msg}"
+        );
     }
 }

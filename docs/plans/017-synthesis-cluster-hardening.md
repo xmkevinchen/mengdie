@@ -41,7 +41,7 @@ Three scope items, all in the synthesis subsystem:
 
 This is the heaviest step. All SQL wrapped in one transaction (gemini P1.1): either the entire migration succeeds or it rolls back cleanly. The `compute_synthesis_cluster_hash` helper is defined HERE (not in a later step) so the backfill can call it directly — resolves challenger's step-ordering chicken-and-egg.
 
-- [ ] **Define helper**: add `pub fn compute_synthesis_cluster_hash(source_ids: &[String]) -> String` in `src/core/schema.rs` (colocated with existing `compute_content_hash` — codex P3a consistency). Implementation:
+- [x] **Define helper**: add `pub fn compute_synthesis_cluster_hash(source_ids: &[String]) -> String` in `src/core/schema.rs` (colocated with existing `compute_content_hash` — codex P3a consistency). Implementation:
   ```rust
   let mut ids: Vec<String> = source_ids.to_vec();
   ids.sort();            // lexicographic on String — stable + deterministic
@@ -50,8 +50,8 @@ This is the heaviest step. All SQL wrapped in one transaction (gemini P1.1): eit
   // sha256 hex of joined, same pattern as compute_content_hash
   ```
   Add a unit test at the bottom of `schema.rs` asserting a known input/output pair (e.g., `["a", "b"]` → specific hex string). Also assert `["b", "a"]` produces the same hash (order independence) and `["a", "a", "b"]` produces the same hash as `["a", "b"]` (dedup). Reject empty input with a `debug_assert!` or document the convention.
-- [ ] **Bump `SCHEMA_VERSION`** from 4 to 5 in `schema.rs:4`.
-- [ ] **Wrap v4→v5 block in an explicit transaction via `execute_batch`** (gemini P1.1 + adversarial P1 compile fix): `run_migrations(conn: &Connection)` takes an immutable reference; `Connection::transaction()` requires `&mut self` and is NOT usable without a signature change that ripples to all call sites. Use SQL-level transaction control instead: `conn.execute_batch("BEGIN TRANSACTION;")?;` at the top of the v4→v5 block, `conn.execute_batch("COMMIT;")?;` at the bottom. On any `?` short-circuit during the block, the outer `Result<()>` error propagates; wrap the body in a closure or use `(|| -> Result<()> { ... })()` so that errors trigger `conn.execute_batch("ROLLBACK;")` before returning. Pattern:
+- [x] **Bump `SCHEMA_VERSION`** from 4 to 5 in `schema.rs:4`.
+- [x] **Wrap v4→v5 block in an explicit transaction via `execute_batch`** (gemini P1.1 + adversarial P1 compile fix): `run_migrations(conn: &Connection)` takes an immutable reference; `Connection::transaction()` requires `&mut self` and is NOT usable without a signature change that ripples to all call sites. Use SQL-level transaction control instead: `conn.execute_batch("BEGIN TRANSACTION;")?;` at the top of the v4→v5 block, `conn.execute_batch("COMMIT;")?;` at the bottom. On any `?` short-circuit during the block, the outer `Result<()>` error propagates; wrap the body in a closure or use `(|| -> Result<()> { ... })()` so that errors trigger `conn.execute_batch("ROLLBACK;")` before returning. Pattern:
   ```rust
   conn.execute_batch("BEGIN TRANSACTION;")?;
   let migration_result = (|| -> rusqlite::Result<()> {
@@ -68,9 +68,9 @@ This is the heaviest step. All SQL wrapped in one transaction (gemini P1.1): eit
   }
   ```
   This keeps the existing `&Connection` signature intact; no ripple to `Db::open` / `Db::open_in_memory` / tests.
-- [ ] **Pre-check 1: orphan links** (dep-analyst P1 Q1): `SELECT COUNT(*) FROM memory_synthesis_links l LEFT JOIN memory_entries e ON e.id = l.source_memory_id WHERE e.id IS NULL;`. If non-zero, log `tracing::warn!` with the count, skip backfill for any synthesis whose source set contains an orphan, and abort migration with a clear error. (Do NOT silently produce a degenerate hash — the whole point is to catch corruption loudly.)
-- [ ] **Pre-check 2: zero-link synthesis rows** (dep-analyst P1): `SELECT id FROM memory_entries WHERE source_type = 'synthesis' AND id NOT IN (SELECT DISTINCT synthesis_memory_id FROM memory_synthesis_links);`. If any row returned, abort migration with an error naming the row IDs. Zero-link syntheses would backfill to `sha256("")` which silently conflates all of them — unacceptable.
-- [ ] **Pre-check 3: legacy duplicate clusters** (codex P1 + adversarial: spell out the SQL since the plan asks for computation the schema doesn't yet support). Approach: compute each synthesis's cluster in Rust from its link rows, build an in-memory `HashMap<cluster_key, Vec<syn_id>>`, and look for entries with `len() > 1`. Concrete:
+- [x] **Pre-check 1: orphan links** (dep-analyst P1 Q1): `SELECT COUNT(*) FROM memory_synthesis_links l LEFT JOIN memory_entries e ON e.id = l.source_memory_id WHERE e.id IS NULL;`. If non-zero, log `tracing::warn!` with the count, skip backfill for any synthesis whose source set contains an orphan, and abort migration with a clear error. (Do NOT silently produce a degenerate hash — the whole point is to catch corruption loudly.)
+- [x] **Pre-check 2: zero-link synthesis rows** (dep-analyst P1): `SELECT id FROM memory_entries WHERE source_type = 'synthesis' AND id NOT IN (SELECT DISTINCT synthesis_memory_id FROM memory_synthesis_links);`. If any row returned, abort migration with an error naming the row IDs. Zero-link syntheses would backfill to `sha256("")` which silently conflates all of them — unacceptable.
+- [x] **Pre-check 3: legacy duplicate clusters** (codex P1 + adversarial: spell out the SQL since the plan asks for computation the schema doesn't yet support). Approach: compute each synthesis's cluster in Rust from its link rows, build an in-memory `HashMap<cluster_key, Vec<syn_id>>`, and look for entries with `len() > 1`. Concrete:
   ```rust
   // Fetch all (syn_id, source_id) pairs
   let pairs: Vec<(String, String)> = conn
@@ -96,11 +96,11 @@ This is the heaviest step. All SQL wrapped in one transaction (gemini P1.1): eit
       .collect();
   ```
   For each duplicate cluster: fetch the synthesis rows from `memory_entries`, sort by `created_at` DESC, keep the first (newest), invalidate the rest via `UPDATE memory_entries SET valid_until = ?, invalidation_reason = 'merged by plan 017 cluster-hash migration' WHERE id = ?`. Log each coalesce at `tracing::info!` level with the kept/invalidated IDs. **Cover with a migration test** (see test list below). Heuristic accepted-risk per plan 017 Doodlestein regret: `created_at` is a proxy for "better row" that may not hold under a test-run-then-real-run scenario; at current 27-row corpus scale the probability of actual legacy duplicates is low, and the manual escape hatch is `mengdie invalidate` post-migration.
-- [ ] **ALTER TABLE** to add `synthesis_cluster_hash TEXT` (nullable — primary sources will have NULL).
-- [ ] **Make `idx_memory_content_hash` partial** (architect + dep-analyst P1): `DROP INDEX IF EXISTS idx_memory_content_hash; CREATE UNIQUE INDEX idx_memory_content_hash ON memory_entries(project_id, content_hash) WHERE source_type != 'synthesis';`. This exempts synthesis rows from content_hash dedup — they dedup on cluster_hash instead. Primary-source behavior unchanged.
-- [ ] **Backfill existing synthesis rows** (row-by-row loop — batched CTE deferred per gemini P2): for each row with `source_type = 'synthesis' AND synthesis_cluster_hash IS NULL`, query its `source_memory_id` list from `memory_synthesis_links`, call `compute_synthesis_cluster_hash`, UPDATE the row. Use a prepared statement to minimize overhead.
-- [ ] **Create partial unique index with `IS NOT NULL` guard** (gemini P1.2): `CREATE UNIQUE INDEX IF NOT EXISTS idx_synthesis_cluster ON memory_entries(project_id, synthesis_cluster_hash) WHERE source_type = 'synthesis' AND synthesis_cluster_hash IS NOT NULL;`. The `IS NOT NULL` clause prevents SQLite's multi-NULL-are-unique behavior from allowing duplicate null-hash rows.
-- [ ] **Add CHECK on `source_type` allowed values via trigger** (challenger + gemini P2, adversarial P3 pre-existing-data-safety): SQLite does NOT support `ALTER TABLE ... ADD CONSTRAINT CHECK` on existing tables — confirmed. The fallback is a BEFORE INSERT + BEFORE UPDATE trigger raising `RAISE(ABORT, ...)` on invalid values. **Pre-check required before installing the trigger** (adversarial P3): `SELECT DISTINCT source_type FROM memory_entries WHERE source_type NOT IN ('conclusion', 'review', 'plan', 'analysis', 'retrospect', 'synthesis');` — if non-empty, the migration must abort and surface the offending distinct values (production DB has data the allowlist doesn't cover). On clean pre-check, install:
+- [x] **ALTER TABLE** to add `synthesis_cluster_hash TEXT` (nullable — primary sources will have NULL).
+- [x] **Make `idx_memory_content_hash` partial** (architect + dep-analyst P1): `DROP INDEX IF EXISTS idx_memory_content_hash; CREATE UNIQUE INDEX idx_memory_content_hash ON memory_entries(project_id, content_hash) WHERE source_type != 'synthesis';`. This exempts synthesis rows from content_hash dedup — they dedup on cluster_hash instead. Primary-source behavior unchanged.
+- [x] **Backfill existing synthesis rows** (row-by-row loop — batched CTE deferred per gemini P2): for each row with `source_type = 'synthesis' AND synthesis_cluster_hash IS NULL`, query its `source_memory_id` list from `memory_synthesis_links`, call `compute_synthesis_cluster_hash`, UPDATE the row. Use a prepared statement to minimize overhead.
+- [x] **Create partial unique index with `IS NOT NULL` guard** (gemini P1.2): `CREATE UNIQUE INDEX IF NOT EXISTS idx_synthesis_cluster ON memory_entries(project_id, synthesis_cluster_hash) WHERE source_type = 'synthesis' AND synthesis_cluster_hash IS NOT NULL;`. The `IS NOT NULL` clause prevents SQLite's multi-NULL-are-unique behavior from allowing duplicate null-hash rows.
+- [x] **Add CHECK on `source_type` allowed values via trigger** (challenger + gemini P2, adversarial P3 pre-existing-data-safety): SQLite does NOT support `ALTER TABLE ... ADD CONSTRAINT CHECK` on existing tables — confirmed. The fallback is a BEFORE INSERT + BEFORE UPDATE trigger raising `RAISE(ABORT, ...)` on invalid values. **Pre-check required before installing the trigger** (adversarial P3): `SELECT DISTINCT source_type FROM memory_entries WHERE source_type NOT IN ('conclusion', 'review', 'plan', 'analysis', 'retrospect', 'synthesis');` — if non-empty, the migration must abort and surface the offending distinct values (production DB has data the allowlist doesn't cover). On clean pre-check, install:
   ```sql
   CREATE TRIGGER IF NOT EXISTS memory_entries_source_type_check
   BEFORE INSERT ON memory_entries
@@ -119,9 +119,9 @@ This is the heaviest step. All SQL wrapped in one transaction (gemini P1.1): eit
   END;
   ```
   Note: the triggers prevent setting `source_type` to a value outside the allowlist but do NOT prevent a synthesis row's `source_type` from being UPDATED to another valid value (e.g., "conclusion"). Full write-once enforcement is deferred; the partial-index caveat is documented in the helper comment and Known Risk below.
-- [ ] **PRAGMA integrity_check**: run `PRAGMA integrity_check;` before committing the transaction. If it returns anything other than `ok`, roll back and abort migration with the reported errors.
-- [ ] **Commit transaction + set PRAGMA user_version = 5**.
-- [ ] **Tests** (all in `src/core/schema.rs` test module):
+- [x] **PRAGMA integrity_check**: run `PRAGMA integrity_check;` before committing the transaction. If it returns anything other than `ok`, roll back and abort migration with the reported errors.
+- [x] **Commit transaction + set PRAGMA user_version = 5**.
+- [x] **Tests** (all in `src/core/schema.rs` test module):
   - `test_schema_version_is_v5_on_fresh_db` (pattern match at `schema.rs:188`): fresh DB ends at v5.
   - `test_migration_v4_to_v5_happy_path`: seed DB at v4 with 3 synthesis rows + their links (overlapping and non-overlapping source sets), run migration, assert v5, assert each row's `synthesis_cluster_hash` = expected value from helper.
   - `test_migration_v4_to_v5_rejects_orphan_links`: seed with a link pointing to a missing source memory, run migration, assert it aborts with orphan-link error.
@@ -135,13 +135,13 @@ Expected files: `src/core/schema.rs`
 
 ### Step 2: Switch `insert_synthesis_with_links` conflict key from `content_hash` to `synthesis_cluster_hash` (AC3)
 
-- [ ] **Rewrite `insert_synthesis_with_links`** at `src/core/db.rs:332-389`:
+- [x] **Rewrite `insert_synthesis_with_links`** at `src/core/db.rs:332-389`:
   - Compute `synthesis_cluster_hash` via the Step 1 helper at the top of the function (`use crate::core::schema::compute_synthesis_cluster_hash;` if needed).
   - Declare and document the `source_ids` invariant (codex P2): non-empty + caller-managed uniqueness; the helper's internal `sort + dedup` handles duplicates defensively, but an empty input is a caller bug. Add a runtime check: `anyhow::ensure!(!source_ids.is_empty(), "insert_synthesis_with_links requires at least one source_id");` at the top.
   - Change the INSERT to include `synthesis_cluster_hash` column and the value.
   - Change `ON CONFLICT(project_id, content_hash)` → `ON CONFLICT(project_id, synthesis_cluster_hash)`. DO UPDATE body unchanged — on cluster re-synthesis, update title/entities/embedding/is_longterm, preserve recall stats and id.
   - Add a code comment above the function documenting the `source_type` immutability convention (challenger + gemini P2): "This function writes `source_type = 'synthesis'`. Downstream code must not reclassify synthesis rows — the partial unique indexes `idx_synthesis_cluster` (WHERE source_type = 'synthesis') and `idx_memory_content_hash` (WHERE source_type != 'synthesis') both depend on this invariant. The CHECK constraint on `source_type` values limits the blast radius but does not fully enforce per-row immutability."
-- [ ] **Unit tests** in `src/core/db.rs` test module:
+- [x] **Unit tests** in `src/core/db.rs` test module:
   - `insert_synthesis_with_links_upserts_on_same_cluster`: call twice with same source_ids, different content text; assert exactly one synthesis row exists post-run (`SELECT COUNT(*) FROM memory_entries WHERE source_type = 'synthesis' AND project_id = ?` = 1), content is the latest value, id stable across calls.
   - `insert_synthesis_with_links_different_clusters_coexist`: call with `[a,b]` then `[b,c]`; assert both rows exist (different cluster_hashes). This also exercises the `idx_memory_content_hash` partial-index fix — if the two syntheses happen to produce identical content text (unlikely but the test can construct this), they coexist.
   - `insert_synthesis_with_links_source_id_order_independent`: call with `[a,b,c]` then `[c,b,a]` same text; assert exactly one row, same id.
