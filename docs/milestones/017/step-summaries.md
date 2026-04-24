@@ -104,3 +104,26 @@
 **Cross-step deps**: none. Step 6 (BL close-out) is pure bookkeeping.
 
 **Actual files**: `tests/dream_synthesis.rs`
+
+---
+
+## Step 6 — BL close-out + new BL filings (commit: TBD)
+
+**Decisions**:
+- **v0.8.0 BL frontmatter updates only** — no `mv` to `done/`, matches plans 015/016 convention. File-move is `/ae:roadmap close v0.8.0` territory, not per-plan close-out.
+- **Two in-sprint BLs closed**: `BL-synthesis-dedup-key` (option A shipped as cluster-hash dedup) + `BL-synthesis-provenance` (options 1 + 4 shipped; 2 + 3 deferred; 5 rejected). Body blockquotes preserve the discussion 022 disposition across all 5 options explicitly.
+- **Roadmap Items table NOT hand-edited** — table carries explicit `<!-- ae:roadmap managed — do not hand-edit; regenerated from .ae/backlog/v0.8.0/ -->` marker. BL frontmatter updates propagate on next `/ae:roadmap` invocation. This is architect Q5's "skip if regenerates immediately" path.
+- **Two new BLs filed under `unscheduled/`**:
+  - `BL-enable-pragma-foreign-keys` (size XS) — dep-analyst Q2 follow-up. `memory_synthesis_links` FK declarations are unenforced; plan 017's v5 migration pre-check caught one real zero-link synthesis row on the production DB (orphan-class failure mode possible under unenforced FKs). Two-line fix in `Db::open` + `Db::open_in_memory`. Trigger: first observed production corruption, next FK-bearing table added, or schema v6 migration.
+  - `BL-audit-collection-discipline` (size XS) — Doodlestein strategic follow-up. Plan 017 shipped `synthesis-audit <id>` as scaffolding for Options 2/3 ship-gate data but shipped zero collection discipline. Without a defined trigger the subcommand is zero-probability data collection and Options 2/3 stay deferred indefinitely. Proposes a shell one-liner MVP (zero code); triggers on operator auditing ≥50% of rows, Option 2/3 next discussion, or corpus > 100 synthesis rows.
+
+**Rejected**:
+- Hand-editing the roadmap Items table — managed marker + redundant with `/ae:roadmap` regen.
+- `mv`-ing closed BL files to `done/` — Step-6 convention (plans 015/016) is frontmatter-only; sprint close does the move.
+- Updating `initial_items` array in `v0.8.0.md` frontmatter — that's the committed list, not live status. Preserved intact.
+
+**Cross-step deps**: none. Step 6 is the final bookkeeping step; all code shipped in Steps 1-5.
+
+**Files touched (.ae/ — all gitignored)**: `.ae/backlog/v0.8.0/BL-synthesis-dedup-key.md`, `.ae/backlog/v0.8.0/BL-synthesis-provenance.md`, `.ae/backlog/unscheduled/BL-enable-pragma-foreign-keys.md` (new), `.ae/backlog/unscheduled/BL-audit-collection-discipline.md` (new).
+
+**Actual files**: `docs/plans/017-synthesis-cluster-hardening.md`, `docs/milestones/017/step-summaries.md`
