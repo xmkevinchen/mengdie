@@ -193,15 +193,15 @@ Expected files: `src/bin/cli.rs`
 
 The Step 2 unit tests cover the UPSERT invariant directly. This step adds an INTEGRATION-level regression test that simulates the real prompt-change workflow end-to-end, using the `COUNT=1-per-cluster-per-project` invariant (challenger P1) rather than id-equality (which is implementation-specific to `ON CONFLICT DO UPDATE RETURNING id`).
 
-- [ ] **Integration test** at `tests/dream_synthesis.rs` (append, not `#[ignore]`): `cluster_hash_dedup_survives_prompt_change_integration`. Pattern:
+- [x] **Integration test** at `tests/dream_synthesis.rs` (append, not `#[ignore]`): `cluster_hash_dedup_survives_prompt_change_integration`. Pattern:
   - Seed 3 short-term memories.
   - Call `insert_synthesis_with_links(NewMemory { content: "V1", ... }, source_ids)`.
   - Assert `SELECT COUNT(*) FROM memory_entries WHERE source_type = 'synthesis' AND project_id = ?` returns 1.
   - Call `insert_synthesis_with_links` again with the same source_ids but `content: "V2"`.
   - Re-assert COUNT = 1 (not 2). Fetch the synthesis row, assert `content = "V2"` (latest wins).
   - Assert `memory_synthesis_links` has exactly 3 rows for this synthesis (INSERT OR IGNORE handles repeat source edges).
-- [ ] **Cross-cluster coexistence test**: `insert_synthesis_with_links_different_source_sets_with_identical_content_coexist`. Construct two synthesis calls with DIFFERENT source sets but IDENTICAL content text (manufacture this — normally the LLM wouldn't produce identical text for different inputs, but the test enforces that `idx_memory_content_hash` partial-index fix from Step 1 actually works). Assert COUNT = 2, different ids, different cluster_hashes.
-- [ ] **Order-independence test** (restated at integration level): `cluster_hash_stable_across_source_id_order_integration`. Two calls with `[a,b,c]` vs `[c,a,b]` same set; COUNT = 1.
+- [x] **Cross-cluster coexistence test**: `insert_synthesis_with_links_different_source_sets_with_identical_content_coexist`. Construct two synthesis calls with DIFFERENT source sets but IDENTICAL content text (manufacture this — normally the LLM wouldn't produce identical text for different inputs, but the test enforces that `idx_memory_content_hash` partial-index fix from Step 1 actually works). Assert COUNT = 2, different ids, different cluster_hashes.
+- [x] **Order-independence test** (restated at integration level): `cluster_hash_stable_across_source_id_order_integration`. Two calls with `[a,b,c]` vs `[c,a,b]` same set; COUNT = 1.
 
 Expected files: `tests/dream_synthesis.rs`
 

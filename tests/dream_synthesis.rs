@@ -315,6 +315,143 @@ fn synthesis_audit_subcommand_errors_on_non_synthesis_id() {
     drop(tmp);
 }
 
+// ---- Plan 017 Step 5: cluster-hash dedup regression tests at integration
+// level (complements the src/core/db.rs unit tests with external-crate-level
+// coverage; uses the COUNT=1-per-cluster-per-project invariant, not
+// id-equality — robust against future ON CONFLICT refactors per plan 017
+// challenger P1). --------------------------------------------------------
+
+fn seed_three_source_memories(db: &Db, project: &str) -> Vec<String> {
+    (0..3)
+        .map(|i| {
+            db.insert_memory(NewMemory {
+                project_id: project.to_string(),
+                source_file: format!("src-{i}.md"),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: format!("source {i}"),
+                content: format!("source content {i}"),
+                entities: "tag".to_string(),
+                embedding: None,
+                embedding_dim: None,
+                is_longterm: false,
+            })
+            .unwrap()
+        })
+        .collect()
+}
+
+fn synthesis_new_memory(project: &str, content: &str) -> NewMemory {
+    NewMemory {
+        project_id: project.to_string(),
+        source_file: "syn.md".to_string(),
+        source_type: "synthesis".to_string(),
+        knowledge_type: "factual".to_string(),
+        title: "Synthesis fixture".to_string(),
+        content: content.to_string(),
+        entities: "tag".to_string(),
+        embedding: None,
+        embedding_dim: None,
+        is_longterm: false,
+    }
+}
+
+#[test]
+fn cluster_hash_dedup_survives_prompt_change_integration() {
+    let db = Db::open_in_memory().unwrap();
+    let sources = seed_three_source_memories(&db, "p017-int-1");
+
+    db.insert_synthesis_with_links(synthesis_new_memory("p017-int-1", "V1 content"), &sources)
+        .unwrap();
+    // Simulate a SYSTEM_PROMPT edit by re-synthesizing with the same source
+    // set but different LLM output text.
+    db.insert_synthesis_with_links(synthesis_new_memory("p017-int-1", "V2 content"), &sources)
+        .unwrap();
+
+    // COUNT=1-per-cluster-per-project invariant — NOT id-equality (which is
+    // incidentally true for ON CONFLICT DO UPDATE but would break under a
+    // future INSERT OR REPLACE refactor; the COUNT invariant is stable).
+    let syns: Vec<_> = db
+        .list_memories(Some("p017-int-1"))
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.source_type == "synthesis")
+        .collect();
+    assert_eq!(
+        syns.len(),
+        1,
+        "prompt change must UPDATE existing synthesis row, not create zombie"
+    );
+    assert_eq!(syns[0].content, "V2 content", "latest content wins");
+}
+
+#[test]
+fn different_source_sets_with_identical_content_coexist_integration() {
+    // Cross-cluster coexistence — exercises the Step 1 partial-index fix
+    // (`idx_memory_content_hash WHERE source_type != 'synthesis'`). Without
+    // the WHERE predicate, two syntheses with identical content text would
+    // conflict on content_hash even though their clusters differ.
+    let db = Db::open_in_memory().unwrap();
+    let sources = seed_three_source_memories(&db, "p017-int-2");
+
+    let subset_a = vec![sources[0].clone(), sources[1].clone()];
+    let subset_b = vec![sources[1].clone(), sources[2].clone()];
+
+    // Deliberately identical content text to exercise the content_hash
+    // partial-index branch.
+    db.insert_synthesis_with_links(
+        synthesis_new_memory("p017-int-2", "Identical text"),
+        &subset_a,
+    )
+    .unwrap();
+    db.insert_synthesis_with_links(
+        synthesis_new_memory("p017-int-2", "Identical text"),
+        &subset_b,
+    )
+    .unwrap();
+
+    let syns: Vec<_> = db
+        .list_memories(Some("p017-int-2"))
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.source_type == "synthesis")
+        .collect();
+    assert_eq!(
+        syns.len(),
+        2,
+        "two different clusters with identical content must coexist (Step 1 partial-index fix)"
+    );
+}
+
+#[test]
+fn cluster_hash_stable_across_source_id_order_integration() {
+    let db = Db::open_in_memory().unwrap();
+    let sources = seed_three_source_memories(&db, "p017-int-3");
+
+    db.insert_synthesis_with_links(
+        synthesis_new_memory("p017-int-3", "same content"),
+        &[sources[0].clone(), sources[1].clone(), sources[2].clone()],
+    )
+    .unwrap();
+    db.insert_synthesis_with_links(
+        synthesis_new_memory("p017-int-3", "same content"),
+        &[sources[2].clone(), sources[0].clone(), sources[1].clone()],
+    )
+    .unwrap();
+
+    let syns: Vec<_> = db
+        .list_memories(Some("p017-int-3"))
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.source_type == "synthesis")
+        .collect();
+    assert_eq!(
+        syns.len(),
+        1,
+        "source_id order must not affect cluster identity"
+    );
+}
+
 #[test]
 fn synthesis_audit_subcommand_errors_on_unknown_id() {
     let tmp = tempfile::NamedTempFile::new().unwrap();

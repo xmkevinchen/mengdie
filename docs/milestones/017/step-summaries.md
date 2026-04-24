@@ -84,3 +84,23 @@
 **Cross-step deps**: none downstream. Step 5's regression test covers different invariants (cluster dedup) and doesn't touch CLI output.
 
 **Actual files**: `src/bin/cli.rs`
+
+---
+
+## Step 5 — COUNT-based regression tests at integration layer (commit: TBD)
+
+**Decisions**:
+- 3 new tests appended to `tests/dream_synthesis.rs` (not `#[ignore]` — no LLM required; seed via `insert_*` directly):
+  - `cluster_hash_dedup_survives_prompt_change_integration` — two calls with same sources, different content → COUNT=1, latest content wins
+  - `different_source_sets_with_identical_content_coexist_integration` — two clusters with identical text → COUNT=2 (exercises Step 1's `idx_memory_content_hash` partial-index fix)
+  - `cluster_hash_stable_across_source_id_order_integration` — [a,b,c] vs [c,a,b] → COUNT=1
+- Used `db.list_memories(Some(project)).filter(source_type == "synthesis").count()` — matches existing test pattern in `tests/dream_synthesis.rs`. `Db::lock_conn` is private; no need to expose raw connections to tests.
+- Tests mirror (not duplicate) the unit tests in `src/core/db.rs` — unit tests exercise the internal code paths, integration tests exercise the public library API from an external-crate perspective. Both needed per plan 017 challenger P1 (COUNT-based invariant is the stable semantic contract).
+
+**Rejected**:
+- Raw rusqlite `conn.query_row("SELECT COUNT(*)...")` via `Db::lock_conn` — method is private; exposing it would bloat the public API for test convenience. `list_memories().filter()` is the intended library-level path.
+- Asserting `id1 == id2` in the integration tests — implementation-specific (ON CONFLICT DO UPDATE RETURNING returns existing id). The COUNT invariant is the semantic contract; id stability is incidental. Challenger P1 fix preserved.
+
+**Cross-step deps**: none. Step 6 (BL close-out) is pure bookkeeping.
+
+**Actual files**: `tests/dream_synthesis.rs`
