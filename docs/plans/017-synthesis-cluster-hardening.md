@@ -3,7 +3,7 @@ id: "017"
 title: "v0.8.0 synthesis cluster hardening — cluster-hash dedup + audit subcommand + source_type surfacing"
 type: plan
 created: 2026-04-23
-status: reviewed
+status: done
 discussion: "docs/discussions/022-synthesis-provenance-options/"
 ---
 
