@@ -1,5 +1,5 @@
 use anyhow::bail;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: i64 = 5;
@@ -54,7 +54,20 @@ pub fn compute_content_hash(content: &str) -> String {
 ///   stable when duplicates slip through).
 /// - IDs joined with the single ASCII comma `,` character. No spaces.
 /// - SHA-256 hex encoding, matching `compute_content_hash`.
+///
+/// Plan 017 /ae:review F6: empty `source_ids` is a caller bug —
+/// `insert_synthesis_with_links` guards against it with `anyhow::ensure!`
+/// and the migration's Pre-check 2 catches zero-link synthesis rows. Hashing
+/// an empty slice would yield `sha256("")` which silently collapses all
+/// zero-source clusters into one, so any other caller that bypasses the
+/// insert guard would create hidden dedup collisions. We reject it in debug
+/// builds and document the contract; release builds still hash deterministically
+/// so a slipped caller fails at partial-index uniqueness check rather than here.
 pub fn compute_synthesis_cluster_hash(source_ids: &[String]) -> String {
+    debug_assert!(
+        !source_ids.is_empty(),
+        "compute_synthesis_cluster_hash: source_ids must be non-empty (caller contract)"
+    );
     let mut ids: Vec<String> = source_ids.to_vec();
     ids.sort();
     ids.dedup();
@@ -200,7 +213,17 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     // See plan 017 Step 1 for the full rationale of each sub-step.
     if current_version < 5 {
         conn.execute_batch("BEGIN TRANSACTION;")?;
-        let migration_result = v5_migration(conn);
+        // Plan 017 /ae:review P2-B: the `PRAGMA user_version` write lives INSIDE
+        // the transaction so the version bump commits atomically with the schema
+        // changes. A crash between COMMIT and an external PRAGMA write would
+        // otherwise leave a v5 schema reading `user_version = 4`, causing the
+        // next startup to re-run v5_migration (all pre-checks pass so it would
+        // complete idempotently, but it emits confusing restart log noise).
+        let migration_result = (|| -> anyhow::Result<()> {
+            v5_migration(conn)?;
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            Ok(())
+        })();
         match migration_result {
             Ok(()) => conn.execute_batch("COMMIT;")?,
             Err(e) => {
@@ -211,9 +234,6 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             }
         }
     }
-
-    // Set schema version
-    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
 
     Ok(())
 }
@@ -237,6 +257,34 @@ fn v5_migration(conn: &Connection) -> anyhow::Result<()> {
             "plan 017 v5 migration aborted: {orphan_count} orphan rows in memory_synthesis_links \
              (link.source_memory_id points to missing memory_entries.id). \
              Repair manually before retrying."
+        );
+    }
+
+    // ---- Pre-check 1b: orphan / wrong-type synthesis_memory_id -----
+    // Plan 017 /ae:review P2-A (codex P1.1): Pre-check 1 only validates
+    // `source_memory_id`. A link row whose `synthesis_memory_id` does not
+    // exist in `memory_entries`, or exists but has `source_type != 'synthesis'`,
+    // would cause the coalesce/backfill paths to either silently no-op
+    // (wrong-type case — backfill WHERE source_type = 'synthesis' filters
+    // it) or — worse — pick the non-synthesis row as a coalesce candidate
+    // and potentially tombstone the real synthesis. Abort loudly instead.
+    let bad_syn_ref_query = "SELECT DISTINCT l.synthesis_memory_id
+         FROM memory_synthesis_links l
+         LEFT JOIN memory_entries e ON e.id = l.synthesis_memory_id
+         WHERE e.id IS NULL OR e.source_type != 'synthesis'";
+    let mut stmt_bad_syn = conn.prepare(bad_syn_ref_query)?;
+    let bad_syn_refs: Vec<String> = stmt_bad_syn
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt_bad_syn);
+    if !bad_syn_refs.is_empty() {
+        bail!(
+            "plan 017 v5 migration aborted: {} memory_synthesis_links row(s) reference \
+             synthesis_memory_id values that are missing from memory_entries or point \
+             to a non-synthesis row: {:?}. Repair manually before retrying.",
+            bad_syn_refs.len(),
+            bad_syn_refs
         );
     }
 
@@ -317,20 +365,52 @@ fn v5_migration(conn: &Connection) -> anyhow::Result<()> {
         by_cluster.entry(hash).or_default().push(syn_id.clone());
     }
     // For each cluster with multiple synthesis rows, coalesce.
+    //
+    // Plan 017 /ae:review P1-A (codex P1.2): candidates are filtered to
+    // LIVE rows only (`valid_until IS NULL`). Before the fix, an
+    // already-invalidated sibling with a newer `created_at` could win the
+    // sort and cause the only live row in the cluster to be tombstoned —
+    // leaving the cluster with no active synthesis.
+    //
+    // `created_at` tie-break: if two live rows have identical timestamps,
+    // the `sort_by` output order depends on the input order which comes
+    // from HashMap iteration (non-deterministic). Acceptable risk at
+    // current corpus scale (plan 017 Doodlestein regret note); operator
+    // escape hatch is `mengdie invalidate` post-migration.
     let now_for_coalesce = chrono::Utc::now().to_rfc3339();
     for (cluster_hash, syn_ids) in &by_cluster {
         if syn_ids.len() > 1 {
-            // Fetch (id, created_at) for each candidate.
+            // Fetch (id, created_at) for each LIVE candidate only.
+            // Rows that are already invalidated (valid_until IS NOT NULL)
+            // must NOT participate in the keeper election — they were
+            // invalidated for a reason and are not eligible to displace a
+            // live sibling.
             let mut with_ts: Vec<(String, String)> = Vec::with_capacity(syn_ids.len());
             for syn_id in syn_ids {
-                let ts: String = conn.query_row(
-                    "SELECT created_at FROM memory_entries WHERE id = ?1",
-                    rusqlite::params![syn_id],
-                    |r| r.get(0),
-                )?;
-                with_ts.push((syn_id.clone(), ts));
+                let row: Option<(String, Option<String>)> = conn
+                    .query_row(
+                        "SELECT id, valid_until FROM memory_entries WHERE id = ?1",
+                        rusqlite::params![syn_id],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()?;
+                if let Some((_, valid_until)) = row {
+                    if valid_until.is_none() {
+                        let ts: String = conn.query_row(
+                            "SELECT created_at FROM memory_entries WHERE id = ?1",
+                            rusqlite::params![syn_id],
+                            |r| r.get(0),
+                        )?;
+                        with_ts.push((syn_id.clone(), ts));
+                    }
+                }
             }
-            // Keep newest; invalidate older siblings.
+            // If fewer than 2 live candidates remain, there's no duplicate to
+            // coalesce — the cluster is already deduplicated de facto.
+            if with_ts.len() < 2 {
+                continue;
+            }
+            // Keep newest live row; invalidate older live siblings.
             with_ts.sort_by(|a, b| b.1.cmp(&a.1));
             let keep_id = with_ts[0].0.clone();
             let invalidate_ids: Vec<String> =
@@ -881,6 +961,138 @@ mod tests {
         assert!(
             result.is_err(),
             "update to junk source_type must fail under trigger"
+        );
+    }
+
+    /// Plan 017 /ae:review P3-B (challenger F3): the UPDATE trigger is
+    /// scoped to `BEFORE UPDATE OF source_type` — it must NOT fire on
+    /// unrelated column updates. Regression guard for a future refactor
+    /// that accidentally broadens trigger scope.
+    #[test]
+    fn test_trigger_allows_non_source_type_updates_on_synthesis_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Insert a synthesis row directly (migration is complete; trigger active).
+        // We bypass insert_synthesis_with_links here because we only need one row.
+        conn.execute(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, created_at,
+                 content_hash, synthesis_cluster_hash)
+             VALUES ('syn-x', 'proj', 'synthesis', 'synthesis', 'factual',
+                     't', 'c', 'e', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                     'ch', 'clh')",
+            [],
+        )
+        .unwrap();
+        // A non-source_type UPDATE must succeed (trigger is BEFORE UPDATE OF source_type).
+        let updated = conn
+            .execute(
+                "UPDATE memory_entries SET recall_count = 5 WHERE id = 'syn-x'",
+                [],
+            )
+            .expect("recall_count UPDATE must not fire the source_type trigger");
+        assert_eq!(updated, 1);
+    }
+
+    /// Plan 017 /ae:review P1-A regression (codex P1.2): the coalesce
+    /// logic must NOT tombstone a live synthesis row just because an
+    /// already-invalidated sibling happens to have a newer `created_at`.
+    /// Before the fix, `valid_until IS NULL` was not part of the keeper
+    /// filter, so an invalidated newer row could displace a live older row
+    /// and leave the cluster with no active synthesis.
+    #[test]
+    fn test_migration_v4_to_v5_coalesce_ignores_already_invalidated_siblings() {
+        let conn = seed_v4_db();
+        insert_raw_memory(&conn, "src-1", "conclusion", "s1", "2026-04-20T00:00:00Z");
+        // Live row (older).
+        insert_raw_memory(&conn, "syn-live", "synthesis", "v1", "2026-04-20T10:00:00Z");
+        // Already-invalidated row (newer created_at — would win the sort pre-fix).
+        insert_raw_memory(
+            &conn,
+            "syn-tombstone",
+            "synthesis",
+            "v2",
+            "2026-04-25T10:00:00Z",
+        );
+        conn.execute(
+            "UPDATE memory_entries
+             SET valid_until = '2026-04-25T11:00:00Z',
+                 invalidation_reason = 'pre-existing tombstone'
+             WHERE id = 'syn-tombstone'",
+            [],
+        )
+        .unwrap();
+        link_source(&conn, "src-1", "syn-live");
+        link_source(&conn, "src-1", "syn-tombstone");
+
+        run_migrations(&conn).unwrap();
+
+        // The live row must still be live — the tombstone must not have
+        // displaced it via the created_at DESC sort.
+        let live_valid_until: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memory_entries WHERE id = 'syn-live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            live_valid_until.is_none(),
+            "live synthesis row must survive coalesce when invalidated sibling has newer created_at"
+        );
+        // Live row got backfilled with a cluster_hash.
+        let live_hash: Option<String> = conn
+            .query_row(
+                "SELECT synthesis_cluster_hash FROM memory_entries WHERE id = 'syn-live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(live_hash.is_some());
+        // Pre-existing tombstone reason is preserved (NOT overwritten by coalesce).
+        let tombstone_reason: Option<String> = conn
+            .query_row(
+                "SELECT invalidation_reason FROM memory_entries WHERE id = 'syn-tombstone'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tombstone_reason,
+            Some("pre-existing tombstone".to_string()),
+            "pre-existing invalidation_reason must not be overwritten"
+        );
+    }
+
+    /// Plan 017 /ae:review P2-A (codex P1.1): `memory_synthesis_links.synthesis_memory_id`
+    /// pointing to a missing row, or to a row with `source_type != 'synthesis'`,
+    /// must abort the migration at the new pre-check 1b. Without this guard
+    /// the wrong-type case could cause the coalesce path to tombstone a real
+    /// synthesis in favour of a non-synthesis sibling.
+    #[test]
+    fn test_migration_v4_to_v5_rejects_dangling_or_wrong_type_synthesis_memory_id() {
+        let conn = seed_v4_db();
+        insert_raw_memory(&conn, "src-1", "conclusion", "s1", "2026-04-20T00:00:00Z");
+        insert_raw_memory(
+            &conn,
+            "not-a-synthesis",
+            "conclusion",
+            "c1",
+            "2026-04-20T00:00:00Z",
+        );
+        // Link a source to a non-synthesis row (wrong-type synthesis_memory_id).
+        link_source(&conn, "src-1", "not-a-synthesis");
+
+        let err = run_migrations(&conn).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("synthesis_memory_id"),
+            "expected bad-synthesis-ref error, got: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-synthesis"),
+            "expected error to name the offending id, got: {msg}"
         );
     }
 

@@ -634,10 +634,13 @@ fn cmd_search(
 /// alongside the existing `source:` (file path), `entities`, and
 /// `recalled: Nx`. `type:` is deliberately named distinct from `source:`
 /// (which is the file path) to avoid operator confusion.
-pub(crate) fn format_search_result(r: &mengdie::core::search::SearchResult, rank: usize) -> String {
+pub(crate) fn format_search_result(
+    r: &mengdie::core::search::SearchResult,
+    index: usize,
+) -> String {
     let snippet: String = r.entry.content.chars().take(100).collect();
     format!(
-        "{rank}. [score: {:.4}] {} ({})\n   type: {} | source: {} | entities: {} | recalled: {}x\n   {}",
+        "{index}. [score: {:.4}] {} ({})\n   type: {} | source: {} | entities: {} | recalled: {}x\n   {}",
         r.score,
         r.entry.title,
         r.entry.knowledge_type,

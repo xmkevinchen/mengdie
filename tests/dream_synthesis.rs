@@ -480,3 +480,89 @@ fn synthesis_audit_subcommand_errors_on_unknown_id() {
 
     drop(tmp);
 }
+
+/// Plan 017 /ae:review P2-D (challenger F8): `get_synthesis_with_sources`
+/// must return a placeholder `MemoryEntry` for any source that has been
+/// hard-deleted, rather than aborting the audit. Plan Step 3 explicitly
+/// required this test coverage but the original commit shipped without it.
+///
+/// Tested at the library level (`Db::get_synthesis_with_sources`) rather
+/// than via subprocess — the placeholder fields are what matters, and the
+/// subprocess-wired `cmd_synthesis_audit` prints `<deleted:` titles
+/// verbatim (verified by reading cli.rs cmd_synthesis_audit).
+#[test]
+fn get_synthesis_with_sources_returns_placeholder_for_deleted_source() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+    let db = Db::open(&db_path).unwrap();
+
+    // Seed a synthesis + 2 sources.
+    let syn_id = seed_synthesis_for_audit(&db);
+
+    // Find a source id (any) and hard-delete it via raw SQL through
+    // the existing library surface. `Db::list_memories` returns primary
+    // sources (it filters by source_type under the hood via project scope).
+    let memories = db.list_memories(Some("audit-test")).unwrap();
+    let a_source = memories
+        .iter()
+        .find(|m| m.source_type != "synthesis")
+        .expect("at least one primary source must exist");
+    let deleted_id = a_source.id.clone();
+
+    // Raw hard-delete — not an API Db exposes, because we intentionally
+    // DO NOT want to support hard deletion as a first-class op. Use the
+    // available library surface: invalidate + audit. For this test we
+    // really need a hard-delete to exercise the placeholder path, so
+    // fall back to re-opening a raw Connection.
+    {
+        use rusqlite::Connection;
+        let conn = Connection::open(&db_path).unwrap();
+        // rusqlite `bundled` defaults FK ON for a fresh Connection::open,
+        // whereas `Db::open` doesn't set the PRAGMA (BL-enable-pragma-foreign-keys).
+        // Disable explicitly so we can seed the hard-deleted state this test
+        // needs to exercise — mirroring the production risk window where an
+        // orphan-link condition could exist on a live DB.
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(
+            "DELETE FROM memory_entries WHERE id = ?1",
+            rusqlite::params![deleted_id],
+        )
+        .unwrap();
+    }
+
+    // Now fetch the synthesis + sources — the deleted source must surface
+    // as a placeholder.
+    let (syn, sources) = db.get_synthesis_with_sources(&syn_id).unwrap();
+    assert_eq!(syn.id, syn_id);
+    assert_eq!(sources.len(), 2, "both linked sources must be returned");
+
+    let placeholder = sources
+        .iter()
+        .find(|s| s.id == deleted_id)
+        .expect("deleted source must appear as placeholder");
+    assert_eq!(
+        placeholder.source_type, "<deleted>",
+        "placeholder must carry source_type = '<deleted>'"
+    );
+    assert!(
+        placeholder.title.starts_with("<deleted: "),
+        "placeholder title must signal deletion, got: {}",
+        placeholder.title
+    );
+    assert!(
+        placeholder.content.is_empty(),
+        "placeholder content must be empty (no leaked stale row)"
+    );
+    assert_eq!(placeholder.recall_count, 0);
+    assert_eq!(placeholder.avg_relevance, 0.0);
+
+    // The non-deleted source must still render as a real row.
+    let real = sources
+        .iter()
+        .find(|s| s.id != deleted_id)
+        .expect("the other source must still be present");
+    assert_ne!(real.source_type, "<deleted>");
+    assert!(!real.content.is_empty());
+
+    drop(tmp);
+}
