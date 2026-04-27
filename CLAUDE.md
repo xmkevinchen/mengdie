@@ -1,5 +1,18 @@
 # CLAUDE.md
 
+## Language Conventions
+
+- **Chat / conversation responses**: Chinese (中文).
+- **Git-tracked artifacts** (anything that ends up in a commit — `docs/`,
+  `src/`, `tests/`, `CHANGELOG.md`, `README.md`, plans, reviews,
+  conclusions, commit messages, code comments, etc.): English.
+- **Non-archived working files** (anything gitignored — `.ae/backlog/`,
+  `.ae/discussions/`, `.ae/roadmaps/`, `.ae/plans/` if any, scratchpads,
+  local notes): Chinese (中文).
+
+The boundary is "does it leave my machine via git." Tracked → English.
+Untracked → Chinese. Spoken word → Chinese.
+
 ## What This Is
 
 Mengdie (梦蝶) — AI-native knowledge memory for development workflows. Named after Zhuangzi's butterfly dream (庄周梦蝶).
