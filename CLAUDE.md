@@ -196,12 +196,18 @@ production DB (empirical results in `docs/backlog/BL-clustering-validation.md`).
 
 Plan 006 (dream MVP) was superseded by the 007/009/010 split and is `status: cancelled`.
 
-**Next step (current)**: address the 67% residuals rate observed in the first
-real dream run (signal that clustering threshold or min_size is too strict
-for our corpus) — draft `BL-residuals-reduction` with a second-pass strategy.
-Sibling options: resume BL-008 (power-law decay), run `/ae:roadmap` over the
-growing backlog, or start the 2-week forced-use validation scorecard from
-discussion 013 (still unstarted).
+**Next step (current)**: v0.8.5 sprint per discussion 023 conclusion —
+production-readiness + structural-debt theme. Sequence: (a) production
+v5 migration on `~/.mengdie/db.sqlite` (resolve orphon synthesis row
+`529d3212-...` first), (b) backlog hygiene commit (migrate
+`docs/backlog/` legacy BLs to `.ae/backlog/unscheduled/`, dedup the FK
+BL pair), (c) `/ae:discuss BL-009` to convert the 6-line stub at
+`docs/backlog/005-phase2-roadmap.md:66-71` into a real design before
+v0.8.5 plans, (d) `/ae:roadmap plan v0.8.5` with: BL-dreaming-module-split,
+BL-synthesis-cluster-hash-not-null-enforcement, BL-v5-migration-operator-docs.
+
+(Earlier "67% residuals" line removed — addressed by plan 011 + discussion
+018; the algorithm is correct, residuals reflect genuine corpus diversity.)
 
 **Advisory rule for closing plans**: when `/ae:work` completes all plan
 checkboxes, the completion commit must also update the parent discussion's
