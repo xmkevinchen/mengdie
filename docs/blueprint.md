@@ -388,3 +388,35 @@ This blueprint is revised when:
   specification before migration begins
 - A locked §9 out-of-scope item is genuinely re-opened (rare;
   requires a discussion documenting why)
+
+## 12. v0.0.1 architecture decisions (concluded 2026-04-28)
+
+See `docs/discussions/028-v0.0.1-architecture-design/conclusion.md`
+for the full Decision Summary. Headline decisions:
+
+- **Storage layer (Tier 1)**: free functions over `&Db`, no
+  `Storage` trait. Trait deferred to Tier 2 (Kuzu) trigger.
+- **Bi-temporal `event_time` column**: NOT in v0.0.1 schema.
+  Alternative: optional `valid_from` parameter on `memory_ingest`
+  for bulk import. Re-open path = new discussion when batch-import
+  workflow ships.
+- **Reflection module consolidation**: deferred pending sqlite-vec
+  compatibility spike outcome.
+- **`Reflector` trait**: NOT in v0.0.1, regardless of sqlite-vec
+  outcome. ANN is similarity-primitive swap, not 2nd reflection
+  strategy.
+- **A-MEM bidirectional update**: deferred from v0.0.1. Trigger =
+  corpus ≥1k AND ≥5 supersession-within-7-days events / 30-day
+  window from persisted domain audit table.
+- **MCP `memory_search` ACK feedback**: NOT in v0.0.1 contract.
+  Triggers must be server-side observable.
+- **v0.0.1 P0 instrumentation requirement**: persisted domain audit
+  table with separate `audit_returned_facts` link table (FK to
+  `memory_entries.id`) — derived from A-MEM trigger needs.
+- **Search-split refactor**: IN v0.0.1 sprint (alongside
+  `mcp_tools.rs` two-ingest-paths defect fix). search.rs functions
+  + `search_vector` move from `impl Db` to module-level.
+
+v0.0.1 sprint structure (per 028 Doodlestein-strategic finding):
+two-wave BL ordering with BL B (sqlite-vec spike) requiring an
+explicit PASS/FAIL outcome record.

@@ -1,11 +1,12 @@
 ---
 id: "028"
 title: "v0.0.1 architecture design — layering, traits, schema, 4 open decisions"
-status: active
+status: concluded
 created: 2026-04-27
+concluded: 2026-04-28
 pipeline:
   analyze: done
-  discuss: pending
+  discuss: done
   plan: pending
   work: pending
 plan: ""
@@ -38,7 +39,15 @@ This discussion validates / challenges all of the above with team
 review against blueprint, code, and industry findings.
 
 ## Topics
-*Created by `/ae:discuss`*
+
+| # | Topic | File | Status | Decision |
+|---|-------|------|--------|----------|
+| 1 | Storage trait + search-split refactor scope | [topic-01-storage-trait-search-split/](topic-01-storage-trait-search-split/) | converged | search-split YES; trait NO; free functions over `&Db` |
+| 2 | Bi-temporal event_time vs ingested_at column | [topic-02-bi-temporal-event-time/](topic-02-bi-temporal-event-time/) | converged | REJECT permanently; optional `valid_from` parameter alternative |
+| 3 | Reflection collapse + Reflector trait | [topic-03-reflection-collapse/](topic-03-reflection-collapse/) | converged (UAG) | defer collapse pending sqlite-vec; Reflector trait NO regardless |
+| 4 | A-MEM bidirectional update deferral trigger | [topic-04-amem-bidirectional-trigger/](topic-04-amem-bidirectional-trigger/) | converged | defer; corpus + audit-log supersession trigger |
 
 ## Documents
+- [Framing](framing.md)
 - [Analysis](analysis.md)
+- [Conclusion](conclusion.md) *(after Doodlestein review)*
