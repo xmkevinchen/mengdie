@@ -1,13 +1,15 @@
 ---
 id: "024"
 title: "BL-009: MCP Dream Tool — synthesis loop inside a Claude session"
-status: active
+status: concluded
 created: 2026-04-27
 pipeline:
   analyze: skipped
   discuss: done
-  plan: pending
+  plan: skipped
+  work: skipped
 plan: ""
+superseded_by: "docs/v0.0.1-rebuild-plan.md"
 tags: [bl-009, mcp-tool, dream, synthesis, in-session, claude-mediated, v0.9.0]
 ---
 

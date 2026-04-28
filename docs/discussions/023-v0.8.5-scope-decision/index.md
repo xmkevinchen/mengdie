@@ -1,14 +1,15 @@
 ---
 id: "023"
 title: "v0.8.5 scope — feature inventory + sprint contents"
-status: active
+status: concluded
 created: 2026-04-27
 pipeline:
   analyze: done
   discuss: done
-  plan: pending
-  work: pending
+  plan: skipped
+  work: skipped
 plan: ""
+superseded_by: "docs/v0.0.1-rebuild-plan.md"
 tags: [v0.8.5, sprint-planning, feature-inventory, backlog-triage, roadmap]
 ---
 
