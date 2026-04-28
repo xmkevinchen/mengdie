@@ -4,7 +4,7 @@ title: "sqlite-vec compatibility verification spike (F-001 / BL-007)"
 type: plan
 created: 2026-04-28
 reviewed: 2026-04-28
-status: reviewed
+status: done
 discussion: "docs/discussions/028-v0.0.1-architecture-design/"
 feature: ".ae/features/active/F-001-sqlite-vec-compatibility-verification-sp/"
 backlog: BL-007
