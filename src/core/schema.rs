@@ -2,7 +2,12 @@ use anyhow::bail;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 5;
+/// Head schema version. Each migration block writes its OWN target version
+/// as a literal (per F-002 plan Step 1 Doodlestein-adversarial M7) rather
+/// than templating off this constant — so this binding is referenced only
+/// from `#[cfg(test)]` head-version assertions (e.g. AC1 idempotency check).
+#[allow(dead_code)]
+const SCHEMA_VERSION: i64 = 6;
 
 /// Allowed `source_type` values. Enforced via BEFORE INSERT / BEFORE UPDATE
 /// triggers installed in the v5 migration (plan 017). SQLite does not
@@ -221,7 +226,12 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         // complete idempotently, but it emits confusing restart log noise).
         let migration_result = (|| -> anyhow::Result<()> {
             v5_migration(conn)?;
-            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            // Plan F-002 Doodlestein-adversarial M7: each migration block pins
+            // its OWN target version as a literal, NOT `{SCHEMA_VERSION}`. After
+            // a future v7 bumps the constant, the v5 block must still write 5,
+            // not the head version — otherwise a v6-crash-after-v5-commit
+            // produces a v5 schema reading user_version = head.
+            conn.execute_batch("PRAGMA user_version = 5;")?;
             Ok(())
         })();
         match migration_result {
@@ -229,6 +239,67 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             Err(e) => {
                 // Best-effort rollback. If ROLLBACK itself fails, surface the
                 // original error — the rollback failure is noise by comparison.
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+
+    // Migration v6: persisted domain audit (F-002 Wave 1, plan F-002 Step 1).
+    //
+    // Adds two tables and three indexes:
+    //   - `memory_search_audit` — one row per memory_search call (query, scope,
+    //     took_ms, searched_at).
+    //   - `audit_returned_facts` — link table (audit_id, fact_id, rank) with
+    //     unenforced FKs into both audit and memory_entries (PRAGMA
+    //     foreign_keys stays OFF project-wide; FK clauses are documentation
+    //     per 029 YAGNI 1).
+    //   - Three indexes covering the AC4 supersession SQL: composite on
+    //     (searched_at, id), reverse-FK covering on (fact_id, audit_id), and
+    //     a partial on memory_entries(valid_until, id) WHERE valid_until IS
+    //     NOT NULL.
+    //
+    // Atomicity rests on SQLite's transaction guarantee: the version write
+    // commits with the schema as one unit. `IF NOT EXISTS` clauses are
+    // belt-and-braces idempotence, not the primary safety mechanism.
+    if current_version < 6 {
+        conn.execute_batch("BEGIN TRANSACTION;")?;
+        let migration_result = (|| -> anyhow::Result<()> {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS memory_search_audit (
+                    id          INTEGER PRIMARY KEY,
+                    query       TEXT NOT NULL,
+                    scope       TEXT,
+                    took_ms     INTEGER NOT NULL,
+                    searched_at TEXT NOT NULL
+                 );
+
+                 CREATE TABLE IF NOT EXISTS audit_returned_facts (
+                    audit_id INTEGER NOT NULL,
+                    fact_id  TEXT NOT NULL,
+                    rank     INTEGER NOT NULL,
+                    PRIMARY KEY (audit_id, fact_id),
+                    FOREIGN KEY (audit_id) REFERENCES memory_search_audit(id),
+                    FOREIGN KEY (fact_id) REFERENCES memory_entries(id)
+                 );
+
+                 CREATE INDEX IF NOT EXISTS idx_memory_search_audit_searched_id
+                     ON memory_search_audit(searched_at, id);
+
+                 CREATE INDEX IF NOT EXISTS idx_audit_returned_facts_fact_audit
+                     ON audit_returned_facts(fact_id, audit_id);
+
+                 CREATE INDEX IF NOT EXISTS idx_memory_entries_valid_until_id
+                     ON memory_entries(valid_until, id)
+                     WHERE valid_until IS NOT NULL;
+
+                 PRAGMA user_version = 6;",
+            )?;
+            Ok(())
+        })();
+        match migration_result {
+            Ok(()) => conn.execute_batch("COMMIT;")?,
+            Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(e);
             }
@@ -553,20 +624,20 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_v5_on_fresh_db() {
+    fn test_v6_migration_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
-        // Idempotent: re-running leaves version at 5.
+        // Idempotent: re-running leaves version at 6.
         run_migrations(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -780,7 +851,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Backfilled cluster_hash matches helper.
         let expected = compute_synthesis_cluster_hash(&["src-1".to_string(), "src-2".to_string()]);
