@@ -8,7 +8,7 @@ pipeline:
   analyze: done
   discuss: done
   plan: done
-  work: pending
+  work: done
 plan: "docs/plans/018-sqlite-vec-compat-spike.md"
 parent_plan: "docs/v0.0.1-rebuild-plan.md"
 parent_blueprint: "docs/blueprint.md"

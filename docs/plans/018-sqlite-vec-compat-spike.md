@@ -63,64 +63,64 @@ Spike will confirm or refute against `=0.1.9` specifically.
 ## Steps
 
 ### Step 1: Add dep + register extension + build smoke (AC1)
-- [ ] Branch off current branch into `spike/018-sqlite-vec` (per dep-analyst review — operator runs all spike commits on this branch; merge semantics defined in Step 5)
-- [ ] Add `sqlite-vec = "=0.1.9"` (exact pin) to `Cargo.toml` `[dev-dependencies]`
-- [ ] Verify `rusqlite = "0.39"` already has `features = ["bundled", "load_extension"]` (per F-001 analysis)
-- [ ] Create `examples/sqlite_vec_smoke.rs` (per codex-proxy review — Cargo target compatibility; `spike/` is NOT Cargo-discovered)
-- [ ] In `examples/sqlite_vec_smoke.rs` `main()`: call `unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ()))) }` BEFORE first `Connection::open_in_memory()`
-- [ ] Open in-memory connection; run `SELECT vec_version()`; capture returned version string
-- [ ] Confirm `cargo run --example sqlite_vec_smoke` builds + runs to completion without panic on macOS arm64
+- [x] Branch off current branch into `spike/018-sqlite-vec` (per dep-analyst review — operator runs all spike commits on this branch; merge semantics defined in Step 5)
+- [x] Add `sqlite-vec = "=0.1.9"` (exact pin) to `Cargo.toml` `[dev-dependencies]`
+- [x] Verify `rusqlite = "0.39"` already has `features = ["bundled", "load_extension"]` (per F-001 analysis)
+- [x] Create `examples/sqlite_vec_smoke.rs` (per codex-proxy review — Cargo target compatibility; `spike/` is NOT Cargo-discovered)
+- [x] In `examples/sqlite_vec_smoke.rs` `main()`: call `unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ()))) }` BEFORE first `Connection::open_in_memory()`
+- [x] Open in-memory connection; run `SELECT vec_version()`; capture returned version string
+- [x] Confirm `cargo run --example sqlite_vec_smoke` builds + runs to completion without panic on macOS arm64
 
 Expected files: `Cargo.toml` (transient — reverted in Step 4), `Cargo.lock` (transient), `examples/sqlite_vec_smoke.rs` (transient — deleted in Step 4)
 
 ### Step 2: vec0 + KNN + self-match smoke (AC2)
-- [ ] In the smoke binary: `CREATE VIRTUAL TABLE vec_test USING vec0(embedding float[384])`
-- [ ] Construct **explicit non-orthogonal unit-vector pair** (per gemini-proxy review — one-hot can't produce dot=0.5):
+- [x] In the smoke binary: `CREATE VIRTUAL TABLE vec_test USING vec0(embedding float[384])`
+- [x] Construct **explicit non-orthogonal unit-vector pair** (per gemini-proxy review — one-hot can't produce dot=0.5):
   - `A = [1.0, 0.0, 0.0, ..., 0.0]` (384-d, position 0 = 1.0)
   - `B = [0.5, sqrt(0.75), 0.0, ..., 0.0]` (384-d, sqrt(0.75) ≈ 0.8660254)
   - Verify (in test code, before INSERT): `dot(A, B) = 0.5` and `||A|| = ||B|| = 1.0` (within 1e-6 of 1.0 to confirm unit norms)
-- [ ] Add 3 additional unit vectors at different positions (e.g., one-hot at positions 1, 2, 3 — orthogonal to A and B for sanity)
-- [ ] INSERT all 5 vectors via parameterized SQL with blob bind (using `f.to_le_bytes()` flat-mapped per `embeddings.rs:96-98` — F-001 confirms byte-format match with sqlite-vec's MATCH bind input)
-- [ ] Run KNN: `SELECT rowid, distance FROM vec_test WHERE embedding MATCH ? ORDER BY distance LIMIT 3` with A as the probe
-- [ ] **Self-match assertion** (single ownership at Step 2 — per architect review; not duplicated at Step 3): query A against itself → top result rowid = A's rowid, distance < 1e-4
-- [ ] Capture (rowid, distance) tuples for B and other inserted vectors for Step 3 analysis
+- [x] Add 3 additional unit vectors at different positions (e.g., one-hot at positions 1, 2, 3 — orthogonal to A and B for sanity)
+- [x] INSERT all 5 vectors via parameterized SQL with blob bind (using `f.to_le_bytes()` flat-mapped per `embeddings.rs:96-98` — F-001 confirms byte-format match with sqlite-vec's MATCH bind input)
+- [x] Run KNN: `SELECT rowid, distance FROM vec_test WHERE embedding MATCH ? ORDER BY distance LIMIT 3` with A as the probe
+- [x] **Self-match assertion** (single ownership at Step 2 — per architect review; not duplicated at Step 3): query A against itself → top result rowid = A's rowid, distance < 1e-4
+- [x] Capture (rowid, distance) tuples for B and other inserted vectors for Step 3 analysis
 
 Expected files: `examples/sqlite_vec_smoke.rs` (continued; same transient file)
 
 ### Step 3 [PRIMARY]: Distance metric identification (AC3)
-- [ ] From the KNN results in Step 2: extract the (A, B) pair's returned `distance` value
-- [ ] Compute reference values for unit vectors with `dot(A, B) = 0.5`:
+- [x] From the KNN results in Step 2: extract the (A, B) pair's returned `distance` value
+- [x] Compute reference values for unit vectors with `dot(A, B) = 0.5`:
   - cosine_distance = `1 - dot = 0.5`
   - L2_distance = `sqrt(2 - 2·dot) = sqrt(1.0) = 1.0`
-- [ ] **Branch on result**:
+- [x] **Branch on result**:
   - Case 1 — `|returned_distance - 0.5| < 1e-4` → metric = **cosine** → outcome candidate **PASS**
   - Case 2 — `|returned_distance - 1.0| < 1e-4` → metric = **L2** → outcome candidate **PASS_WITH_CONDITIONS** (codex-proxy notes column-declaration override `distance_metric=cosine` is documented; spike additionally verifies whether this override is available at runtime)
   - Case 3 — neither matches within 1e-4 → metric = **indeterminate** → outcome **FAIL** with caveat reason "metric identity indeterminate — returned distance {X} matches neither cosine (0.5) nor L2 (1.0) for the probe pair (dot=0.5); investigation required (possible: L2-squared, dot-product distance, or sqlite-vec internal change)" (per dep-analyst review — this previously had no fallback branch)
-- [ ] If Case 2: additionally test the override path — `CREATE VIRTUAL TABLE vec_test_cos USING vec0(embedding float[384] distance_metric=cosine)`, INSERT same vectors, query A against B; assert returned distance ≈ 0.5 (cosine) within 1e-4. If override works → caveat severity ACCEPTABLE, trigger_fires true. If override fails (column declaration syntax not accepted, or distance still returns L2) → caveat severity BLOCKER, trigger_fires false.
-- [ ] Capture all observed values (returned distances, override test result if applicable, sqlite-vec version, rusqlite version, SQLite bundled version, OS/arch, rustc version, exact SQL queries used) for Step 5's outcome record
+- [x] If Case 2: additionally test the override path — `CREATE VIRTUAL TABLE vec_test_cos USING vec0(embedding float[384] distance_metric=cosine)`, INSERT same vectors, query A against B; assert returned distance ≈ 0.5 (cosine) within 1e-4. If override works → caveat severity ACCEPTABLE, trigger_fires true. If override fails (column declaration syntax not accepted, or distance still returns L2) → caveat severity BLOCKER, trigger_fires false.
+- [x] Capture all observed values (returned distances, override test result if applicable, sqlite-vec version, rusqlite version, SQLite bundled version, OS/arch, rustc version, exact SQL queries used) for Step 5's outcome record
 
 Expected files: `examples/sqlite_vec_smoke.rs`
 
 ### Step 4: Revert temp deps/files + final validation (AC5, AC6)
-- [ ] Remove `sqlite-vec = "=0.1.9"` from `Cargo.toml` `[dev-dependencies]`
-- [ ] Delete `examples/sqlite_vec_smoke.rs`
-- [ ] Run `cargo build --release --locked` (per codex-proxy — `--locked` ensures Cargo.lock is internally consistent post-revert; per dep-analyst, unrelated transitive dep updates are acceptable, but `--locked` catches accidental state corruption)
-- [ ] Run `cargo build --release` (without `--locked`) to regenerate Cargo.lock cleanly without sqlite-vec entry
-- [ ] Confirm `cargo build --release` + `cargo test` exit 0
-- [ ] Confirm `Cargo.lock` has no `sqlite-vec` entry: `grep -c "name = \"sqlite-vec\"" Cargo.lock` returns 0
-- [ ] Run AC6 git-diff assertion (per architect — `merge-base` anchor, not `HEAD~N`):
+- [x] Remove `sqlite-vec = "=0.1.9"` from `Cargo.toml` `[dev-dependencies]`
+- [x] Delete `examples/sqlite_vec_smoke.rs`
+- [x] Run `cargo build --release --locked` (per codex-proxy — `--locked` ensures Cargo.lock is internally consistent post-revert; per dep-analyst, unrelated transitive dep updates are acceptable, but `--locked` catches accidental state corruption)
+- [x] Run `cargo build --release` (without `--locked`) to regenerate Cargo.lock cleanly without sqlite-vec entry
+- [x] Confirm `cargo build --release` + `cargo test` exit 0
+- [x] Confirm `Cargo.lock` has no `sqlite-vec` entry: `grep -c "name = \"sqlite-vec\"" Cargo.lock` returns 0
+- [x] Run AC6 git-diff assertion (per architect — `merge-base` anchor, not `HEAD~N`):
   ```
   git diff --name-only $(git merge-base HEAD main)..HEAD -- src/
   ```
   Output MUST be empty. If output is non-empty → spike failed scope check; investigate.
-- [ ] At this point working tree is clean except for evidence captured in Step 3 (held in operator's notes / shell scratchpad — not yet committed); next step writes the outcome record from this captured evidence.
+- [x] At this point working tree is clean except for evidence captured in Step 3 (held in operator's notes / shell scratchpad — not yet committed); next step writes the outcome record from this captured evidence.
 
 Expected files: `Cargo.toml` (revert to pre-spike), `Cargo.lock` (revert — regenerated), `examples/sqlite_vec_smoke.rs` (deleted). NO file in `src/`.
 
 ### Step 5: Write outcome record + commit single final state (AC4, AC7)
 *(Renumbered AC: AC4 = outcome-record content; AC7 = single-commit final state. Outcome record commit is **last**, per codex-proxy — record must describe final mergeable state, not an intermediate.)*
 
-- [ ] Create `docs/spikes/sqlite-vec-compat.md` with frontmatter (per codex-proxy ADR/MADR enrichment + challenger Phase 2 P4 structured caveats):
+- [x] Create `docs/spikes/sqlite-vec-compat.md` with frontmatter (per codex-proxy ADR/MADR enrichment + challenger Phase 2 P4 structured caveats):
   ```yaml
   ---
   id: "sqlite-vec-compat"
@@ -145,7 +145,7 @@ Expected files: `Cargo.toml` (revert to pre-spike), `Cargo.lock` (revert — reg
       trigger_fires: true | false
   ---
   ```
-- [ ] Body sections:
+- [x] Body sections:
   - **Question** — one-line restatement of spike's purpose
   - **Context** — why this spike was needed (link to F-001 analysis + 028 conclusion)
   - **Method** — Steps 1–4 verbatim (or cite plan 018)
@@ -155,26 +155,26 @@ Expected files: `Cargo.toml` (revert to pre-spike), `Cargo.lock` (revert — reg
   - **RRF compatibility analysis** — clarify per dep-analyst: current `src/core/search.rs` RRF is **rank-based**, NOT distance-based, so spike outcome does not affect current code. The metric matters for BL-012 adoption design (when sqlite-vec actually replaces brute-force `search_vector`) — recommend either explicit `distance_metric=cosine` override in `CREATE VIRTUAL TABLE` (if Case 2) OR `1 - distance/2` score conversion in BL-012's score-normalization step (if Case 1)
   - **Recommendation** — adopt / adopt-with-caveats / defer; if PASS or PASS_WITH_CONDITIONS-trigger_fires-true: explicit pointer "BL-002 Reflection consolidation trigger fires; operator may schedule" + recommend filing BL-011 (Linux x86_64 CI verification) and BL-012 (vector.rs adoption with bones-pattern adapter)
   - **Consequences** — per ADR convention: enabling consequences (this unlocks X), risk consequences (this commits us to Y dep), neutral consequences (this captures Z baseline for future)
-- [ ] Final state at this point: working tree clean except for `docs/spikes/sqlite-vec-compat.md` (new) — confirm via `git status`
-- [ ] Make a **single commit** containing exactly this one file:
+- [x] Final state at this point: working tree clean except for `docs/spikes/sqlite-vec-compat.md` (new) — confirm via `git status`
+- [x] Make a **single commit** containing exactly this one file:
   ```
   git add docs/spikes/sqlite-vec-compat.md
   git commit -m "spike(F-001/BL-007): sqlite-vec compatibility outcome — <PASS|PASS_WITH_CONDITIONS|FAIL>"
   ```
   (Per architect — exactly one commit; per codex — outcome record is the only artifact crossing the spike branch's merge boundary)
-- [ ] Re-run AC6 assertion to confirm `git diff --name-only $(git merge-base HEAD main)..HEAD -- src/` is still empty after the outcome-record commit
+- [x] Re-run AC6 assertion to confirm `git diff --name-only $(git merge-base HEAD main)..HEAD -- src/` is still empty after the outcome-record commit
 
 Expected files: `docs/spikes/sqlite-vec-compat.md` (new — committed; **only artifact surviving spike branch merge**)
 
 ### Spike branch merge (post-Step 5)
-- [ ] Merge `spike/018-sqlite-vec` back to base branch via squash merge (so the dep-add + smoke + revert intermediate commits collapse to a single squashed commit on base, but only `docs/spikes/sqlite-vec-compat.md` shows in the diff because Steps 1-4 reverted everything else):
+- [x] Merge `spike/018-sqlite-vec` back to base branch via squash merge (so the dep-add + smoke + revert intermediate commits collapse to a single squashed commit on base, but only `docs/spikes/sqlite-vec-compat.md` shows in the diff because Steps 1-4 reverted everything else):
   ```
   git checkout <base>  # e.g., feature/v0.0.1-rebuild
   git merge --squash spike/018-sqlite-vec
   git commit -m "spike(F-001/BL-007): sqlite-vec compatibility — outcome record"
   ```
-- [ ] Confirm base branch's `git status` shows only `docs/spikes/sqlite-vec-compat.md` added (no Cargo.toml, no Cargo.lock, no examples/, no src/ touched)
-- [ ] Spike branch can be deleted post-merge
+- [x] Confirm base branch's `git status` shows only `docs/spikes/sqlite-vec-compat.md` added (no Cargo.toml, no Cargo.lock, no examples/, no src/ touched)
+- [x] Spike branch can be deleted post-merge
 
 ## Acceptance Criteria
 
