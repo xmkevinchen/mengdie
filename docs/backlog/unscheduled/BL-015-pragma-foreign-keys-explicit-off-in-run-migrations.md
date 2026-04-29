@@ -1,10 +1,14 @@
 ---
 id: BL-015
 title: "PRAGMA foreign_keys = OFF — make project-wide assumption explicit in run_migrations"
-status: open
+status: closed
 created: 2026-04-28
+closed: 2026-04-29
+closed_by: "F-002 Step 4 (commit pending) — PRAGMA foreign_keys = OFF written in run_migrations after WAL/busy_timeout setup"
 origin: F-002 Step 1 code-review (Codex track 2 P2)
 trigger: "Any caller of Db::open / Db::open_in_memory enables PRAGMA foreign_keys = ON, OR a future bundled-rusqlite build defaults FK enforcement to ON. Earliest signal: an audit_returned_facts INSERT failing with FK constraint error on a missing memory_entries.id."
+trigger_fired: 2026-04-29
+trigger_signal: "F-002 Step 4 unit tests on the strict audit helper failed with 'FOREIGN KEY constraint failed' (rusqlite Error code 787) because the bundled SQLite build had FK enforcement ON and the test fact_ids did not reference real memory_entries rows. Confirmed Codex's Step 1 P2 read."
 ---
 
 # BL-015 — Make `PRAGMA foreign_keys = OFF` explicit in `run_migrations`

@@ -90,6 +90,14 @@ pub fn compute_synthesis_cluster_hash(source_ids: &[String]) -> String {
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+    // Plan F-002 / discussion 029 YAGNI 1: FK clauses are documentation-only
+    // project-wide. Make this explicit at the connection level so the
+    // assumption holds regardless of the SQLite build's FK default and
+    // regardless of whether a caller pre-enabled enforcement. Closes BL-015
+    // (filed at F-002 Step 1, triggered at Step 4 when the audit-helper unit
+    // tests hit FOREIGN KEY constraint errors on synthetic fact_ids that
+    // don't reference real memory_entries rows).
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
 
     let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
@@ -1200,5 +1208,106 @@ mod tests {
             sql.contains("source_type = 'synthesis'") && sql.contains("IS NOT NULL"),
             "expected partial unique index with IS NOT NULL guard, got: {sql}"
         );
+    }
+
+    // ---- Plan F-002 (v6) tests ------------------------------------------
+
+    /// AC1 — fresh `Db::open_in_memory()` ends with both audit tables and
+    /// all three indexes from R7/R4.
+    #[test]
+    fn test_v6_creates_audit_tables_and_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        for table in ["memory_search_audit", "audit_returned_facts"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table {table} missing after v6 migration");
+        }
+
+        for idx in [
+            "idx_memory_search_audit_searched_id",
+            "idx_audit_returned_facts_fact_audit",
+            "idx_memory_entries_valid_until_id",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    rusqlite::params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "index {idx} missing after v6 migration");
+        }
+    }
+
+    /// AC1 — seed v5 state with one row, drop v6 objects, replay migration,
+    /// assert the row survives the v6 step. Modeled on
+    /// `test_migration_from_v3_preserves_data`.
+    #[test]
+    fn test_migration_v5_to_v6_preserves_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let hash = compute_content_hash("v5 row content");
+        conn.execute(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "row-v5",
+                "proj",
+                "f.md",
+                "conclusion",
+                "decisional",
+                "v5 row",
+                "v5 row content",
+                "tag",
+                "2026-04-28T00:00:00Z",
+                "2026-04-28T00:00:00Z",
+                hash,
+            ],
+        )
+        .unwrap();
+
+        // Force replay of the v6 step from a v5 snapshot.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS audit_returned_facts;
+             DROP TABLE IF EXISTS memory_search_audit;
+             DROP INDEX IF EXISTS idx_memory_entries_valid_until_id;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM memory_entries WHERE id = 'row-v5'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "v5 row");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_search_audit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "audit table must be re-created");
     }
 }

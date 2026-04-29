@@ -1501,4 +1501,311 @@ mod tests {
             "error should explain the invariant, got: {msg}"
         );
     }
+
+    // ---- F-002 audit helper / wrapper / supersession-SQL tests ----------
+
+    use super::super::metrics::METRIC_AUDIT_WRITE_FAILURES;
+
+    /// AC2 — strict helper writes one audit row plus N link rows with rank
+    /// = 0-indexed position in input order.
+    #[test]
+    fn test_record_search_audit_writes_audit_and_links() {
+        let db = test_db();
+        let audit_id = db
+            .record_search_audit(
+                "q",
+                Some("proj-x"),
+                42,
+                &["f1".to_string(), "f2".to_string(), "f3".to_string()],
+            )
+            .unwrap();
+
+        let conn = db.lock_conn().unwrap();
+        let (q, scope, took_ms): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT query, scope, took_ms FROM memory_search_audit WHERE id = ?1",
+                rusqlite::params![audit_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(q, "q");
+        assert_eq!(scope, Some("proj-x".to_string()));
+        assert_eq!(took_ms, 42);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT fact_id, rank FROM audit_returned_facts \
+                 WHERE audit_id = ?1 ORDER BY rank ASC",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64)> = stmt
+            .query_map(rusqlite::params![audit_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], ("f1".to_string(), 0));
+        assert_eq!(rows[1], ("f2".to_string(), 1));
+        assert_eq!(rows[2], ("f3".to_string(), 2));
+    }
+
+    /// AC2 — empty `returned_fact_ids` writes the audit row only (zero
+    /// link rows).
+    #[test]
+    fn test_record_search_audit_empty_facts_writes_audit_only() {
+        let db = test_db();
+        let audit_id = db.record_search_audit("q", None, 7, &[]).unwrap();
+
+        let conn = db.lock_conn().unwrap();
+        let audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_search_audit WHERE id = ?1",
+                rusqlite::params![audit_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 1);
+
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_returned_facts WHERE audit_id = ?1",
+                rusqlite::params![audit_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(link_count, 0);
+    }
+
+    /// AC2 — strict helper returns `Err` when the link table is dropped
+    /// mid-test. Uses `lock_conn` (pub(crate)) for failure injection.
+    /// Drop-table is the right injection: invalid fact_id INSERTs would
+    /// NOT fail under PRAGMA foreign_keys = OFF.
+    #[test]
+    fn test_record_search_audit_returns_err_on_dropped_table() {
+        let db = test_db();
+        {
+            let conn = db.lock_conn().unwrap();
+            conn.execute("DROP TABLE audit_returned_facts;", [])
+                .unwrap();
+        }
+        let result = db.record_search_audit("q", None, 1, &["f1".to_string()]);
+        assert!(
+            result.is_err(),
+            "strict helper must return Err when audit_returned_facts is dropped"
+        );
+    }
+
+    /// AC2 — best-effort wrapper does NOT panic and DOES bump the failure
+    /// counter when the strict helper errors. This is the unit test that
+    /// satisfies AC2's counter-increment claim — the wrapper is the unit
+    /// under test, not the strict helper.
+    #[test]
+    fn test_record_search_audit_best_effort_increments_counter_on_failure() {
+        let db = test_db();
+        {
+            let conn = db.lock_conn().unwrap();
+            conn.execute("DROP TABLE audit_returned_facts;", [])
+                .unwrap();
+        }
+        // Wrapper returns () — no panic.
+        db.record_search_audit_best_effort("q", None, 1, &["f1".to_string()]);
+
+        let counter = db.get_metric(METRIC_AUDIT_WRITE_FAILURES).unwrap();
+        assert_eq!(counter, 1);
+    }
+
+    /// Helper for AC4 supersession-SQL tests: insert one memory_entries row
+    /// pre-tombstoned with `valid_until` and one audit row at `searched_at`,
+    /// linked together. Returns the inserted audit_id.
+    ///
+    /// `searched_at` and `valid_until` are caller-supplied so tests can seed
+    /// in-window or out-of-window scenarios without depending on `Utc::now`
+    /// at fixture construction time.
+    fn seed_supersession_pair(
+        conn: &Connection,
+        fact_id: &str,
+        searched_at: &str,
+        valid_until: &str,
+    ) -> i64 {
+        let hash = format!("hash-{fact_id}-{}", uuid::Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, valid_until,
+                 created_at, content_hash)
+             VALUES (?1, 'proj', 'f.md', 'conclusion', 'decisional',
+                     'title', 'content', '', ?2, ?3, ?2, ?4)",
+            rusqlite::params![fact_id, searched_at, valid_until, hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at)
+             VALUES ('q', 'proj', 1, ?1)",
+            rusqlite::params![searched_at],
+        )
+        .unwrap();
+        let aid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO audit_returned_facts (audit_id, fact_id, rank)
+             VALUES (?1, ?2, 0)",
+            rusqlite::params![aid, fact_id],
+        )
+        .unwrap();
+        aid
+    }
+
+    /// The verbatim F-002 supersession SQL from `analysis.md` / plan AC4.
+    /// Stored as a constant so all three supersession-SQL tests share one
+    /// source of truth (any drift would be a test-author bug, not a
+    /// schema-correctness bug).
+    const F002_SUPERSESSION_SQL: &str = "
+        SELECT
+            DATE(a.searched_at, 'start of day', '-30 days') AS window_start,
+            COUNT(*) AS supersession_count
+        FROM memory_search_audit a
+        JOIN audit_returned_facts arf ON arf.audit_id = a.id
+        JOIN memory_entries me ON me.id = arf.fact_id
+        WHERE me.valid_until IS NOT NULL
+          AND JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7
+          AND a.searched_at >= DATE('now', '-30 days')
+        GROUP BY window_start
+        HAVING supersession_count >= 5;
+    ";
+
+    /// AC4 — 5 supersession events on a single day produce ≥1 row with
+    /// `supersession_count >= 5`. Strategic-post Finding 1 schema-correctness
+    /// gate.
+    #[test]
+    fn test_supersession_sql_returns_expected_rows() {
+        let db = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let valid_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        {
+            let conn = db.lock_conn().unwrap();
+            for i in 0..5 {
+                let fact_id = format!("fact-{i}");
+                seed_supersession_pair(&conn, &fact_id, &now, &valid_until);
+            }
+        }
+
+        let conn = db.lock_conn().unwrap();
+        let mut stmt = conn.prepare(F002_SUPERSESSION_SQL).unwrap();
+        let counts: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, i64>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            !counts.is_empty(),
+            "expected at least one window with supersession_count >= 5"
+        );
+        let max_count = counts.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_count >= 5,
+            "expected at least one window with count >= 5, got max {max_count}"
+        );
+    }
+
+    /// AC4 — 1 audit row + 5 link rows + 5 superseded entries also produces
+    /// a row with `supersession_count >= 5`. Proves COUNT(*) counts joined
+    /// audit/link/memory triples, NOT distinct audit rows. Documents the
+    /// metric semantic for the downstream A-MEM trigger plan.
+    #[test]
+    fn test_supersession_sql_groups_by_joined_pairs() {
+        let db = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let valid_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        {
+            let conn = db.lock_conn().unwrap();
+            // One audit row.
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at)
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            let aid = conn.last_insert_rowid();
+            // Five facts, all linked to that single audit row.
+            for i in 0..5 {
+                let fact_id = format!("pair-fact-{i}");
+                let hash = format!("hash-{fact_id}-{}", uuid::Uuid::new_v4());
+                conn.execute(
+                    "INSERT INTO memory_entries
+                        (id, project_id, source_file, source_type, knowledge_type,
+                         title, content, entities, valid_from, valid_until,
+                         created_at, content_hash)
+                     VALUES (?1, 'proj', 'f.md', 'conclusion', 'decisional',
+                             'title', 'content', '', ?2, ?3, ?2, ?4)",
+                    rusqlite::params![fact_id, now, valid_until, hash],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO audit_returned_facts (audit_id, fact_id, rank)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![aid, fact_id, i as i64],
+                )
+                .unwrap();
+            }
+        }
+
+        let conn = db.lock_conn().unwrap();
+        let mut stmt = conn.prepare(F002_SUPERSESSION_SQL).unwrap();
+        let counts: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, i64>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            !counts.is_empty(),
+            "expected COUNT to count joined pairs, not distinct audit rows"
+        );
+        let max_count = counts.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_count >= 5,
+            "single audit row + 5 link rows must produce count >= 5, got {max_count}"
+        );
+    }
+
+    /// AC4 — supersession events outside the 30-day window OR with
+    /// valid_until > 7 days after searched_at must NOT appear in the output.
+    #[test]
+    fn test_supersession_sql_excludes_outside_window() {
+        let db = test_db();
+        // Case (a): searched_at 31 days ago — outside the 30-day window.
+        let old_searched = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        let old_valid_until = (chrono::Utc::now() - chrono::Duration::days(31)
+            + chrono::Duration::days(1))
+        .to_rfc3339();
+        // Case (b): valid_until 10 days after searched_at — outside 7-day diff.
+        let now = chrono::Utc::now().to_rfc3339();
+        let far_valid_until = (chrono::Utc::now() + chrono::Duration::days(10)).to_rfc3339();
+
+        {
+            let conn = db.lock_conn().unwrap();
+            for i in 0..5 {
+                let id = format!("old-{i}");
+                seed_supersession_pair(&conn, &id, &old_searched, &old_valid_until);
+            }
+            for i in 0..5 {
+                let id = format!("far-{i}");
+                seed_supersession_pair(&conn, &id, &now, &far_valid_until);
+            }
+        }
+
+        let conn = db.lock_conn().unwrap();
+        let mut stmt = conn.prepare(F002_SUPERSESSION_SQL).unwrap();
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            rows.is_empty(),
+            "out-of-window seeds must not satisfy HAVING supersession_count >= 5, got {rows:?}"
+        );
+    }
 }
