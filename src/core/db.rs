@@ -271,6 +271,87 @@ impl Db {
         Ok(rows > 0)
     }
 
+    /// Strict helper — write one `memory_search_audit` row plus N
+    /// `audit_returned_facts` link rows in a single transaction. Errors
+    /// propagate to the caller verbatim; this helper does NOT emit a
+    /// `tracing::warn!` line and does NOT touch the failure counter — those
+    /// are the wrapper's job (`record_search_audit_best_effort`).
+    ///
+    /// Empty `returned_fact_ids` is allowed (zero-result searches are still
+    /// meaningful to log): the audit row writes, no link rows are inserted.
+    /// `rank` on each link row is the 0-indexed position of `fact_id` in
+    /// `returned_fact_ids` and is reserved for downstream consumers (no
+    /// v0.0.1 query reads it).
+    ///
+    /// Returns the inserted `audit_id` (rowid alias on `memory_search_audit`).
+    ///
+    /// Plan F-002 Step 2 / discussion 029 R1.
+    pub fn record_search_audit(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        took_ms: i64,
+        returned_fact_ids: &[String],
+    ) -> anyhow::Result<i64> {
+        let searched_at = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![query, scope, took_ms, searched_at],
+        )?;
+        let audit_id = tx.last_insert_rowid();
+
+        for (rank, fact_id) in returned_fact_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO audit_returned_facts (audit_id, fact_id, rank)
+                 VALUES (?1, ?2, ?3)",
+                params![audit_id, fact_id, rank as i64],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(audit_id)
+    }
+
+    /// Best-effort wrapper around `record_search_audit`. Swallows errors
+    /// with a `tracing::warn!` line carrying the query text + a pre-call
+    /// timestamp, and bumps `METRIC_AUDIT_WRITE_FAILURES`. Returns `()`.
+    ///
+    /// Both Step 3 call sites (`mcp_tools::search` + `cli::cmd_search`)
+    /// invoke this wrapper, NOT the strict helper directly — audit-write
+    /// failures must NOT mutate the search response or propagate as
+    /// MCP/CLI errors.
+    ///
+    /// Plan F-002 Step 2 / discussion 029 Topic 2.
+    pub fn record_search_audit_best_effort(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        took_ms: i64,
+        returned_fact_ids: &[String],
+    ) {
+        // Capture timestamp BEFORE the strict-helper call. Under lock
+        // contention the Err return path can be arbitrarily later than the
+        // wrapper entry; the warn line's `searched_at` must localize the
+        // actual search time so post-restart audit-gap recovery (the F1
+        // stderr surface) bounds the missing-row window. Plan F-002
+        // Doodlestein-adversarial M6.
+        let warn_searched_at = Utc::now().to_rfc3339();
+        if let Err(e) = self.record_search_audit(query, scope, took_ms, returned_fact_ids) {
+            tracing::warn!(
+                query = %query,
+                searched_at = %warn_searched_at,
+                took_ms = took_ms,
+                error = %e,
+                "audit write failed"
+            );
+            let _ = self.increment_metric(super::metrics::METRIC_AUDIT_WRITE_FAILURES);
+        }
+    }
+
     /// Bulk fetch memory rows by id, one lock acquisition.
     /// Returns rows in input-id order; missing ids are silently skipped
     /// (caller handles the len-mismatch policy).

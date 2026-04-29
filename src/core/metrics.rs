@@ -7,6 +7,11 @@ pub const METRIC_SEARCH_COUNT: &str = "search_count";
 pub const METRIC_SEARCH_NONEMPTY: &str = "search_nonempty_count";
 pub const METRIC_INGEST_COUNT: &str = "ingest_count";
 pub const METRIC_CONFLICT_COUNT: &str = "conflict_count";
+/// Counter for failed `Db::record_search_audit_best_effort` writes
+/// (F-002 Wave 1, plan F-002 Step 2). Bumped from the wrapper's Err path;
+/// surfaced via `mengdie stats` and the `metrics` table for post-restart
+/// audit-gap recovery analysis.
+pub const METRIC_AUDIT_WRITE_FAILURES: &str = "audit_write_failures";
 
 impl Db {
     /// Increment an integer metric by 1.
