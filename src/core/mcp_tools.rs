@@ -182,6 +182,11 @@ impl MengdieServer {
                 degraded: Some(format!("query too long (max {MAX_QUERY_LEN} chars)")),
             });
         }
+        // F-002 Wave 1 audit timer (plan F-002 Step 3 / Topic 1 Option B):
+        // start AFTER input-length validation but BEFORE embedding generation
+        // so `took_ms` includes embedding latency. The audit hook below covers
+        // both the embedding-success path AND the FTS-only fallback path.
+        let audit_start = std::time::Instant::now();
         let pid = params
             .project_id
             .as_deref()
@@ -268,6 +273,21 @@ impl MengdieServer {
         if !items.is_empty() {
             let _ = self.db.increment_metric(metrics::METRIC_SEARCH_NONEMPTY);
         }
+
+        // F-002 Wave 1 audit hook: record what the CALLER saw (post-`min_score`
+        // filter), not what the search internally ranked. Recording pre-filter
+        // IDs would inflate the supersession signal — facts the caller never
+        // received would still count as "returned then superseded" toward the
+        // A-MEM trigger, producing false-positive triggers. Plan F-002 Step 3 /
+        // strategic-post Doodlestein finding.
+        let took_ms = audit_start.elapsed().as_millis() as i64;
+        let returned_fact_ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+        self.db.record_search_audit_best_effort(
+            &params.query,
+            project_id,
+            took_ms,
+            &returned_fact_ids,
+        );
 
         Json(SearchOutput {
             results: items,

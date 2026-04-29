@@ -604,12 +604,26 @@ fn cmd_search(
         Some(project_id.as_str())
     };
 
+    // F-002 Wave 1 audit timer (plan F-002 Step 3): start BEFORE embedding
+    // generation so `took_ms` includes embedding latency, matching the
+    // mcp_tools::search hook. On `embedder.embed_text` failure the `?`
+    // short-circuits before the audit call below — no audit row is written
+    // (acceptable per plan: there is no result list to audit).
+    let audit_start = std::time::Instant::now();
     let query_embedding = embedder.embed_text(query)?;
     let results: Vec<_> = db
         .memory_search(query, &query_embedding, scope, limit)?
         .into_iter()
         .filter(|r| min_score.is_none_or(|ms| r.score >= ms))
         .collect();
+
+    // F-002 Wave 1 audit hook: `results` is already post-filter (the
+    // `.filter(...)` chain above runs before this point), so the caller sees
+    // the same fact_ids we record. Failures stay silent — the wrapper owns
+    // the warn line + counter increment.
+    let took_ms = audit_start.elapsed().as_millis() as i64;
+    let returned_fact_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
+    db.record_search_audit_best_effort(query, scope, took_ms, &returned_fact_ids);
 
     if results.is_empty() {
         println!("No results found.");
