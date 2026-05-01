@@ -42,7 +42,12 @@ impl Db {
     /// Brute-force cosine similarity search over all embeddings in a project.
     /// Returns results sorted by descending similarity, limited to `limit`.
     /// Skips expired entries (valid_until set and in the past).
-    pub fn search_vector(
+    ///
+    /// `pub(crate)` post-F-003 (plan F-003 Step 3 / discussion 001 Topic 3
+    /// hybrid): only `search::memory_search` (the existing hybrid orchestrator)
+    /// calls this primitive. Direct external callers would bypass the RRF
+    /// merge + boost-and-decay logic in `memory_search`.
+    pub(crate) fn search_vector(
         &self,
         query_embedding: &[f32],
         project_id: Option<&str>,

@@ -141,7 +141,13 @@ pub fn sanitize_fts_query(query: &str) -> String {
 impl Db {
     /// FTS5 full-text search. Returns results ranked by BM25.
     /// Filters out expired entries.
-    pub fn search_fts(
+    ///
+    /// `pub(crate)` post-F-003 (plan F-003 Step 3 / discussion 001 Topic 3
+    /// hybrid): callers go through `search::memory_search_audited` orchestrator
+    /// which owns audit-hook integration + min_score filtering + FTS-only
+    /// fallback normalization. Direct callers of `search_fts` would bypass
+    /// the orchestrator and silently break the F-002 audit invariant.
+    pub(crate) fn search_fts(
         &self,
         query: &str,
         project_id: Option<&str>,

@@ -182,10 +182,8 @@ impl MengdieServer {
                 degraded: Some(format!("query too long (max {MAX_QUERY_LEN} chars)")),
             });
         }
-        // F-002 Wave 1 audit timer (plan F-002 Step 3 / Topic 1 Option B):
-        // start AFTER input-length validation but BEFORE embedding generation
-        // so `took_ms` includes embedding latency. The audit hook below covers
-        // both the embedding-success path AND the FTS-only fallback path.
+        // F-003 Wave 2 audit timer: pass to orchestrator so took_ms includes
+        // embed latency (preserves F-002 Topic 1 Option B invariant).
         let audit_start = std::time::Instant::now();
         let pid = params
             .project_id
@@ -196,10 +194,12 @@ impl MengdieServer {
             _ => Some(pid),
         };
 
-        // Generate query embedding (blocking → thread pool)
+        // Generate query embedding (blocking → thread pool). The orchestrator
+        // accepts the Result directly so it can decide fallback without
+        // re-running the embedder.
         let query = params.query.clone();
         let embedder = self.embedder.clone();
-        let query_embedding = tokio::task::spawn_blocking(move || {
+        let query_embedding_result = tokio::task::spawn_blocking(move || {
             let mut emb = embedder.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
             emb.embed_text(&query)
         })
@@ -209,49 +209,42 @@ impl MengdieServer {
         let limit = params.limit.unwrap_or(10);
         let min_score = params.min_score.unwrap_or(0.0);
 
-        let (results, degraded) = match query_embedding {
-            Ok(embedding) => {
-                match self
-                    .db
-                    .memory_search(&params.query, &embedding, project_id, limit)
-                {
-                    Ok(results) => (results, None),
-                    Err(e) => {
-                        tracing::error!(error = %e, "memory_search failed");
-                        (vec![], Some("search temporarily unavailable".into()))
-                    }
-                }
-            }
+        // F-003 Wave 2 orchestrator: routes hybrid → FTS-only fallback per
+        // FallbackPolicy::HybridOrFtsOnly (MCP per-surface default per Topic 1);
+        // applies min_score filter pre-audit; fires audit hook exactly ONCE
+        // post-filter (replaces F-002 Wave 1's two duplicated call-site hooks).
+        let outcome = match super::search::memory_search_audited(
+            &self.db,
+            &params.query,
+            query_embedding_result,
+            project_id,
+            limit,
+            min_score,
+            audit_start,
+            super::search::FallbackPolicy::HybridOrFtsOnly,
+        ) {
+            Ok(o) => o,
             Err(e) => {
-                tracing::warn!(error = %e, "embedding failed, falling back to FTS-only");
-                // FTS-only fallback
-                match self.db.search_fts(&params.query, project_id, limit) {
-                    Ok(fts_results) => {
-                        let mut results = Vec::new();
-                        for fts in &fts_results {
-                            if let Ok(Some(entry)) = self.db.get_memory(&fts.id) {
-                                results.push(super::search::SearchResult {
-                                    entry,
-                                    score: fts.bm25_score.abs(),
-                                });
-                            }
-                        }
-                        (
-                            results,
-                            Some("degraded: embedding unavailable, FTS-only".into()),
-                        )
-                    }
-                    Err(e2) => {
-                        tracing::error!(error = %e2, "FTS fallback also failed");
-                        (vec![], Some("search temporarily unavailable".into()))
-                    }
-                }
+                tracing::error!(error = %e, "memory_search_audited failed");
+                return Json(SearchOutput {
+                    results: vec![],
+                    degraded: Some("search temporarily unavailable".into()),
+                });
             }
         };
 
-        let items: Vec<SearchResultItem> = results
+        // Map MemorySearchOutcome.route → user-facing degraded string.
+        // Preserves F-002 Wave 1 string verbatim for backward compatibility.
+        let degraded = match outcome.route {
+            super::search::SearchRoute::FtsOnly => {
+                Some("degraded: embedding unavailable, FTS-only".into())
+            }
+            super::search::SearchRoute::Hybrid => None,
+        };
+
+        let items: Vec<SearchResultItem> = outcome
+            .results
             .into_iter()
-            .filter(|r| r.score >= min_score)
             .map(|r| {
                 let snippet = r.entry.content.chars().take(200).collect::<String>();
                 SearchResultItem {
@@ -268,26 +261,13 @@ impl MengdieServer {
             })
             .collect();
 
-        // Track metrics
+        // Track metrics (audit hook already fired inside memory_search_audited;
+        // F-002 invariant preserved — record_search_audit_best_effort fires once
+        // per call with post-filter IDs).
         let _ = self.db.increment_metric(metrics::METRIC_SEARCH_COUNT);
         if !items.is_empty() {
             let _ = self.db.increment_metric(metrics::METRIC_SEARCH_NONEMPTY);
         }
-
-        // F-002 Wave 1 audit hook: record what the CALLER saw (post-`min_score`
-        // filter), not what the search internally ranked. Recording pre-filter
-        // IDs would inflate the supersession signal — facts the caller never
-        // received would still count as "returned then superseded" toward the
-        // A-MEM trigger, producing false-positive triggers. Plan F-002 Step 3 /
-        // strategic-post Doodlestein finding.
-        let took_ms = audit_start.elapsed().as_millis() as i64;
-        let returned_fact_ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
-        self.db.record_search_audit_best_effort(
-            &params.query,
-            project_id,
-            took_ms,
-            &returned_fact_ids,
-        );
 
         Json(SearchOutput {
             results: items,

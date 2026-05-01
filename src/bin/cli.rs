@@ -604,26 +604,32 @@ fn cmd_search(
         Some(project_id.as_str())
     };
 
-    // F-002 Wave 1 audit timer (plan F-002 Step 3): start BEFORE embedding
-    // generation so `took_ms` includes embedding latency, matching the
-    // mcp_tools::search hook. On `embedder.embed_text` failure the `?`
-    // short-circuits before the audit call below — no audit row is written
-    // (acceptable per plan: there is no result list to audit).
+    // F-003 Wave 2 audit timer: pass to orchestrator so took_ms includes
+    // embed latency (preserves F-002 Topic 1 Option B invariant).
     let audit_start = std::time::Instant::now();
-    let query_embedding = embedder.embed_text(query)?;
-    let results: Vec<_> = db
-        .memory_search(query, &query_embedding, scope, limit)?
-        .into_iter()
-        .filter(|r| min_score.is_none_or(|ms| r.score >= ms))
-        .collect();
 
-    // F-002 Wave 1 audit hook: `results` is already post-filter (the
-    // `.filter(...)` chain above runs before this point), so the caller sees
-    // the same fact_ids we record. Failures stay silent — the wrapper owns
-    // the warn line + counter increment.
-    let took_ms = audit_start.elapsed().as_millis() as i64;
-    let returned_fact_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
-    db.record_search_audit_best_effort(query, scope, took_ms, &returned_fact_ids);
+    // Don't `?`-propagate embed_text — the orchestrator accepts the Result
+    // directly and decides fallback per FallbackPolicy. CLI's per-surface
+    // default (Topic 1) is HybridOrError: on embed-fail the orchestrator
+    // returns Err, which the caller `?`-propagates to exit non-zero.
+    let query_embedding_result = embedder.embed_text(query);
+
+    // F-003 Wave 2 orchestrator: applies min_score filter pre-audit; fires
+    // audit hook exactly ONCE post-filter (replaces F-002 Wave 1's two
+    // duplicated call-site hooks). CLI's FallbackPolicy::HybridOrError
+    // preserves CLI's existing hard-error behavior on embed-fail.
+    let outcome = mengdie::core::search::memory_search_audited(
+        db,
+        query,
+        query_embedding_result,
+        scope,
+        limit,
+        min_score.unwrap_or(0.0),
+        audit_start,
+        mengdie::core::search::FallbackPolicy::HybridOrError,
+    )?;
+
+    let results = outcome.results;
 
     if results.is_empty() {
         println!("No results found.");
