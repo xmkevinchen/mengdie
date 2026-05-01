@@ -83,6 +83,43 @@ Several options, ordered by scope:
 Recommended for first implementation: option 1 (minimal counter).
 Options 2 and 3 are design changes warranting their own plans.
 
+## Update from F-003 /ae:review (Challenger C3, 2026-04-30)
+
+F-003 introduced `search::memory_search_audited` as the orchestrator
+that owns the audit hook. **The orchestrator boundary makes Option 2
+(audit-row-with-empty-results) a 3-line fix** rather than the
+"larger blast radius" framing this BL originally had:
+
+```rust
+// In search.rs::memory_search_audited HybridOrError arm:
+FallbackPolicy::HybridOrError => {
+    tracing::warn!(error = %e, "embedding failed; HybridOrError policy returns Err");
+    let took_ms = audit_start.elapsed().as_millis() as i64;
+    db.record_search_audit_best_effort(query, project_id, took_ms, &[]);
+    return Err(e);
+}
+```
+
+Adding `record_search_audit_best_effort` with `returned_fact_ids = &[]`
+before `return Err(e)` writes an audit row with empty link rows,
+preserving the F-002 contract (audit row exists; just no facts
+returned). Operators querying the audit table can distinguish
+"embed-fail" (audit row with `took_ms` set + zero link rows) from
+"empty corpus" (audit row exists with N>0 link rows but caller's
+`min_score` filtered them all).
+
+When BL-019 is picked up, the implementing plan should evaluate this
+3-line orchestrator-boundary approach against the original 5-line
+counter approach (Option 1). The orchestrator approach has the
+advantage of integrating with existing audit infrastructure (BL-014
+audit-stats CLI, A-MEM trigger consumer) without introducing a new
+metric counter.
+
+Discussion 001 conclusion explicitly scoped BL-019 out of F-003 ("BL-019
+stays open as filed"). F-003 honored that decision; this annotation
+records the Challenger C3 missed-opportunity observation for the BL-019
+author's evaluation, not as an override of the discussion-time scoping.
+
 ## Codex Wave 2 cross-reference
 
 Codex Track 4 in F-002 /ae:review separately flagged this asymmetry

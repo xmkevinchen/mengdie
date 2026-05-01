@@ -6,6 +6,79 @@ this project follows [semantic versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **F-002 (BL-006): persisted domain audit table + link table.** Two new
+  SQLite tables (`memory_search_audit`, `audit_returned_facts`) plus 3
+  indexes ship via the v6 schema migration. Every `memory_search` call
+  now writes one audit row capturing `(query, scope, took_ms,
+  searched_at)` and N link rows mapping audit→fact for the caller-visible
+  result set. `Db::record_search_audit_best_effort` (and its strict
+  helper) on `impl Db` provides the write path; failures emit a
+  `tracing::warn!` line and bump the `audit_write_failures` metric
+  counter without affecting the search response. Hook fires from both
+  the MCP `memory_search` tool and `mengdie search` CLI. Discussion 029
+  / plan F-002.
+- **F-003 (BL-009 + BL-010): retrieval & ingest layer consolidation.**
+  - `search::memory_search_audited(&Db, ...)` orchestrator (free
+    function) replaces the duplicated F-002 audit hook in
+    `mcp_tools::search` and `cli::cmd_search`. The audit hook now
+    fires from a single location, post-`min_score` filter, with the
+    F-002 contract preserved verbatim.
+  - New types in `core::search`: `FallbackPolicy` (`HybridOrError` /
+    `HybridOrFtsOnly`), `SearchRoute` (`Hybrid` / `FtsOnly`),
+    `FallbackReason` (`EmbeddingUnavailable`), `MemorySearchOutcome`.
+    Per-surface defaults: MCP=`HybridOrFtsOnly`, CLI=`HybridOrError`,
+    internal/test=`HybridOrError`.
+  - Two public ingest entries in `core::ingest`: `ingest_text(content,
+    metadata, project_id)` for plain insert + `ingest_text_with_resolves(...,
+    resolves)` for atomic resolve+insert. Shared private `prepare_memory`
+    helper does the embed + entity normalization + contradiction check
+    once for both surfaces. `ingest_document` becomes a thin
+    file-parsing wrapper.
+  - `IngestMetadata` struct introduced as the shared shape between
+    file-ingest and MCP-ingest paths.
+  - Discussion 001 (under F-003 feature dir) / plan F-003.
+
+### Changed
+
+- **F-003: MCP `memory_search` FTS-fallback scores are now [0,1]-normalized**
+  via `linear_rescale_normalize` (per-call min/max linear rescale).
+  Pre-F-003, FTS-fallback returned raw `bm25_score.abs()` values
+  (typically 3-50). The new normalization makes `min_score`
+  filtering effective in degraded mode — operators with calibrated
+  raw-BM25 thresholds will see different filtering behavior on the
+  embed-fail path. Hybrid path (RRF-normalized) is unchanged. Plan
+  F-003 Step 4 + discussion 001 Topic 6.
+- **F-003: MCP `memory_ingest` embed-fail is now a hard error.**
+  Pre-F-003, embedding-generation failure stored a memory with
+  `embedding=None` (soft-fail). F-003 converges with the file-ingest
+  path's hard-error semantic; `memory_ingest` now returns
+  `error: "ingestion failed"` with no `entry_id` when embedding
+  generation fails. External MCP callers relying on soft-fail
+  semantics will see a behavior change. Plan F-003 Step 6 +
+  discussion 001 Topic 4.
+- **F-003: MCP `memory_ingest` entity tags are now lowercased before
+  storage**. Pre-F-003, the MCP path stored entities in raw case
+  while the file-ingest path lowercased them, breaking
+  `check_contradictions` matching across surfaces. The shared
+  `prepare_memory` helper lowercases for both paths; stored entities
+  are consistently `auth,middleware,jwt` regardless of how they were
+  ingested. Plan F-003 Step 7.
+
+### Internal
+
+- **F-003: `Db::search_fts` and `Db::search_vector` downgraded to
+  `pub(crate)`**. Direct callers of these primitives would bypass
+  the `memory_search_audited` orchestrator and silently break the
+  F-002 audit invariant. No external behavior change. Plan F-003
+  Step 3.
+- **F-002 / F-003: `PRAGMA foreign_keys = OFF` now written explicitly
+  in `run_migrations`**. Previously relied on rusqlite/SQLite default;
+  changed to be runtime-asserted at every connection-open. Closes
+  BL-015 (filed at F-002 Step 1, triggered when bundled-rusqlite's
+  default tripped F-002 Step 4 unit tests with FK constraint errors).
+
 ## v0.8.0 — 2026-04-24
 
 Theme: Decay + Synthesis Hardening + CI unblock. Review-originated
