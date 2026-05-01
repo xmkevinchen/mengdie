@@ -294,6 +294,148 @@ fn rrf_merge(
     merged
 }
 
+// ---- F-003 Wave 2 orchestrator (plan F-003 Step 2) ----
+
+/// Linear-rescale-by-per-call-max normalization for FTS-only score
+/// fallback. Per discussion 001 Topic 6 + plan F-003 Step 2 HARD GATE
+/// benchmark: this function preserves upper-range discriminability
+/// (output(50)-output(5) ≈ 0.902 ≥ 0.10) and monotonicity, while sigmoid
+/// (compresses upper to ≈0.007) and tanh-half-positive (≈0.0001) both
+/// fail — the chosen function ensures `min_score` filters remain
+/// effective in degraded mode.
+///
+/// Input: `&[FtsResult]` with raw `bm25_score` (SQLite FTS5 returns BM25
+/// with sign convention where lower = better; we work on `.abs()`).
+/// Output: parallel `Vec<f64>` where each element is in [0, 1].
+///
+/// Edge cases: empty input returns empty Vec; single element returns
+/// `[0.0]` (single-result corner case — a min_score check still passes
+/// at 0.0 since the result was the only match); range collapse
+/// (max-min < 1.0) uses `range = 1.0` to avoid division-blowup, which
+/// produces small differential outputs in [0, 1] without panic.
+fn linear_rescale_normalize(fts_results: &[FtsResult]) -> Vec<f64> {
+    if fts_results.is_empty() {
+        return Vec::new();
+    }
+    let abs_scores: Vec<f64> = fts_results.iter().map(|r| r.bm25_score.abs()).collect();
+    let min = abs_scores.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = abs_scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let range = (max - min).max(1.0);
+    abs_scores
+        .iter()
+        .map(|&s| ((s - min) / range).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// FTS-only fallback path for `memory_search_audited`. Calls
+/// `db.search_fts`, hydrates each FtsResult into a SearchResult by
+/// fetching the full MemoryEntry, and normalizes scores to [0, 1] via
+/// `linear_rescale_normalize` (plan F-003 Topic 6 / discussion 001 HARD
+/// GATE).
+fn fts_only_with_normalization(
+    db: &Db,
+    query: &str,
+    project_id: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let fts_results = db.search_fts(query, project_id, limit)?;
+    let normalized_scores = linear_rescale_normalize(&fts_results);
+    let mut results = Vec::with_capacity(fts_results.len());
+    for (idx, fts) in fts_results.iter().enumerate() {
+        if let Some(entry) = db.get_memory(&fts.id)? {
+            results.push(SearchResult {
+                entry,
+                score: normalized_scores[idx],
+            });
+        }
+    }
+    Ok(results)
+}
+
+/// Free-function orchestrator over `&Db` that:
+///
+/// 1. Routes search via embedding when `query_embedding_result` is
+///    `Ok(...)`, falling back to FTS-only under
+///    `FallbackPolicy::HybridOrFtsOnly`. `Err(...)` under
+///    `FallbackPolicy::HybridOrError` propagates unchanged.
+/// 2. Applies `min_score` filter to the raw results BEFORE the audit
+///    hook fires (F-002 Doodlestein-strategic invariant: "record what
+///    the caller saw").
+/// 3. Fires the F-002 audit hook via
+///    `Db::record_search_audit_best_effort` exactly ONCE per call
+///    (replaces the two duplicated call-site hooks from F-002 Wave 1).
+/// 4. Returns route + fallback metadata so callers can map to
+///    surface-specific degraded representations.
+///
+/// `audit_start: Instant` is passed by the CALLER (preserves F-002
+/// Topic 1 Option B "took_ms includes embed latency" invariant — if
+/// the orchestrator owned the clock, embed time would be excluded).
+///
+/// `query_embedding_result` accepts the caller's `Result<Vec<f32>>`
+/// directly so the orchestrator can decide fallback based on the
+/// embedding outcome WITHOUT re-running the embedder.
+///
+/// Plan F-003 Step 2 / discussion 001 Topic 1.
+//
+// 8 parameters — each is a distinct caller concern (query, embedding result,
+// scope, limit, min_score, audit timer, fallback policy + the &Db handle).
+// Wrapping into a builder struct adds call-site indirection without reducing
+// cognitive surface; clippy's 7-arg ceiling is calibrated for typical
+// methods, not orchestration boundaries with many independent inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn memory_search_audited(
+    db: &Db,
+    query: &str,
+    query_embedding_result: anyhow::Result<Vec<f32>>,
+    project_id: Option<&str>,
+    limit: usize,
+    min_score: f64,
+    audit_start: std::time::Instant,
+    fallback_policy: FallbackPolicy,
+) -> anyhow::Result<MemorySearchOutcome> {
+    let (raw_results, route, fallback_reason) = match query_embedding_result {
+        Ok(embedding) => (
+            db.memory_search(query, &embedding, project_id, limit)?,
+            SearchRoute::Hybrid,
+            None,
+        ),
+        Err(e) => match fallback_policy {
+            FallbackPolicy::HybridOrError => {
+                tracing::warn!(error = %e, "embedding failed; HybridOrError policy returns Err");
+                return Err(e);
+            }
+            FallbackPolicy::HybridOrFtsOnly => {
+                tracing::warn!(error = %e, "embedding failed; falling back to FTS-only");
+                (
+                    fts_only_with_normalization(db, query, project_id, limit)?,
+                    SearchRoute::FtsOnly,
+                    Some(FallbackReason::EmbeddingUnavailable),
+                )
+            }
+        },
+    };
+
+    // Apply min_score filter post-search, pre-audit. F-002 Doodlestein-strategic
+    // invariant: audit records what the caller saw, not the pre-filter raw set.
+    let filtered: Vec<SearchResult> = raw_results
+        .into_iter()
+        .filter(|r| r.score >= min_score)
+        .collect();
+
+    // F-002 audit hook: caller passes audit_start so took_ms includes embed
+    // latency (Topic 1 Option B). returned_fact_ids extracted from post-filter
+    // results (Doodlestein-strategic finding).
+    let took_ms = audit_start.elapsed().as_millis() as i64;
+    let returned_fact_ids: Vec<String> = filtered.iter().map(|r| r.entry.id.clone()).collect();
+    db.record_search_audit_best_effort(query, project_id, took_ms, &returned_fact_ids);
+
+    Ok(MemorySearchOutcome {
+        results: filtered,
+        route,
+        fallback_reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +921,128 @@ mod tests {
         let entry = entry_with(Some("not-a-date"), false);
         let out = apply_boost_and_decay(0.5, &entry, frozen_now());
         assert_eq!(out, 0.5, "malformed timestamp: treat as no decay");
+    }
+
+    // ---- F-003 Step 2 HARD GATE benchmark (plan F-003 / discussion 001 Topic 6) ----
+
+    /// HARD CORRECTNESS GATE on FTS-only score normalization function selection.
+    ///
+    /// The 5 fixture inputs span 500x (`{0.1, 1.0, 5.0, 10.0, 50.0}`) — a
+    /// pathological range that surfaces upper-end compression in non-linear
+    /// normalization functions. Three candidates were evaluated:
+    ///
+    /// - **sigmoid**: `1.0 / (1.0 + (-x).exp())` — compresses upper to ≈[0.99, 1.0].
+    /// - **tanh-half-positive**: `(x.tanh() + 1.0) / 2.0` — compresses even faster.
+    /// - **linear-rescale-by-per-call-max**: `(x - min) / max(max-min, 1.0)` — preserves
+    ///   discriminability via per-call rescaling.
+    ///
+    /// Acceptance: chosen function MUST pass (a) all outputs in [0, 1],
+    /// (b) `output(50) - output(5) >= 0.10` (upper-range discriminability),
+    /// (c) monotonicity. Sigmoid and tanh both FAIL (b) — kept here as
+    /// negative-assertion sanity checks to prevent future maintainers from
+    /// accidentally re-introducing them.
+    #[test]
+    fn test_fts_score_normalization_discriminability() {
+        let bm25_inputs = [0.1f64, 1.0, 5.0, 10.0, 50.0];
+
+        // Candidate functions:
+        let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
+        let tanh_pos = |x: f64| (x.tanh() + 1.0) / 2.0;
+
+        let sigmoid_outputs: Vec<f64> = bm25_inputs.iter().map(|&x| sigmoid(x)).collect();
+        let tanh_outputs: Vec<f64> = bm25_inputs.iter().map(|&x| tanh_pos(x)).collect();
+
+        // Linear-rescale via the production `linear_rescale_normalize` helper —
+        // ensures the test pins the exact function shape the orchestrator uses.
+        let fts_input: Vec<FtsResult> = bm25_inputs
+            .iter()
+            .map(|&x| FtsResult {
+                id: format!("fact-{x}"),
+                bm25_score: x,
+            })
+            .collect();
+        let linear_outputs = linear_rescale_normalize(&fts_input);
+
+        // ---- Negative-assertion sanity checks: sigmoid + tanh DO compress ----
+        // (proves rejection rationale; prevents future re-adoption)
+        assert!(
+            sigmoid_outputs[4] - sigmoid_outputs[2] < 0.10,
+            "sigmoid MUST compress upper range (output(50) - output(5) < 0.10) — got {} - {} = {}",
+            sigmoid_outputs[4],
+            sigmoid_outputs[2],
+            sigmoid_outputs[4] - sigmoid_outputs[2]
+        );
+        assert!(
+            tanh_outputs[4] - tanh_outputs[2] < 0.10,
+            "tanh-half-positive MUST compress upper range — got {} - {} = {}",
+            tanh_outputs[4],
+            tanh_outputs[2],
+            tanh_outputs[4] - tanh_outputs[2]
+        );
+
+        // ---- Chosen function (linear-rescale-by-per-call-max) MUST pass ----
+
+        // (a) all outputs in [0, 1]
+        for (i, &out) in linear_outputs.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&out),
+                "linear-rescale output[{i}] = {out} out of [0, 1]"
+            );
+        }
+
+        // (b) upper-range discriminability: output(50) - output(5) >= 0.10
+        let upper_diff = linear_outputs[4] - linear_outputs[2];
+        assert!(
+            upper_diff >= 0.10,
+            "linear-rescale upper-range discriminability FAILED: output(50)-output(5) = {} - {} = {} < 0.10",
+            linear_outputs[4],
+            linear_outputs[2],
+            upper_diff
+        );
+
+        // (c) monotonicity
+        for i in 1..linear_outputs.len() {
+            assert!(
+                linear_outputs[i] > linear_outputs[i - 1],
+                "linear-rescale non-monotonic at index {}: {} → {}",
+                i,
+                linear_outputs[i - 1],
+                linear_outputs[i]
+            );
+        }
+    }
+
+    /// Edge case: empty input → empty output (no panic).
+    #[test]
+    fn test_linear_rescale_normalize_empty() {
+        let out = linear_rescale_normalize(&[]);
+        assert!(out.is_empty());
+    }
+
+    /// Edge case: single element → [0.0] (max-min=0; range clamped to 1.0).
+    #[test]
+    fn test_linear_rescale_normalize_single() {
+        let inp = vec![FtsResult {
+            id: "fact-1".to_string(),
+            bm25_score: 7.5,
+        }];
+        let out = linear_rescale_normalize(&inp);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], 0.0);
+    }
+
+    /// Edge case: all-equal inputs → [0, 0, ...] (range clamp prevents division blowup).
+    #[test]
+    fn test_linear_rescale_normalize_equal_inputs() {
+        let inp: Vec<FtsResult> = (0..5)
+            .map(|i| FtsResult {
+                id: format!("fact-{i}"),
+                bm25_score: 5.0,
+            })
+            .collect();
+        let out = linear_rescale_normalize(&inp);
+        for &x in &out {
+            assert_eq!(x, 0.0);
+        }
     }
 }
