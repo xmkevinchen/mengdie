@@ -32,6 +32,67 @@ pub struct FtsResult {
     pub bm25_score: f64,
 }
 
+// ---- F-003 Wave 2 orchestrator types (plan F-003 Step 1; discussion 001 Topic 1) ----
+
+/// Controls embedding-failure behavior at the `memory_search_audited`
+/// orchestrator. Per-surface defaults per discussion 001 Topic 1:
+/// - **MCP** (`mcp_tools::search`) → `HybridOrFtsOnly` (graceful fallback to
+///   FTS-only on embed-fail; matches today's MCP behavior).
+/// - **CLI** (`cli::cmd_search`) → `HybridOrError` (hard-error on embed-fail;
+///   matches today's CLI behavior — operator surface).
+/// - **Internal/test callers** → `HybridOrError` (deterministic error path).
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackPolicy {
+    /// Embedding failure → propagate as `Err` (no FTS fallback).
+    HybridOrError,
+    /// Embedding failure → fall back to FTS-only path with normalized scores.
+    HybridOrFtsOnly,
+}
+
+/// Indicates which retrieval path produced the results in
+/// `MemorySearchOutcome`. Consumers map this to their own degraded-mode
+/// representation (e.g., MCP's `degraded` string).
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1 + Topic 6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchRoute {
+    /// Hybrid FTS5 + vector + RRF merge (the canonical path).
+    Hybrid,
+    /// FTS-only fallback (embed-fail under `FallbackPolicy::HybridOrFtsOnly`).
+    /// Scores are normalized to [0, 1] per Topic 6.
+    FtsOnly,
+}
+
+/// Populated when `SearchRoute::FtsOnly` was reached via fallback rather than
+/// explicit caller request. v0.0.1 has only one fallback reason; the enum
+/// shape leaves room for future reasons (e.g., `IndexCorrupted`,
+/// `VectorDimensionMismatch`) without breaking callers that match it
+/// exhaustively.
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackReason {
+    /// Embedding generation failed (model unavailable, ONNX runtime error,
+    /// etc.). The orchestrator fell back to FTS-only under
+    /// `FallbackPolicy::HybridOrFtsOnly`.
+    EmbeddingUnavailable,
+}
+
+/// Return value of `memory_search_audited` (plan F-003 Step 2). Carries the
+/// post-filter result list PLUS the route metadata so consumers can
+/// distinguish "0 results because hybrid found nothing" from "0 results
+/// because FTS fallback returned empty under embed-fail".
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1.
+#[derive(Debug)]
+pub struct MemorySearchOutcome {
+    pub results: Vec<SearchResult>,
+    pub route: SearchRoute,
+    pub fallback_reason: Option<FallbackReason>,
+}
+
 /// FTS5 reserved words that must be filtered from query tokens.
 const FTS5_RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
 
