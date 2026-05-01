@@ -273,4 +273,172 @@ mod tests {
         assert!(entry.embedding.is_some());
         assert_eq!(entry.embedding_dim, Some(384));
     }
+
+    // ---- F-003 Step 7 ingest_text + atomicity tests ----
+
+    fn test_metadata(title: &str, entities: &str, knowledge_type: &str) -> IngestMetadata {
+        IngestMetadata {
+            title: title.to_string(),
+            entities: entities.to_string(),
+            source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
+            source_type: "conclusion".to_string(),
+            knowledge_type: knowledge_type.to_string(),
+            is_longterm: false,
+        }
+    }
+
+    /// AC11: ingest_text inserts a memory and lowercases entities (verifies
+    /// the F-002-plan-time entity-case asymmetry is fixed at the shared
+    /// prep helper boundary — both file-ingest and MCP-ingest paths
+    /// converge on lowercased entities).
+    #[test]
+    fn test_ingest_text_inserts_memory_and_lowercases_entities() {
+        let db = Db::open_in_memory().unwrap();
+        let mut embedder = MockEmbedder;
+        let metadata = test_metadata("AUTH decision", "AUTH,Middleware,JWT", "decisional");
+
+        let result = ingest_text(
+            &db,
+            &mut embedder,
+            "JWT authentication content",
+            metadata,
+            "proj",
+        )
+        .unwrap();
+        let entry = db.get_memory(&result.entry_id).unwrap().unwrap();
+        assert_eq!(
+            entry.entities, "auth,middleware,jwt",
+            "entities must be lowercased + comma-joined"
+        );
+        assert_eq!(entry.title, "AUTH decision");
+        assert_eq!(entry.knowledge_type, "decisional");
+        assert!(entry.embedding.is_some());
+    }
+
+    /// AC11: ingest_text_with_resolves atomically inserts the new memory AND
+    /// invalidates the listed predecessor ids in one transaction.
+    #[test]
+    fn test_ingest_text_with_resolves_invalidates_atomically() {
+        let db = Db::open_in_memory().unwrap();
+        let mut embedder = MockEmbedder;
+
+        // Seed two predecessor memories.
+        let metadata1 = test_metadata("old auth v1", "auth", "decisional");
+        let id1 = ingest_text(&db, &mut embedder, "v1 content", metadata1, "proj")
+            .unwrap()
+            .entry_id;
+        let metadata2 = test_metadata("old auth v2", "auth", "decisional");
+        let id2 = ingest_text(&db, &mut embedder, "v2 content", metadata2, "proj")
+            .unwrap()
+            .entry_id;
+
+        // Insert a new memory that supersedes both.
+        let metadata3 = test_metadata("new auth", "auth", "decisional");
+        let id3 = ingest_text_with_resolves(
+            &db,
+            &mut embedder,
+            "v3 content",
+            metadata3,
+            "proj",
+            &[id1.clone(), id2.clone()],
+        )
+        .unwrap()
+        .entry_id;
+
+        // Predecessors are invalidated; new entry is live.
+        let old1 = db.get_memory(&id1).unwrap().unwrap();
+        let old2 = db.get_memory(&id2).unwrap().unwrap();
+        let new = db.get_memory(&id3).unwrap().unwrap();
+        assert!(
+            old1.valid_until.is_some(),
+            "predecessor 1 must have valid_until set"
+        );
+        assert!(
+            old2.valid_until.is_some(),
+            "predecessor 2 must have valid_until set"
+        );
+        assert_eq!(
+            old1.superseded_by.as_deref(),
+            Some(id3.as_str()),
+            "predecessor 1's superseded_by must point to new id"
+        );
+        assert_eq!(
+            old2.superseded_by.as_deref(),
+            Some(id3.as_str()),
+            "predecessor 2's superseded_by must point to new id"
+        );
+        assert!(new.valid_until.is_none(), "new entry must be live");
+    }
+
+    /// AC11: empty resolves slice is a valid input (just inserts without
+    /// any invalidation — semantically equivalent to ingest_text but goes
+    /// through the resolves path; useful for callers that build the
+    /// resolves Vec dynamically and may pass empty).
+    #[test]
+    fn test_ingest_text_with_resolves_empty_resolves_is_plain_insert() {
+        let db = Db::open_in_memory().unwrap();
+        let mut embedder = MockEmbedder;
+        let metadata = test_metadata("alone", "tag", "decisional");
+
+        let result = ingest_text_with_resolves(
+            &db,
+            &mut embedder,
+            "isolated content",
+            metadata,
+            "proj",
+            &[],
+        )
+        .unwrap();
+        let entry = db.get_memory(&result.entry_id).unwrap().unwrap();
+        assert!(entry.valid_until.is_none(), "lone insert must be live");
+    }
+
+    /// AC11: file-ingest and MCP-ingest converge on lowercased entities post-
+    /// F-003 (regression test for the F-002-plan-time entity-case
+    /// asymmetry). Verifies the ingest_document → ingest_text wrapper path
+    /// produces the same observable case-normalized output as the direct
+    /// ingest_text path.
+    #[test]
+    fn test_ingest_document_and_ingest_text_produce_same_entity_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conclusion.md");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "---\ntitle: Cross-surface test\ntags: [AUTH, Middleware]\n---\n# Test\n\nfile-ingest content."
+        )
+        .unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let mut embedder = MockEmbedder;
+
+        // file-ingest path
+        let file_result = ingest_file(&db, &mut embedder, &path, "proj").unwrap();
+        let file_entry = db.get_memory(&file_result.entry_id).unwrap().unwrap();
+
+        // direct ingest_text path
+        let metadata = test_metadata("Cross-surface test 2", "AUTH,Middleware", "decisional");
+        let direct_result = ingest_text(
+            &db,
+            &mut embedder,
+            "direct-ingest content",
+            metadata,
+            "proj",
+        )
+        .unwrap();
+        let direct_entry = db.get_memory(&direct_result.entry_id).unwrap().unwrap();
+
+        assert_eq!(
+            file_entry.entities, "auth,middleware",
+            "file-ingest path must lowercase entities"
+        );
+        assert_eq!(
+            direct_entry.entities, "auth,middleware",
+            "direct ingest_text path must lowercase entities"
+        );
+        assert_eq!(
+            file_entry.entities, direct_entry.entities,
+            "both paths must produce the same case-normalized entity string"
+        );
+    }
 }
