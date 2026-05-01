@@ -294,105 +294,67 @@ impl MengdieServer {
                 error: Some(format!("field too long (max {MAX_FIELD_LEN} chars)")),
             });
         }
-        // Enum types validated at deserialization — unknown values rejected by serde
-        let source_type = params.source_type.to_string();
-        let knowledge_type = params.knowledge_type.to_string();
 
         let pid = params
             .project_id
-            .clone()
             .unwrap_or_else(|| self.default_project_id.clone());
-        let embedder = self.embedder.clone();
-        let ctx = super::embeddings::EmbeddingContext {
-            knowledge_type: knowledge_type.clone(),
-            entities: params.entities.clone(),
-            project_id: pid.clone(),
-            title: params.title.clone(),
-        };
-        let content = params.content.clone();
-        let embedding_result = tokio::task::spawn_blocking(move || {
-            let mut emb = embedder.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
-            emb.embed_with_context(&content, &ctx)
-        })
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn: {e}")));
-
-        let raw_embedding: Option<Vec<f32>> = match embedding_result {
-            Ok(emb) => Some(emb),
-            Err(e) => {
-                tracing::error!(error = %e, "embedding failed, storing without embedding");
-                None
-            }
-        };
-
-        let (embedding_blob, embedding_dim) = match &raw_embedding {
-            Some(emb) => {
-                let dim = emb.len() as i64;
-                (Some(super::embeddings::embedding_to_blob(emb)), Some(dim))
-            }
-            None => (None, None),
-        };
-
-        // Capture for contradiction check before move into NewMemory
-        let entities_for_check: Vec<String> = params
-            .entities
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let knowledge_type_for_check = knowledge_type.clone();
-
-        // Contradiction check BEFORE insert (so we don't match the new entry against itself)
-        let embedding_for_check = raw_embedding.as_deref();
-        let conflicts = match self.db.check_contradictions(
-            &entities_for_check,
-            embedding_for_check,
-            &knowledge_type_for_check,
-            &pid,
-        ) {
-            Ok(cs) => cs
-                .into_iter()
-                .map(|c| ConflictItem {
-                    id: c.existing_id,
-                    title: c.existing_title,
-                    reason: c.reason.to_string(),
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "contradiction check failed");
-                vec![]
-            }
-        };
-
-        let mem = super::db::NewMemory {
-            project_id: pid.clone(),
-            source_file: params.source_file,
-            source_type,
-            knowledge_type,
+        let metadata = super::ingest::IngestMetadata {
             title: params.title,
-            content: params.content,
             entities: params.entities,
-            embedding: embedding_blob,
-            embedding_dim,
+            source_file: params.source_file,
+            source_type: params.source_type.to_string(),
+            knowledge_type: params.knowledge_type.to_string(),
             is_longterm: false,
         };
-
+        let content = params.content;
         let resolves = params.resolves.unwrap_or_default();
-        let insert_result = if resolves.is_empty() {
-            self.db.insert_memory(mem)
-        } else {
-            self.db.insert_memory_resolving(mem, &resolves)
-        };
 
-        match insert_result {
-            Ok(entry_id) => {
-                // Track metrics
+        // F-003 Wave 2: route through ingest::ingest_text or
+        // ingest_text_with_resolves via spawn_blocking (preserves the
+        // Arc<Mutex<Embedder>> lifecycle pattern from F-002 — plan AC10
+        // requires ZERO changes to this lock shape; the existing
+        // `embedder.clone() + lock + emb.embed_with_context` flow is
+        // structurally preserved, only the post-embed code path moves
+        // into the shared ingest::* helpers).
+        //
+        // F-003 Topic 4 implicit semantic: embed-fail is now a hard error
+        // (was soft "store without embedding" in pre-F-003 MCP path).
+        // Behavior change is bounded — the caller sees `error: "ingestion
+        // failed"` instead of a partial-stored memory; converges with
+        // file-ingest path's hard-error behavior.
+        let db = self.db.clone();
+        let embedder = self.embedder.clone();
+        let result =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<super::ingest::IngestResult> {
+                let mut emb = embedder.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+                if resolves.is_empty() {
+                    super::ingest::ingest_text(&db, &mut *emb, &content, metadata, &pid)
+                } else {
+                    super::ingest::ingest_text_with_resolves(
+                        &db, &mut *emb, &content, metadata, &pid, &resolves,
+                    )
+                }
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn: {e}")));
+
+        match result {
+            Ok(ingest_result) => {
+                let conflicts: Vec<ConflictItem> = ingest_result
+                    .conflicts
+                    .into_iter()
+                    .map(|c| ConflictItem {
+                        id: c.existing_id,
+                        title: c.existing_title,
+                        reason: c.reason.to_string(),
+                    })
+                    .collect();
                 let _ = self.db.increment_metric(metrics::METRIC_INGEST_COUNT);
                 if !conflicts.is_empty() {
                     let _ = self.db.increment_metric(metrics::METRIC_CONFLICT_COUNT);
                 }
                 Json(IngestOutput {
-                    entry_id,
+                    entry_id: ingest_result.entry_id,
                     conflicts,
                     error: None,
                 })
