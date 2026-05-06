@@ -209,35 +209,72 @@ production DB (empirical results in `docs/backlog/BL-clustering-validation.md`).
 
 Plan 006 (dream MVP) was superseded by the 007/009/010 split and is `status: cancelled`.
 
-**Next step (current — 2026-04-27)**: **v0.x frozen at v0.8.0; v1.0
-rebuild planning**. v0.8.5 sprint cancelled (all 4 items archived);
-all 13 BLs archived to `.ae/backlog/closed/v0.x-superseded-by-v1/`.
+**Next step (current — 2026-05-05)**: **v0.x frozen at v0.8.0; v0.0.1
+rebuild in progress on `feature/v0.0.1-rebuild`**. v0.8.5 sprint cancelled
+(all 4 items archived); all 13 v0.x BLs archived to
+`.ae/backlog/closed/v0.x-superseded-by-redesign/`.
 
-Strategic reframe (chat 2026-04-27): mengdie's v0.x is reinventing
-mature Rust infrastructure (swiftide / rig / Qdrant / LanceDB) and
-solving "production data is precious" problems that don't apply
-(data is reproducible from `docs/`). New thesis: mengdie = AE 的大脑
-(serves AE plugin first, post-v1 generic), AE plugin handles
-in-session LLM-driven processing (Karpathy LLM-wiki style), mengdie
-receives AE-distilled propositional facts as ingest input + does
-retrieval + does on-demand reflection ("自成长" via meta-fact
+**v0.0.1 thesis (operator clarification 2026-05-05)**:
+
+> v0.0.1 的目标就是要有个最小可能用的，但避免以后自己重复造轮子的 AE 大脑.
+> *(Minimum-viable AE-brain that avoids re-inventing wheels in future.)*
+
+Per 026 OSS-survey analysis verdicts (already settled at analyze time;
+see `docs/discussions/026-rust-oss-survey/analysis.md`), this translates
+to a **narrow OSS-adoption scope**, NOT a rip-out-and-replace rebuild:
+
+- **Keep all working in-house code** (fastembed-rs / FTS5 / db.rs /
+  schema.rs / ingest.rs / mcp_tools.rs / parser.rs / dreaming.rs /
+  clustering.rs / synthesis.rs main pipeline / contradiction.rs /
+  llm.rs::ClaudeCliProvider / F-002 audit substrate). Karpathy "don't
+  refactor things that aren't broken" applies to v0.x code that
+  empirically works (13-14 syntheses per production run).
+- **Adopt OSS only where it prevents reinvention**: `vector.rs` (264 LoC
+  full-table-scan) → **sqlite-vec** (qualified ADOPT, 15-min spike pending);
+  `synthesis.rs` JSON parser (~100 LoC brace-depth) → **rig::Extractor**
+  (CONTINGENT, 50-line spike pending); **async-openai** optional second
+  `LlmProvider` impl for oMLX endpoint.
+- **Rejected** by 026 analysis: swiftide / Qdrant / candle / arroy /
+  duckdb-rs / mistral.rs / ollama-rs / community Anthropic clients.
+- **Deferred with trigger**: LanceDB (corpus >100k OR p95 vector latency
+  >50ms), Tantivy (multilingual query F1 <0.7 on a measured test set
+  OR corpus >5M tokens). Trigger thresholds calibrated against personal
+  KB scale; revisit if these prove too lax in operator usage.
+
+**Cargo.toml net change**: +1 to +3 lines (**contingent on BL-026 +
+BL-027 spike outcomes**; sqlite-vec static-vs-dynamic-link spike
++ rig::Extractor subprocess-streaming spike). **src/ touched**:
+~200-500 LoC under spike-PASS assumption.
+
+mengdie's role unchanged: **AE 的大脑** (serves AE plugin first; post-v1
+generic). AE plugin handles in-session LLM-driven processing (Karpathy
+LLM-wiki style); mengdie receives AE-distilled propositional facts +
+does retrieval + does on-demand reflection ("自成长" via meta-fact
 abstraction).
 
-**Phase 0 research items** (do BEFORE filing v1 BLs, see
-`docs/v1-rebuild-plan.md`):
-1. Survey open-source Rust libraries (swiftide, rig, Qdrant, LanceDB,
-   sqlite-vec, Tantivy) — what each does, what mengdie reimplements.
-2. Per-library role + integration strategy.
-3. mengdie ↔ AE integration design (push pattern A vs B).
-4. Reflection mechanism (depends on item 2).
+**Phase 0 research progress** (per `docs/v0.0.1-rebuild-plan.md`):
 
-Three deferred open questions: reflection trigger, meta-fact
-confidence, single-table vs split-table.
+| Item | Status |
+|------|--------|
+| 1. Survey OSS libraries (swiftide, rig, Qdrant, LanceDB, sqlite-vec, Tantivy) | **done** at analyze step (`docs/discussions/026-rust-oss-survey/analysis.md` library scorecard with 14 verdicts); discuss step is light-touch (verdicts ratified) |
+| 2. Per-library role + integration strategy | **done** at analyze step — adopt sqlite-vec (1) + rig::Extractor conditional (1) + async-openai optional (1); skip 8; defer 2 |
+| 3. mengdie ↔ AE integration design (push pattern A vs B) | resolved by **027** (discuss done 2026-05-05) — push-primary, watcher.rs as opt-in library, cmd_import for cold-start. See `docs/discussions/027-industry-state-2026/conclusion.md` (T1-T5 all valid under thesis per 2026-05-05 post-conclusion note) |
+| 4. Reflection mechanism | resolved by **027 T2** — on-demand default + `ReflectionTrigger` trait; salience/composite/debounced filed as deferred BLs (BL-024) |
 
-`feature/v1-rebuild` branch exists but empty. Will resume when Phase 0
-research completes and Phase 1 BLs filed. Until then: no code changes
-to `src/`. v0.8.0 continues to run for operator use; receives no new
-development.
+Three deferred open questions resolved:
+**reflection trigger** (027 T2: on-demand default + trait),
+**meta-fact confidence** (deferred — surfaces in post-v0.0.1 reflection-evolution work),
+**single-table vs split-table** (028 conclusion: split — F-002 link table shipped).
+
+**`feature/v0.0.1-rebuild` branch state**: 27 commits ahead of main;
+~13K LoC net (mostly docs / discussions). **src/ ~1400 LoC**:
+F-001 spike outcome + F-002 audit substrate + F-003 search/ingest
+free-fn refactor — **all valid v0.0.1 contributions** (audit substrate
+is part of the kept stack; search/ingest cleanup makes the sqlite-vec
+cut-line easier; F-001 outcome enables BL-026 sqlite-vec adoption).
+**Cargo.toml has 0 changes so far** — adoption begins with BL-026
+(sqlite-vec) + BL-027 (rig::Extractor conditional). Estimated 1-2 weeks
+to ship v0.0.1 + cut tag (Step F per rebuild plan).
 
 **Advisory rule for closing plans**: when `/ae:work` completes all plan
 checkboxes, the completion commit must also update the parent discussion's
