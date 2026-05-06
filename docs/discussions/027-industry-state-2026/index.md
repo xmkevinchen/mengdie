@@ -5,7 +5,7 @@ status: active
 created: 2026-04-27
 pipeline:
   analyze: done
-  discuss: pending
+  discuss: done
   plan: pending
   work: pending
 plan: ""
@@ -42,8 +42,22 @@ A landscape map covering:
 - Google ecosystem reality (NotebookLM internals, Gemini Files API)
 - Architectural patterns surfaced across all of the above (hot/cold storage, episodic vs semantic, temporal validity, provenance, reflection triggers)
 
+The /ae:analyze phase is complete (`analysis.md` + `docs/blueprint.md`
+v0.2). This /ae:discuss phase resolves the five architectural open
+questions documented in blueprint §8 — these gate P1 / P2 BL filing
+under the v0.0.1 rebuild.
+
 ## Topics
-*Created by `/ae:discuss`*
+
+| # | Topic | File | Status | Decision |
+|---|-------|------|--------|----------|
+| 1 | Ingest mechanism — delivery pattern | [topic-01-ingest-mechanism/](topic-01-ingest-mechanism/) | converged | Push-primary; watcher.rs kept as opt-in library, NOT wired |
+| 2 | Reflection trigger model | [topic-02-reflection-trigger/](topic-02-reflection-trigger/) | converged | On-demand default + `ReflectionTrigger` trait; cron as second impl |
+| 3 | Cross-project default retrieval scope | [topic-03-cross-project-scope/](topic-03-cross-project-scope/) | converged | Ratify §5 per-project; rationale = contamination risk (refined) |
+| 4 | Ingest source boundary | [topic-04-ingest-source-boundary/](topic-04-ingest-source-boundary/) | converged | Extraction-discipline (not physical AE-files-only); `source_type::unknown`→`direct` |
+| 5 | Loop-closure signal | [topic-05-loop-closure-measurement/](topic-05-loop-closure-measurement/) | converged | F-002 nonempty rate + ae:retrospect + falsification rule |
 
 ## Documents
+- [Framing](framing.md)
 - [Analysis](analysis.md)
+- [Conclusion](conclusion.md) *(after discussion complete)*
