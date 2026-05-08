@@ -3,9 +3,11 @@ id: blueprint
 title: "mengdie — system blueprint"
 type: blueprint
 created: 2026-04-27
-updated: 2026-04-27
+updated: 2026-05-08
 status: draft
 version: 0.2
+revision_log:
+  - "2026-05-08: F-004 increment: §5 milestone mapping, §7 expected trigger version, §13 per-milestone PRD convention, §14 doc stack roles"
 ---
 
 # mengdie — System Blueprint
@@ -169,31 +171,43 @@ commercial or OSS tool combines all four.
 
 **P0** — without these, the core promise (§2) does not hold:
 - AE artifact ingest path (push from AE plugin, or pull via watcher
-  daemon — see §8)
-- `memory_search` returning provenance + temporal validity
+  daemon — see §8) → **v0.0.1** (shipped: parser.rs/watcher.rs/ingest.rs)
+- `memory_search` returning provenance + temporal validity → **v0.0.1**
+  (shipped; spec at docs/specs/memory_search.md)
 - AE plugin `/ae:analyze` Round-0 injection (the operator's plugin
   needs to actually call mengdie — without this, the loop never
-  closes)
+  closes) → **v0.0.1** (BL-008/BL-025 AE wiring; gates on v0.0.1.prd.md)
 - Basic instrumentation: log every search call, what was returned,
   what was used (so the operator can verify the loop is closing,
-  not just looks closed)
+  not just looks closed) → **v0.0.1** (F-002 `audit_returned_facts`
+  substrate shipped)
 
 **P1** — make the core promise robust:
 - Bi-temporal contradiction handling (set `valid_until` on superseded
-  facts; retain history)
+  facts; retain history) → **v0.0.1 partial** (single-temporal active
+  in `contradiction.rs`); **v1.0 full** (bi-temporal `event_time` +
+  `ingest_time` borrowed from Graphiti per docs/roadmap.md v1.0)
 - Bidirectional update on ingest (when a fact arrives, re-evaluate
-  related facts in its entity cluster — A-MEM pattern)
-- Cross-project search (default per-project; opt-in cross-project)
+  related facts in its entity cluster — A-MEM pattern) → **v1.0+
+  trigger** (per §12: corpus ≥1k AND ≥5 supersession-within-7-days
+  events / 30-day window from persisted domain audit table)
+- Cross-project search (default per-project; opt-in cross-project) →
+  **v0.0.1** (shipped; `scope: "global"` MCP param)
 
 **P2** — fulfill the self-evolving promise:
 - Synthesis / dreaming (cluster related facts, LLM synthesizes a
-  meta-fact, store with link table)
+  meta-fact, store with link table) → **v0.0.1** (BL-006/007 shipped;
+  13-14 syntheses per production run empirically)
 - Reflection trigger model (count threshold + entropy + on-demand,
-  vs. cron — see §8)
+  vs. cron — see §8) → **vNext+** (027 T2 settled on-demand default +
+  `ReflectionTrigger` trait; trait implementation deferred to vNext)
 
 **P3** — storage / implementation optimization:
-- sqlite-vec adoption (replaces hand-rolled brute-force vector search)
-- Storage layer migration along the §7 ladder when triggers fire
+- sqlite-vec adoption (replaces hand-rolled brute-force vector search) →
+  **v0.0.1** (BL-026 spike pending; integrate after PASS)
+- Storage layer migration along the §7 ladder when triggers fire →
+  **per-tier triggers** (Tier 1 = v0.0.1 default; Tier 2 = v1.0+;
+  Tier 3-4 = post-v1.0 trigger-fired only)
 
 If a P3 item gets prioritized over a P0 item, something has gone
 wrong in scope review.
@@ -241,12 +255,25 @@ Plus three exclusions:
   mengdie-side code that conforms to rig's `CompletionModel` trait)
 - Indexing pipeline → `swiftide` (subject to verification of
   contributor count and version maturity, see §10)
+  <!-- 2026-05-08 update: 026 OSS Rust survey verdict = SKIP swiftide
+       (multi-contributor + active but stack-incompatible with
+       mengdie's narrow scope; per docs/discussions/026-rust-oss-survey/
+       analysis.md). Body retained for §11 audit-trail invariant
+       ("revised when §8 question resolved" — §8 doesn't cover this);
+       per F-004 review fixup. Replace with rig::Extractor narrow
+       borrow in BL-027 spike (per docs/roadmap.md v0.0.1 oss_wheels). -->
 - Vector storage Tier 1 → `sqlite-vec` (subject to bundled-rusqlite
   compatibility verification, see §10)
 - Local embedding → `fastembed-rs` (already in use; confirmed)
 - MCP transport → `rmcp` (already in use; confirmed)
 - Graph storage when needed (§7 Tier 2+) → `Kuzu` (subject to
   verification, see §10)
+  <!-- 2026-05-08 update: per docs/roadmap.md v1.0 oss_wheels, if KG
+       is needed mengdie adopts Graphiti (which already wraps Kuzu/Neo4j)
+       rather than Kuzu directly. Reverse-leverage rule from F-004
+       roadmap §D: don't rebuild what Graphiti has done. Body retained
+       per §11 audit-trail invariant; re-evaluate at v1.0 trigger. -->
+
 
 **Build** (no adequate industry reference; custom code justified):
 - AE pipeline artifact ingestion (no OSS treats AE-style structured
@@ -277,12 +304,12 @@ The conceptual model in §3 is implementation-independent. The
 implementation evolves along this ladder; each tier is reached only
 when its trigger fires.
 
-| Tier | Storage | Deployment | Trigger to advance |
-|---|---|---|---|
-| **1** | SQLite + sqlite-vec; bi-temporal logic in SQL | Single binary | Cross-project graph traversal queries become a regular need; OR contradiction chains exceed ~3 hops and SQL recursion gets ugly |
-| **2** | + Kuzu (embedded graph DB, file-based) | Single binary, two stores | Graph data exceeds Kuzu's practical limit; OR graph algorithms in Kuzu lag specialised graph DBs |
-| **3** | + FalkorDB / Neo4j (separate process) | Multi-process locally | mengdie's hand-rolled bi-temporal logic falls behind Graphiti's evolution; OR community clustering / saga summaries become first-class needs |
-| **4** | Delegate the graph layer entirely to Graphiti's MCP server | mengdie thin (~1k–2k LoC) + Graphiti MCP + graph DB | Graphiti API stabilises post-v1.0 and proves long-term commitment; mengdie's custom Rust graph code becomes a maintenance burden |
+| Tier | Storage | Deployment | Trigger to advance | Expected trigger version |
+|---|---|---|---|---|
+| **1** | SQLite + sqlite-vec; bi-temporal logic in SQL | Single binary | Cross-project graph traversal queries become a regular need; OR contradiction chains exceed ~3 hops and SQL recursion gets ugly | **v0.0.1 default** (current target) |
+| **2** | + Kuzu (embedded graph DB, file-based) | Single binary, two stores | Graph data exceeds Kuzu's practical limit; OR graph algorithms in Kuzu lag specialised graph DBs | **v1.0+** (corpus + graph-query demand from operator dogfood) |
+| **3** | + FalkorDB / Neo4j (separate process) | Multi-process locally | mengdie's hand-rolled bi-temporal logic falls behind Graphiti's evolution; OR community clustering / saga summaries become first-class needs | **post-v1.0 trigger** (only if hand-rolled bi-temporal lags Graphiti) |
+| **4** | Delegate the graph layer entirely to Graphiti's MCP server | mengdie thin (~1k–2k LoC) + Graphiti MCP + graph DB | Graphiti API stabilises post-v1.0 and proves long-term commitment; mengdie's custom Rust graph code becomes a maintenance burden | **future trigger only** (not currently planned; reverse-leverage path per docs/roadmap.md §D) |
 
 **Default for v0.0.1: Tier 1.** The data model is designed to migrate
 forward without breaking changes.
@@ -292,7 +319,11 @@ forward without breaking changes.
 ## 8. Open questions
 
 These do not block §1–§5 but must be resolved by `/ae:discuss` before
-P1 or P2 work begins:
+P1 or P2 work begins.
+
+<!-- 2026-05-08 update (per F-004 review fixup): Q1 and Q2 settled
+     by discussion 027. Q5 partially settled by F-002 audit substrate.
+     Body retained per §11 audit-trail invariant. -->
 
 1. **Ingest mechanism: push or pull?** AE plugin explicitly calls
    `memory_ingest` after each pipeline phase (push), OR mengdie runs
@@ -301,11 +332,19 @@ P1 or P2 work begins:
    from filesystem. Pull was the v0.x default but the daemon was
    never wired. **Recommendation: push as v0.0.1 default; watcher
    library remains as opt-in fallback.**
+   <!-- ✅ RESOLVED 2026-05-05 by 027 T1: push-primary, watcher.rs
+        as opt-in library, cmd_import for cold-start. See
+        docs/discussions/027-industry-state-2026/conclusion.md. -->
 
 2. **Reflection trigger.** Cron / salience-threshold (Generative
    Agents) / composite (count + entropy + elapsed time, SCM) /
    debounced submit-dedupe (LangMem) / on-demand. Pick one as v0.0.1
    default; others remain triggers for evolution.
+   <!-- ✅ RESOLVED 2026-05-05 by 027 T2: on-demand default +
+        ReflectionTrigger trait for swap-in alternatives. Filed
+        BL-024 for salience/composite/debounced as deferred BLs.
+        See docs/discussions/027-industry-state-2026/conclusion.md. -->
+
 
 3. **Cross-project default scope.** Currently per-project default,
    cross-project opt-in. Some queries may want global default. Is
@@ -358,8 +397,18 @@ be committed to. Each is a few hours of focused work:
    rig has subprocess-LLM-dispatch trait support OR confirm
    ClaudeCliProvider stays as a mengdie-side impl of rig's
    `CompletionModel` trait. Decides what to actually adopt.
+   <!-- 2026-05-08 update: 026 OSS Rust survey resolved this spike —
+        swiftide = SKIP; rig = qualified ADOPT but only via narrow
+        rig::Extractor (BL-027 spike); ClaudeCliProvider stays as
+        mengdie-side primitive (BL-005 shipped). Spike is closed in
+        spirit; line retained per §11 audit-trail invariant. -->
 3. **Kuzu / kuzu-rs maturity.** Same fitness check. Decides whether
    §7 Tier 2 is a viable next step or needs revisiting.
+   <!-- 2026-05-08 update: per docs/roadmap.md v1.0 oss_wheels,
+        Tier 2 KG path adopts Graphiti (not Kuzu directly). This
+        spike is deferred to v1.0 trigger or removed entirely
+        depending on dogfood. Line retained per §11 audit-trail. -->
+
 
 These spikes are filed as v0.0.1 BLs, scheduled before any P0 / P1
 implementation work that depends on the outcome.
@@ -420,3 +469,121 @@ for the full Decision Summary. Headline decisions:
 v0.0.1 sprint structure (per 028 Doodlestein-strategic finding):
 two-wave BL ordering with BL B (sqlite-vec spike) requiring an
 explicit PASS/FAIL outcome record.
+
+---
+
+## 13. Per-milestone PRD convention (added 2026-05-08, F-004)
+
+Each milestone (v0.0.1, vNext, vN+1, …) ships with a milestone PRD
+written **before** milestone implementation begins. PRD location:
+`docs/milestones/v<N>.prd.md`. The PRD is the **engineering ship gate**
+for that milestone — when AC items in the PRD pass, the milestone
+ships.
+
+**Hard cap**: ≤500 words per PRD section (Goal / AC / Out-of-scope /
+Ship gate / Roadmap delta). Single-section overflow → split into
+follow-up BL, do not inline-expand.
+
+PRD scope (each milestone):
+- **Goal**: 1-paragraph statement of what this milestone delivers,
+  traceable to a vision pillar in this blueprint or a multi-version
+  goal in `docs/roadmap.md`.
+- **Acceptance criteria** (AC): 3-7 verifiable conditions. Bash
+  spot-checks where mechanical; operator sign-off where judgmental.
+- **Out-of-scope**: explicit list of what this milestone is NOT
+  delivering. Prevents scope creep mid-implementation.
+- **Ship gate**: when all AC pass + out-of-scope list holds + operator
+  sign-off → milestone ships, version tag bumped, post-ship retrospect
+  filed.
+- **Roadmap delta**: what changed in `docs/roadmap.md` due to this
+  milestone, or "no change". Binds roadmap update cadence to milestone
+  PRD writing — without this section, roadmap can stay perpetually
+  advisory (per F-004 codex review fixup).
+
+PRD writing trigger: at the start of milestone implementation. The
+v0.0.1 PRD (`docs/milestones/v0.0.1.prd.md`) is the **first PRD
+instance** under this convention; it is filed by F-004's follow-up
+work, not in F-004 itself.
+
+Rationale (from F-004 council 2026-05-08): the v0.x stack shipped
+without per-milestone PRDs, and operator's "完全没头绪" sensation
+traced to missing top-down anchors. PRDs are the milestone-level
+anchor. Roadmap is multi-version trajectory; per-milestone PRD is the
+specific milestone's work definition. Different layers, different
+update cadence (roadmap ~quarterly; PRD per milestone start; PRD
+becomes immutable after milestone ships, serves as audit trail).
+
+---
+
+## 14. Doc stack roles (added 2026-05-08, F-004)
+
+The mengdie project doc stack consists of 4 layers, each with a
+specific role and update cadence:
+
+- **`docs/blueprint.md`** (this document) — long-lived technical
+  identity. What mengdie is, conceptual model, scalability ladder,
+  function priority. Update cadence: when system identity itself
+  shifts (rare; ~yearly).
+- **`docs/roadmap.md`** — multi-version implementation trajectory.
+  v0.0.1 / vNext / v1.0 milestones with leverage list, self-built
+  parts, API surface. Update cadence: ~quarterly OR per dogfood-driven
+  trigger.
+- **`docs/milestones/v<N>.prd.md`** (per active milestone) — that
+  milestone's engineering ship gate. AC, out-of-scope, ship gate.
+  Update cadence: written at milestone start; immutable after ship
+  (becomes audit trail).
+- **`docs/specs/*.md`** (per user surface) — API contract for each
+  user-facing surface (MCP tool / CLI subcommand). Signature, params,
+  returns, errors, examples, notes. Update cadence: when source code
+  changes signature (`as_of_commit` field bumped + `stability`
+  managed).
+
+Cross-references:
+- BLs (`docs/backlog/`) serve specs serve PRDs serve roadmap serve
+  blueprint.
+- Acceptance test for a new BL: "this BL serves vision pillar X via
+  milestone Y via spec criteria Z." If not answerable → deprioritize.
+
+Single-source-of-truth (SoT):
+- Code wins for current signature; specs reflect code (not vice versa).
+- PRDs win for milestone ship criteria; roadmap reflects PRD outcomes
+  retrospectively (binding mechanism: per-PRD "Roadmap delta" section,
+  see §13).
+- Blueprint vision elements win for cross-cutting decisions; if
+  roadmap or PRD conflicts, blueprint is canonical until explicitly
+  superseded.
+
+Update direction (cycle prevention rule):
+- API changes flow bottom-up: specs → roadmap → blueprint
+  (e.g., adding new MCP tool → write spec → update roadmap api_surface
+  → reference in blueprint §5 if cross-cutting).
+- Strategy changes flow top-down: blueprint → roadmap → specs
+  (e.g., new vision pillar → blueprint update → roadmap milestone
+  re-plan → spec stability transitions).
+- Following the wrong direction (e.g., roadmap rewrite forcing
+  blueprint update) is a signal the change is mis-classified.
+
+Supersession protocol — two patterns supported:
+
+1. **`status: superseded`** — used when a document is replaced by a
+   successor that fulfills the same role. Required frontmatter:
+   `status: superseded` + `superseded_by: <path>` + `superseded_on: <YYYY-MM-DD>`
+   + `superseded_reason: "<rationale>"`. Body retained (audit trail).
+   Top blockquote with successor link is **strongly recommended** for
+   reader clarity. Example: `docs/discussions/001-product-vision/`,
+   `docs/backlog/005-phase2-roadmap.md` (both superseded by
+   `docs/roadmap.md` on 2026-05-08).
+
+2. **`status: archived`** — used when a document is **out-of-scope**
+   under current direction (no direct successor, but body preserved
+   as historical context). Required frontmatter: `status: archived` +
+   `archived_on: <YYYY-MM-DD>` + `archived_reason: "<rationale>"` +
+   optional `superseded_by:` if a successor exists conceptually. Body
+   retained (audit trail). Top blockquote recommended. Example:
+   `docs/prd-ae-integration.md` (archived 2026-05-08, conceptual
+   successor = blueprint §13 per-milestone PRD convention).
+
+Pattern selection rule: if successor exists and fulfills same role →
+`superseded`. If document is out-of-scope without direct replacement →
+`archived`. Both retain body; both require dated reason. Future
+formalization (template + checklist) tracked as follow-up BL post-F-004.
