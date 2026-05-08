@@ -1,10 +1,13 @@
 ---
 id: "005"
 title: "Phase 2 Roadmap — LLM Intelligence Layer"
-status: open
+status: superseded
+superseded_by: docs/roadmap.md
+superseded_on: 2026-05-08
+superseded_reason: "Phase 2.1 (BL-005..008) shipped in v0.x. Remaining Phase 2.2-2.5 BLs (BL-009..014) disposed individually under docs/roadmap.md: BL-009 absorbed into vNext (conditional), BL-013 partly absorbed into v1.0 as memory_contradictions, BL-010/011/012/014 deleted as over-engineering for 1-person scale."
 created: 2026-04-16
-updated: 2026-04-19
-progress: "Phase 2.1 complete (4/10 items): BL-005/006/007 shipped as plans 007/009/010; BL-008 (exponential decay) shipped as plan 013 on 2026-04-20. Phase 2.2-2.5 (BL-009 through BL-014) NOT started."
+updated: 2026-05-08
+progress: "Superseded by docs/roadmap.md. See that file for per-BL disposition table."
 source: "Discussion 016 (Dreaming Evolution)"
 ---
 

@@ -3,9 +3,26 @@ id: "001"
 title: "AI-native Second Brain — Product Vision"
 type: product-vision
 created: 2026-04-05
-status: draft
+status: superseded
+superseded_by: docs/roadmap.md
+superseded_on: 2026-05-08
 origin: "Claude Code source analysis (007) + OpenClaw memory system comparison + AE pipeline output analysis"
-tags: [product, second-brain, memory, knowledge-management]
+tags: [product, second-brain, memory, knowledge-management, superseded]
+---
+
+> **⚠️ SUPERSEDED 2026-05-08** — This document was the founding product vision
+> for mengdie (April 2026). The project subsequently pivoted to a 1-person
+> personal AE-brain scope (v0.0.1 rebuild, 2026-04-27). The 4-layer
+> architecture, team features ("3-15 person teams"), GitHub webhooks, Slack
+> integration etc. described below are **out of scope** under the current
+> direction.
+>
+> **Current source of truth**: [`docs/roadmap.md`](../../roadmap.md)
+> (engineering-blueprint multi-version implementation roadmap, F-004 deliverable).
+>
+> Body preserved below as historical context. Do not implement against this
+> document.
+
 ---
 
 # AI-native Second Brain
