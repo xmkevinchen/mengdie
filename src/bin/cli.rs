@@ -694,7 +694,11 @@ pub(crate) fn format_search_result(
 /// Three-state health label inferred from the `AuditStats` snapshot:
 /// `not_yet_triggered` (cold DB), `degraded` (audit hook ran but had write
 /// failures), `ok` (audit hook is producing rows and writes are clean).
-#[derive(serde::Serialize)]
+///
+/// `Copy + Clone` so callers can re-match on the enum instead of stringly-
+/// matching on a derived `&str` label — the compiler then enforces
+/// exhaustiveness if a fourth variant is ever added (F-005 challenger #5).
+#[derive(Copy, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AuditStatus {
     Ok,
@@ -773,16 +777,22 @@ fn cmd_audit_stats(db: &Db, format: OutputFormat) -> anyhow::Result<()> {
             println!("  audit_write_failures: {}", s.audit_write_failures);
             println!("  status: {status_label}");
             // Non-`Ok` hint goes to stdout (it is user-visible content of
-            // the table view, not a diagnostic warning).
-            match status_label {
-                "not_yet_triggered" => println!(
+            // the table view, not a diagnostic warning). Match on the enum
+            // (not on the derived `status_label` &str) so a future fourth
+            // variant produces a compile-time exhaustiveness error rather
+            // than silently falling through (F-005 challenger #5).
+            match status {
+                AuditStatus::Ok => {}
+                AuditStatus::NotYetTriggered => println!(
                     "  hint: No audit records yet — either no searches happened, or the hook is broken; check stderr logs."
                 ),
-                "degraded" => println!(
-                    "  hint: Audit pipeline ran but had {} write failures since schema-v6 migration; check stderr.",
+                AuditStatus::Degraded => println!(
+                    "  hint: Audit pipeline ran but had {} write failures since schema-v6 migration; check stderr. \
+                     Note: the counter is monotonically cumulative since schema-v6 migration — \
+                     after fixing the underlying issue, status remains `degraded` until the \
+                     `audit_write_failures` row in the `metrics` table is manually cleared (F-005 challenger #6 / BL-033).",
                     s.audit_write_failures
                 ),
-                _ => {}
             }
         }
     }

@@ -76,17 +76,20 @@ pub struct AuditStats {
 }
 
 /// The verbatim F-002 supersession SQL — promoted from a `#[cfg(test)] const`
-/// to a crate-internal item so production code (the `Db::audit_stats()`
-/// sister query, F-005) and the existing supersession-SQL tests share one
-/// source of truth. The query returns one row per
-/// `(window_start, supersession_count)` pair where ≥5 superseded facts were
-/// returned by audited searches in the last 30 days.
+/// to a crate-internal item, currently dead in production but reachable by
+/// AC4's `test_audit_stats_where_clause_shared` invariant. Returns one row
+/// per `(window_start, supersession_count)` pair where ≥5 superseded facts
+/// were returned by audited searches in the last 30 days.
 ///
-/// `#[allow(dead_code)]`: production code currently consumes only the bare-
-/// COUNT sister `AUDIT_STATS_SUPERSESSION_COUNT_SQL`; the bucketed form
-/// remains crate-visible so the F-005 `audit_stats()` plan-AC4 invariant
-/// test (`test_audit_stats_where_clause_shared`) can grep both consts for
-/// the shared WHERE-clause fragment without duplicating the SQL.
+/// **Honest rationale** (F-005 challenger #2): the `pub(crate)` promotion
+/// originally intended a future production caller (an A-MEM bucketed-trigger
+/// path) that did not materialize in F-005. Production audit-stats consumes
+/// only the bare-COUNT sister `AUDIT_STATS_SUPERSESSION_COUNT_SQL`. The
+/// promotion + `#[allow(dead_code)]` is therefore tracking-debt: a real
+/// caller is owed by the next feature that needs the bucketed form (BL-031
+/// captures the cross-layer test gap that would benefit from it). Until
+/// then, `#[allow(dead_code)]` silences a legitimate compiler signal so
+/// the const can stay reachable by the AC4 grep-invariant test.
 #[allow(dead_code)]
 pub(crate) const F002_SUPERSESSION_SQL: &str = "
     SELECT
