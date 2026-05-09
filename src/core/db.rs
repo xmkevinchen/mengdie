@@ -1943,4 +1943,139 @@ mod tests {
             "out-of-window seeds must not satisfy HAVING supersession_count >= 5, got {rows:?}"
         );
     }
+
+    // ---- F-005 audit-stats accessor tests ---------------------------------
+
+    /// AC1 — fresh, freshly-migrated DB returns all-zeros snapshot with
+    /// `oldest_row` / `newest_row` `None` and `audit_write_failures` 0.
+    #[test]
+    fn test_audit_stats_empty_db() {
+        let db = test_db();
+        let s = db.audit_stats().unwrap();
+        assert_eq!(s.audit_count, 0);
+        assert_eq!(s.link_count, 0);
+        assert!(s.oldest_row.is_none());
+        assert!(s.newest_row.is_none());
+        assert_eq!(s.supersession_count_30d, 0);
+        assert_eq!(s.audit_write_failures, 0);
+    }
+
+    /// AC1 — seeded DB with 3 audit rows + 5 link rows + audit_write_failures=2
+    /// returns the expected six-field snapshot. Timestamps use a fixed RFC3339
+    /// trio so MIN/MAX assertions are deterministic (independent of `Utc::now`
+    /// at fixture construction time).
+    #[test]
+    fn test_audit_stats_populated() {
+        let db = test_db();
+        let t0 = "2026-05-01T00:00:00+00:00".to_string();
+        let t1 = "2026-05-04T12:00:00+00:00".to_string();
+        let t2 = "2026-05-08T08:00:00+00:00".to_string();
+        // Seed 3 audit rows + 5 link rows. We attach all 5 link rows to the
+        // first audit row (the audit/link cardinality is independent in this
+        // test, so a 3+5 split is the minimum that exercises the two
+        // independent counts).
+        let aid_first = {
+            let conn = db.lock_conn().unwrap();
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at) \
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![t0],
+            )
+            .unwrap();
+            let aid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at) \
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![t1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at) \
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![t2],
+            )
+            .unwrap();
+            // 5 fact rows (just memory_entries — no valid_until needed for
+            // the count-only assertions in this test) + 5 link rows.
+            for i in 0..5 {
+                let fact_id = format!("populated-fact-{i}");
+                let hash = format!("hash-{fact_id}-{}", uuid::Uuid::new_v4());
+                conn.execute(
+                    "INSERT INTO memory_entries \
+                        (id, project_id, source_file, source_type, knowledge_type, \
+                         title, content, entities, valid_from, created_at, content_hash) \
+                     VALUES (?1, 'proj', 'f.md', 'conclusion', 'decisional', \
+                             'title', 'content', '', ?2, ?2, ?3)",
+                    rusqlite::params![fact_id, t0, hash],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO audit_returned_facts (audit_id, fact_id, rank) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![aid, fact_id, i as i64],
+                )
+                .unwrap();
+            }
+            aid
+        };
+        let _ = aid_first; // suppress unused warning if test rewritten
+
+        // Bump audit_write_failures to 2.
+        db.increment_metric(METRIC_AUDIT_WRITE_FAILURES).unwrap();
+        db.increment_metric(METRIC_AUDIT_WRITE_FAILURES).unwrap();
+
+        let s = db.audit_stats().unwrap();
+        assert_eq!(s.audit_count, 3);
+        assert_eq!(s.link_count, 5);
+        assert_eq!(s.oldest_row.as_deref(), Some(t0.as_str()));
+        assert_eq!(s.newest_row.as_deref(), Some(t2.as_str()));
+        assert_eq!(s.audit_write_failures, 2);
+        // Locks in the AC1 fixture's 6th-field expectation: fact rows seeded
+        // without `valid_until` produce zero supersession events. AC4's
+        // `test_audit_stats_supersession_count` exercises the non-zero path.
+        assert_eq!(s.supersession_count_30d, 0);
+    }
+
+    /// AC1 + AC4 — seeding 5 supersession events on a single day produces
+    /// `supersession_count_30d == 5` from the new sister query (no
+    /// GROUP BY / HAVING — the bare COUNT*. Mirrors the seed shape of
+    /// `test_supersession_sql_returns_expected_rows` so the two queries can
+    /// be cross-checked against the same fixture if the test is ever
+    /// re-run side-by-side.
+    #[test]
+    fn test_audit_stats_supersession_count() {
+        let db = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let valid_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        {
+            let conn = db.lock_conn().unwrap();
+            for i in 0..5 {
+                let fact_id = format!("ssn-fact-{i}");
+                seed_supersession_pair(&conn, &fact_id, &now, &valid_until);
+            }
+        }
+        let s = db.audit_stats().unwrap();
+        assert_eq!(
+            s.supersession_count_30d, 5,
+            "5 in-window superseded facts should yield supersession_count_30d == 5"
+        );
+    }
+
+    /// AC4 — both supersession SQL consts must contain the exact shared
+    /// WHERE-clause fragment, so any future drift between them is caught
+    /// at compile-time test-pass-time. The literal text is the one piece
+    /// the F-005 plan AC4 calls out by name.
+    #[test]
+    fn test_audit_stats_where_clause_shared() {
+        const SHARED_WHERE_FRAGMENT: &str =
+            "JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7";
+        assert!(
+            super::F002_SUPERSESSION_SQL.contains(SHARED_WHERE_FRAGMENT),
+            "F002_SUPERSESSION_SQL must contain the shared WHERE fragment"
+        );
+        assert!(
+            super::AUDIT_STATS_SUPERSESSION_COUNT_SQL.contains(SHARED_WHERE_FRAGMENT),
+            "AUDIT_STATS_SUPERSESSION_COUNT_SQL must contain the shared WHERE fragment"
+        );
+    }
 }
