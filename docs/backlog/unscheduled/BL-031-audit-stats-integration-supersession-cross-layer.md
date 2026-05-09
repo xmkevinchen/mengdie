@@ -47,16 +47,36 @@ Until either trigger fires, the unit-level `test_audit_stats_supersession_count`
 
 ## Hint at fix shape
 
+Prefer **option (4)** above — drop the `vec_memories_*` triggers in the
+temp DB before seeding. Per the "Four roads forward" enumeration
+above, option (4) is the cheap path: 5 lines in the fixture helper, no
+production-code changes, no fastembed dependency. The "Why still
+deferred" section's only reservation against option (4) is that it
+requires a 10-line schema-compatibility smoke test before relying on
+it — and that smoke test is appropriate at trigger time, not now.
+
 ```rust
 // In tests/audit_stats.rs (when triggered):
 //
-// Pick option (2) above — add a single `pub fn` to the mengdie lib that
-// lets integration tests seed a supersession event without going through
-// fastembed.  Or add a small `mengdie seed-supersession --count 5`
-// subcommand if option (3) is preferred for shared use across other
-// future integration tests.
+// Pre-seed: drop the schema-v7 vec_memories_* triggers so memory_entries
+// INSERTs don't reach the unregistered vec0 module on a raw connection.
+let conn = open_seed_conn(&db_path);
+conn.execute_batch(
+    "DROP TRIGGER IF EXISTS vec_memories_insert; \
+     DROP TRIGGER IF EXISTS vec_memories_update; \
+     DROP TRIGGER IF EXISTS vec_memories_delete;",
+)
+.unwrap();
+
+// Seed real memory_entries rows with valid_until populated, plus
+// audit + link rows linking them. (Use seed_supersession_pair-style
+// helper, but at integration-test scope, not unit-test scope.)
 //
 // Then assert:
-//   let v = run_json(&db_path);
-//   assert_eq!(v["supersession_count_30d"], 5);
+let v = run_json(&db_path);
+assert_eq!(v["supersession_count_30d"], 5);
 ```
+
+Options (1)-(3) from the "Four roads forward" enumeration above remain
+documented as alternatives if option (4)'s smoke test fails or if a
+broader test-seeding refactor is being considered at the same time.

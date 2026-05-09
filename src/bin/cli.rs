@@ -787,10 +787,9 @@ fn cmd_audit_stats(db: &Db, format: OutputFormat) -> anyhow::Result<()> {
                     "  hint: No audit records yet — either no searches happened, or the hook is broken; check stderr logs."
                 ),
                 AuditStatus::Degraded => println!(
-                    "  hint: Audit pipeline ran but had {} write failures since schema-v6 migration; check stderr. \
-                     Note: the counter is cumulative — after fixing the underlying issue, \
-                     status remains `degraded` until the `audit_write_failures` row in the \
-                     `metrics` table is manually cleared.",
+                    "  hint: Audit pipeline ran but had {} write failures since schema-v6 migration; \
+                     check stderr. The counter is cumulative — `status: degraded` will persist \
+                     across runs until the failure counter is reset.",
                     s.audit_write_failures
                 ),
             }
