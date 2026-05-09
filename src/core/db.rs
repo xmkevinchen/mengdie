@@ -53,6 +53,71 @@ pub struct DbStats {
     pub recalled: i64,
 }
 
+/// Audit-pipeline health snapshot returned by `Db::audit_stats()`.
+///
+/// The six fields are consumed by the `mengdie audit-stats` CLI subcommand
+/// (F-005) so an operator can detect silent breakage of the F-002 audit hook
+/// without waiting for the A-MEM `≥5/30d` supersession trigger.
+pub struct AuditStats {
+    /// `COUNT(*)` of rows in `memory_search_audit`.
+    pub audit_count: i64,
+    /// `COUNT(*)` of rows in `audit_returned_facts`.
+    pub link_count: i64,
+    /// `MIN(searched_at)` of `memory_search_audit`. `None` on an empty table.
+    pub oldest_row: Option<String>,
+    /// `MAX(searched_at)` of `memory_search_audit`. `None` on an empty table.
+    pub newest_row: Option<String>,
+    /// Count of supersession events in the last 30 days; the bare-`COUNT(*)`
+    /// sister of `F002_SUPERSESSION_SQL` (no GROUP BY / HAVING).
+    pub supersession_count_30d: i64,
+    /// Persistent counter from the `metrics` table
+    /// (`METRIC_AUDIT_WRITE_FAILURES`); not session-local.
+    pub audit_write_failures: i64,
+}
+
+/// The verbatim F-002 supersession SQL — promoted from a `#[cfg(test)] const`
+/// to a crate-internal item so production code (the `Db::audit_stats()`
+/// sister query, F-005) and the existing supersession-SQL tests share one
+/// source of truth. The query returns one row per
+/// `(window_start, supersession_count)` pair where ≥5 superseded facts were
+/// returned by audited searches in the last 30 days.
+///
+/// `#[allow(dead_code)]`: production code currently consumes only the bare-
+/// COUNT sister `AUDIT_STATS_SUPERSESSION_COUNT_SQL`; the bucketed form
+/// remains crate-visible so the F-005 `audit_stats()` plan-AC4 invariant
+/// test (`test_audit_stats_where_clause_shared`) can grep both consts for
+/// the shared WHERE-clause fragment without duplicating the SQL.
+#[allow(dead_code)]
+pub(crate) const F002_SUPERSESSION_SQL: &str = "
+    SELECT
+        DATE(a.searched_at, 'start of day', '-30 days') AS window_start,
+        COUNT(*) AS supersession_count
+    FROM memory_search_audit a
+    JOIN audit_returned_facts arf ON arf.audit_id = a.id
+    JOIN memory_entries me ON me.id = arf.fact_id
+    WHERE me.valid_until IS NOT NULL
+      AND JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7
+      AND a.searched_at >= DATE('now', '-30 days')
+    GROUP BY window_start
+    HAVING supersession_count >= 5;
+";
+
+/// Sister query of `F002_SUPERSESSION_SQL` — same WHERE clause, but drops the
+/// GROUP BY / HAVING aggregation and returns a single `COUNT(*)` of all
+/// supersession events in the trailing 30-day window. Used by
+/// `Db::audit_stats()` to expose the raw event count (the F-002 query
+/// surfaces only buckets that already crossed the ≥5 trigger threshold,
+/// which is the wrong shape for a health-check display).
+pub(crate) const AUDIT_STATS_SUPERSESSION_COUNT_SQL: &str = "
+    SELECT COUNT(*)
+    FROM memory_search_audit a
+    JOIN audit_returned_facts arf ON arf.audit_id = a.id
+    JOIN memory_entries me ON me.id = arf.fact_id
+    WHERE me.valid_until IS NOT NULL
+      AND JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7
+      AND a.searched_at >= DATE('now', '-30 days');
+";
+
 /// Shared database handle, safe to clone across async tasks.
 #[derive(Clone)]
 pub struct Db {
@@ -689,6 +754,50 @@ impl Db {
             valid,
             longterm,
             recalled,
+        })
+    }
+
+    /// Audit-pipeline health snapshot — six numbers an operator can read at
+    /// a glance to detect silent breakage of the F-002 audit hook (F-005).
+    ///
+    /// All six queries run under a single `self.conn.lock()` guard so the
+    /// snapshot is a consistent view of the audit substrate; matches the
+    /// discipline of `Db::stats()`.
+    pub fn audit_stats(&self) -> anyhow::Result<AuditStats> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let audit_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_search_audit", [], |r| r.get(0))?;
+        let link_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM audit_returned_facts", [], |r| {
+                r.get(0)
+            })?;
+        let oldest_row: Option<String> = conn.query_row(
+            "SELECT MIN(searched_at) FROM memory_search_audit",
+            [],
+            |r| r.get(0),
+        )?;
+        let newest_row: Option<String> = conn.query_row(
+            "SELECT MAX(searched_at) FROM memory_search_audit",
+            [],
+            |r| r.get(0),
+        )?;
+        let supersession_count_30d: i64 =
+            conn.query_row(AUDIT_STATS_SUPERSESSION_COUNT_SQL, [], |r| r.get(0))?;
+        let audit_write_failures: i64 = conn
+            .query_row(
+                "SELECT value_int FROM metrics WHERE key = ?1",
+                params![super::metrics::METRIC_AUDIT_WRITE_FAILURES],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(AuditStats {
+            audit_count,
+            link_count,
+            oldest_row,
+            newest_row,
+            supersession_count_30d,
+            audit_write_failures,
         })
     }
 
@@ -1695,23 +1804,10 @@ mod tests {
         aid
     }
 
-    /// The verbatim F-002 supersession SQL from `analysis.md` / plan AC4.
-    /// Stored as a constant so all three supersession-SQL tests share one
-    /// source of truth (any drift would be a test-author bug, not a
-    /// schema-correctness bug).
-    const F002_SUPERSESSION_SQL: &str = "
-        SELECT
-            DATE(a.searched_at, 'start of day', '-30 days') AS window_start,
-            COUNT(*) AS supersession_count
-        FROM memory_search_audit a
-        JOIN audit_returned_facts arf ON arf.audit_id = a.id
-        JOIN memory_entries me ON me.id = arf.fact_id
-        WHERE me.valid_until IS NOT NULL
-          AND JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7
-          AND a.searched_at >= DATE('now', '-30 days')
-        GROUP BY window_start
-        HAVING supersession_count >= 5;
-    ";
+    // The supersession SQL itself is now a crate-internal const at module
+    // scope (`super::F002_SUPERSESSION_SQL`) so production audit-stats code
+    // and these tests share one source of truth. Reachable here via the
+    // `use super::*;` at the top of this `mod tests` block.
 
     /// AC4 — 5 supersession events on a single day produce ≥1 row with
     /// `supersession_count >= 5`. Strategic-post Finding 1 schema-correctness
