@@ -33,13 +33,16 @@ The `audit_write_failures` counter is monotonic and has no acknowledgment / clea
 
 The F-005 review-cycle (challenger #6) flagged this as a known operator UX antipattern: monotonic failure counters with no acknowledgment path will surface on the first real breakage + fix cycle.
 
-**As of commit 0536cb3**, the `degraded` table-format hint text warns that the counter is cumulative and explains the manual-clear path (delete the `audit_write_failures` row in the `metrics` table):
+**As of commit 6922579** (third-pass review fix), the `degraded` table-format hint text describes the state without prescribing the reset mechanism:
 
-> Note: the counter is cumulative — after fixing the underlying issue, status remains `degraded` until the `audit_write_failures` row in the `metrics` table is manually cleared.
+> The counter is cumulative — `status: degraded` will persist across runs until the failure counter is reset.
 
-That documentation is the v0.0.1 mitigation.  The CLI-affordance fix is what closes the loop.
+That documentation is the v0.0.1 mitigation.  When this BL ships and the actual reset CLI is decided (`--reset-failures` flag, sibling `metrics-reset` subcommand, etc), the hint should be updated at that time to point at the chosen command — but the hint deliberately does not pre-commit to a specific shape today.
 
-(Earlier commit `4b9ac46` also embedded the literal tokens `F-005 challenger #6 / BL-033` in this hint; second-pass review flagged it as an internal-tracking-ID leak into operator-facing CLI output, and `0536cb3` removed those tokens while preserving the actionable guidance.)
+**Hint text history**:
+- commit `4b9ac46` (first-pass review fixup): added the warning + embedded the internal tracking IDs `F-005 challenger #6 / BL-033`.
+- commit `0536cb3` (second-pass review fixup): stripped the internal tracking IDs but preserved the prescriptive "manually clear the metrics-table row" wording.
+- commit `6922579` (third-pass review fixup): dropped the prescriptive wording entirely after Codex 2nd-pass / Gemma 3rd-pass / challenger 3rd-pass triple-flagged that it pre-commits to a manual-fix shape that this BL's two design alternatives (`--reset-failures` flag, sibling `metrics-reset` subcommand) both replace.
 
 ## Why deferred
 
