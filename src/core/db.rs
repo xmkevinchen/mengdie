@@ -1,12 +1,49 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{ffi::sqlite3_auto_extension, params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::schema::{compute_content_hash, run_migrations};
+
+/// Register sqlite-vec extension for all subsequent SQLite connections in
+/// this process. `sqlite3_auto_extension` is process-global; calling it
+/// twice is harmless but the OnceLock guards against unnecessary duplicate
+/// registration.
+///
+/// **Critical ordering**: `sqlite3_auto_extension` only injects vec0 into
+/// connections opened AFTER registration. Conns opened before are missing
+/// vec0 — they would error on `CREATE VIRTUAL TABLE … USING vec0(…)`.
+/// Always call this function BEFORE `Connection::open*()` for any conn
+/// that will run schema migrations or vec0 queries.
+///
+/// Public to crate so test code in `schema.rs` and elsewhere that opens
+/// raw `rusqlite::Connection` (bypassing `Db::open*`) can register the
+/// extension before opening. BL-026 Step 2 — adopted post PASS_STATIC
+/// spike outcome (`docs/spikes/sqlite-vec-distribution.md`, 2026-05-08).
+pub(crate) fn ensure_sqlite_vec_registered() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        // SAFETY: sqlite3_vec_init has the canonical sqlite3_extension entry
+        // shape; this transmute matches the pattern in sqlite-vec's own
+        // doc-test (`sqlite-vec-0.1.9/src/lib.rs`). The full target signature
+        // is the standard sqlite3 extension entry-point per sqlite3ext.h.
+        unsafe {
+            sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(
+                sqlite_vec::sqlite3_vec_init as *const ()
+            )));
+        }
+    });
+}
 
 /// Basic database statistics.
 pub struct DbStats {
@@ -92,6 +129,7 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        ensure_sqlite_vec_registered();
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
         run_migrations(&conn)
@@ -103,6 +141,7 @@ impl Db {
 
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> anyhow::Result<Self> {
+        ensure_sqlite_vec_registered();
         let conn = Connection::open_in_memory()?;
         run_migrations(&conn)?;
         Ok(Self {

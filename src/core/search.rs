@@ -461,6 +461,17 @@ mod tests {
         Db::open_in_memory().unwrap()
     }
 
+    /// Zero-pad a low-dim "key" embedding to the 384-d vec0 contract
+    /// (BL-026). Lets test cases stay readable while the post-BL-026
+    /// `vec_memories` trigger gates on `embedding_dim = 384`.
+    fn make_384d(base: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0_f32; 384];
+        for (i, &x) in base.iter().enumerate().take(384) {
+            v[i] = x;
+        }
+        v
+    }
+
     fn insert_test_memory(
         db: &Db,
         project: &str,
@@ -469,6 +480,10 @@ mod tests {
         entities: &str,
         embedding: &[f32],
     ) -> String {
+        // Pad internally to 384-d so the post-BL-026 `vec_memories` trigger
+        // fires (gates on `embedding_dim = 384`). Test call-sites remain
+        // readable with 3-d "key" vectors.
+        let padded = make_384d(embedding);
         let id = db
             .insert_memory(NewMemory {
                 project_id: project.to_string(),
@@ -478,8 +493,8 @@ mod tests {
                 title: title.to_string(),
                 content: content.to_string(),
                 entities: entities.to_string(),
-                embedding: Some(embedding_to_blob(embedding)),
-                embedding_dim: Some(embedding.len() as i64),
+                embedding: Some(embedding_to_blob(&padded)),
+                embedding_dim: Some(padded.len() as i64),
                 is_longterm: false,
             })
             .unwrap();
@@ -714,7 +729,7 @@ mod tests {
         );
 
         let results = db
-            .memory_search("JWT", &[0.9, 0.1, 0.0], Some("proj"), 10)
+            .memory_search("JWT", &make_384d(&[0.9, 0.1, 0.0]), Some("proj"), 10)
             .unwrap();
         assert!(!results.is_empty());
 
@@ -745,7 +760,9 @@ mod tests {
             &[0.9, 0.1, 0.0],
         );
 
-        let results = db.memory_search("JWT", &[1.0, 0.0, 0.0], None, 10).unwrap();
+        let results = db
+            .memory_search("JWT", &make_384d(&[1.0, 0.0, 0.0]), None, 10)
+            .unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -774,7 +791,12 @@ mod tests {
         // FTS5 should match the JWT Auth entry (contains "JWT", "auth", "tokens")
         // Both FTS and vector match → dual-ranker → score should be > 0.5
         let results = db
-            .memory_search("JWT auth tokens", &[0.9, 0.1, 0.0], Some("proj"), 10)
+            .memory_search(
+                "JWT auth tokens",
+                &make_384d(&[0.9, 0.1, 0.0]),
+                Some("proj"),
+                10,
+            )
             .unwrap();
         assert!(!results.is_empty());
         // Dual-ranker hits produce scores > 0.5 (confirming FTS5 is now contributing)
