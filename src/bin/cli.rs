@@ -10,6 +10,17 @@ use mengdie::core::ingest::ingest_file;
 use mengdie::core::parser::is_ingestable;
 use mengdie::core::project::infer_project_id;
 
+/// Output format for subcommands that support both human and machine
+/// representations (`mengdie audit-stats`). Using `clap::ValueEnum` rather
+/// than a free-form `String` lets clap reject invalid values up-front (exit
+/// code 2) instead of silently falling back to a default.
+#[derive(Clone, Copy, Debug, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OutputFormat {
+    Table,
+    Json,
+}
+
 #[derive(Parser)]
 #[command(name = "mengdie", about = "Mengdie — AI-native knowledge memory CLI")]
 struct Cli {
@@ -139,6 +150,13 @@ enum Commands {
     /// Print observability metrics
     Stats,
 
+    /// Print audit-pipeline health (counts, freshness, write-failure counter)
+    AuditStats {
+        /// Output format: table (default) or json
+        #[arg(value_enum, long, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
+
     /// Read-only audit of a synthesis row + its source memories.
     /// Scaffolding for future Options 2/3 ship-gate data collection
     /// (plan 017, discussion 022) — operator eyeballs fidelity.
@@ -205,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
             min_score,
         } => cmd_search(&db, &query, global, limit, min_score),
         Commands::Stats => cmd_stats(&db),
+        Commands::AuditStats { format } => cmd_audit_stats(&db, format),
         Commands::SynthesisAudit { id } => cmd_synthesis_audit(&db, &id),
     }
 }
@@ -670,6 +689,104 @@ pub(crate) fn format_search_result(
         r.entry.recall_count,
         snippet.replace('\n', " "),
     )
+}
+
+/// Three-state health label inferred from the `AuditStats` snapshot:
+/// `not_yet_triggered` (cold DB), `degraded` (audit hook ran but had write
+/// failures), `ok` (audit hook is producing rows and writes are clean).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AuditStatus {
+    Ok,
+    NotYetTriggered,
+    Degraded,
+}
+
+/// Wire shape for `mengdie audit-stats --format json`. Identical to
+/// `mengdie::core::db::AuditStats` plus the inferred `status` field. Pinned
+/// in Rust (rather than ad-hoc `serde_json::json!`) so the script-facing
+/// CLI contract is enforced by the type system.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AuditStatsOutput {
+    audit_count: i64,
+    link_count: i64,
+    oldest_row: Option<String>,
+    newest_row: Option<String>,
+    supersession_count_30d: i64,
+    audit_write_failures: i64,
+    status: AuditStatus,
+}
+
+fn cmd_audit_stats(db: &Db, format: OutputFormat) -> anyhow::Result<()> {
+    let s = db.audit_stats()?;
+    // Status precedence: failures-win-over-zero-rows. AC3 reserves
+    // `not_yet_triggered` for the all-zero corner ("Fresh DB, 0 audit rows,
+    // 0 failures") — a non-zero failure counter, even with zero audit rows,
+    // means the hook *did* fire and writes silently dropped, which is
+    // exactly the actionable signal `degraded` is for. Reverse ordering
+    // would hide that case from JSON consumers (the table hint exists, but
+    // script consumers parsing only the `status` field would see
+    // `not_yet_triggered` — benign — and never alert).
+    let status = if s.audit_write_failures > 0 {
+        AuditStatus::Degraded
+    } else if s.audit_count == 0 {
+        AuditStatus::NotYetTriggered
+    } else {
+        AuditStatus::Ok
+    };
+
+    match format {
+        OutputFormat::Json => {
+            let out = AuditStatsOutput {
+                audit_count: s.audit_count,
+                link_count: s.link_count,
+                oldest_row: s.oldest_row,
+                newest_row: s.newest_row,
+                supersession_count_30d: s.supersession_count_30d,
+                audit_write_failures: s.audit_write_failures,
+                status,
+            };
+            println!("{}", serde_json::to_string(&out)?);
+        }
+        OutputFormat::Table => {
+            // Status label as the JSON output would render it; keeps the two
+            // formats synchronized and guarantees the table value is one of
+            // {ok, not_yet_triggered, degraded} per AC2.
+            let status_label = match status {
+                AuditStatus::Ok => "ok",
+                AuditStatus::NotYetTriggered => "not_yet_triggered",
+                AuditStatus::Degraded => "degraded",
+            };
+            println!("Mengdie Audit Stats:");
+            println!("  audit_count: {}", s.audit_count);
+            println!("  link_count: {}", s.link_count);
+            println!(
+                "  oldest_row: {}",
+                s.oldest_row.as_deref().unwrap_or("(none)")
+            );
+            println!(
+                "  newest_row: {}",
+                s.newest_row.as_deref().unwrap_or("(none)")
+            );
+            println!("  supersession_count_30d: {}", s.supersession_count_30d);
+            println!("  audit_write_failures: {}", s.audit_write_failures);
+            println!("  status: {status_label}");
+            // Non-`Ok` hint goes to stdout (it is user-visible content of
+            // the table view, not a diagnostic warning).
+            match status_label {
+                "not_yet_triggered" => println!(
+                    "  hint: No audit records yet — either no searches happened, or the hook is broken; check stderr logs."
+                ),
+                "degraded" => println!(
+                    "  hint: Audit pipeline ran but had {} write failures since schema-v6 migration; check stderr.",
+                    s.audit_write_failures
+                ),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_stats(db: &Db) -> anyhow::Result<()> {
