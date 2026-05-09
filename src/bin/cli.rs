@@ -788,9 +788,9 @@ fn cmd_audit_stats(db: &Db, format: OutputFormat) -> anyhow::Result<()> {
                 ),
                 AuditStatus::Degraded => println!(
                     "  hint: Audit pipeline ran but had {} write failures since schema-v6 migration; check stderr. \
-                     Note: the counter is monotonically cumulative since schema-v6 migration — \
-                     after fixing the underlying issue, status remains `degraded` until the \
-                     `audit_write_failures` row in the `metrics` table is manually cleared (F-005 challenger #6 / BL-033).",
+                     Note: the counter is cumulative — after fixing the underlying issue, \
+                     status remains `degraded` until the `audit_write_failures` row in the \
+                     `metrics` table is manually cleared.",
                     s.audit_write_failures
                 ),
             }
