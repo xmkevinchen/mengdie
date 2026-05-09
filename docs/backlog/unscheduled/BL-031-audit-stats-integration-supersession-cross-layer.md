@@ -27,13 +27,14 @@ Codex's accumulated-checkpoint review on commit `14590b4` framed this as a "thin
 
 Seeding a supersession event requires inserting into `memory_entries` with `valid_until` set.  Schema-v7's `vec_memories_insert` trigger references the `vec_memories` virtual table (`vec0` module from sqlite-vec).  A raw `rusqlite::Connection::open()` opened from inside `tests/audit_stats.rs` does NOT have the sqlite-vec extension registered (`db.rs::ensure_sqlite_vec_registered` is `pub(crate)`, not visible to integration tests), so the trigger fails to parse with `no such module: vec0`.
 
-Three roads forward, none cheap, none in scope for v0.0.1 Step 4:
+**Four roads forward** — added option (4) per F-005 review-cycle findings (Codex cross-family review + challenger #1, both flagged that the original BL deferral was over-stated):
 
 1. **Use the public `Db::open` API + a seed helper**: would link the integration test against `mengdie::core::*` and pull in fastembed (~90MB model download on first run) — defeats the test's no-fastembed-dependency design point.
 2. **Expose a `pub fn ensure_sqlite_vec_registered_for_tests()` on the lib crate**: clean but adds production-shaped surface for test convenience only.
 3. **Add a test-only `mengdie seed-audit-events --count N` subcommand**: heaviest, but lets all integration tests share a seed path.
+4. **(Cheap path — Codex / challenger)** **Drop the `vec_memories_*` triggers in the temp DB before seeding**: schema-v7's triggers exist purely to maintain the `vec_memories` shadow vec0 table; the supersession query JOINs `memory_entries.valid_until`, NOT `vec_memories`. A test-only `conn.execute_batch("DROP TRIGGER IF EXISTS vec_memories_insert; DROP TRIGGER IF EXISTS vec_memories_update; DROP TRIGGER IF EXISTS vec_memories_delete;")` before the INSERT would let the integration test seed real `memory_entries` rows with `valid_until` populated, without registering sqlite-vec or modifying production code. Estimated effort: 5 lines in the fixture helper, no production-code changes, no fastembed dependency.
 
-None of these is appropriate during F-005's narrow operator-debug-subcommand scope.
+**Why still deferred (after evaluating option 4)**: option 4 is a clean cheap-path solution but writing it correctly requires a 10-line smoke test to verify the `DROP TRIGGER` + `INSERT` + `JOIN` combination behaves as expected on the live schema. That smoke-test work is appropriate at the time the trigger condition fires (when an actual cross-layer regression would have been caught), not as defensive coverage for v0.0.1 Step 4. The original deferral verdict stands; the BL body now correctly enumerates option 4 so future readers don't re-litigate.
 
 ## Trigger condition
 
