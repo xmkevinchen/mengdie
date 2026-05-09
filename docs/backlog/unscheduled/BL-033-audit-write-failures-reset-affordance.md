@@ -33,11 +33,13 @@ The `audit_write_failures` counter is monotonic and has no acknowledgment / clea
 
 The F-005 review-cycle (challenger #6) flagged this as a known operator UX antipattern: monotonic failure counters with no acknowledgment path will surface on the first real breakage + fix cycle.
 
-**As of commit 4b9ac46**, the `degraded` table-format hint text now includes a forward reference to this BL:
+**As of commit 0536cb3**, the `degraded` table-format hint text warns that the counter is cumulative and explains the manual-clear path (delete the `audit_write_failures` row in the `metrics` table):
 
-> Note: the counter is monotonically cumulative since schema-v6 migration — after fixing the underlying issue, status remains `degraded` until the `audit_write_failures` row in the `metrics` table is manually cleared (F-005 challenger #6 / BL-033).
+> Note: the counter is cumulative — after fixing the underlying issue, status remains `degraded` until the `audit_write_failures` row in the `metrics` table is manually cleared.
 
-That documentation is the v0.0.1 mitigation. The CLI-affordance fix is what closes the loop.
+That documentation is the v0.0.1 mitigation.  The CLI-affordance fix is what closes the loop.
+
+(Earlier commit `4b9ac46` also embedded the literal tokens `F-005 challenger #6 / BL-033` in this hint; second-pass review flagged it as an internal-tracking-ID leak into operator-facing CLI output, and `0536cb3` removed those tokens while preserving the actionable guidance.)
 
 ## Why deferred
 
