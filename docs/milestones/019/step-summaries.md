@@ -53,7 +53,7 @@
 
 **Actual files**: src/core/synthesis.rs, src/core/dreaming.rs, docs/plans/019-synthesis-cli-json-schema.md
 
-## Step 4 — Validation: fixtures + e2e + production run (commit: <pending>)
+## Step 4 — Validation: fixtures + e2e + production run (commits: b30a8ac partial + 0b261db final)
 **Decisions**:
 - Flat schema with `skip:bool` discriminator replaces the originally-planned `oneOf` design. Anthropic API rejects `oneOf`/`allOf`/`anyOf` at top level of tool `input_schema` ("API Error: 400 ... does not support oneOf, allOf, or anyOf at the top level" — verified 2026-05-10 in `/tmp/claude-probe-stdout.json`). The structural "exactly one of two shapes" guarantee is lost; `parse_synthesis_response`'s runtime validation (`MissingField`, `EmptyTitle`, `EmptyContent`) covers the semantic layer.
 - `$schema` and `$comment` JSON-Schema-draft-07 metadata fields dropped from `resources/synthesis-output-schema.json`. Same Anthropic input_schema subset constraint; resolves the Step 1 deferred risk in one edit.
@@ -67,7 +67,7 @@
 - Reverting the entire plan (operator's call: keep structured-output, adopt flat schema, ship).
 
 **Cross-step deps**:
-- Production DB at `~/.mengdie/db.sqlite` now contains 5 new synthesis rows from this run (commit: <pending>). The pre-run backup at `~/.mengdie/db.sqlite.bak-pre-019-1778428737` is the rollback path if any row regrets.
+- Production DB at `~/.mengdie/db.sqlite` now contains 5 new synthesis rows from this run (commit: 0b261db). The pre-run backup at `~/.mengdie/db.sqlite.bak-pre-019-1778428737` is the rollback path if any row regrets.
 - BL-027 should be marked `closed/done` after this commit lands. Path B implementation succeeded; rate-limit relief BL not needed (operator's KB scale comfortably under daily budget).
 
 **Production-run measurements** (5 syntheses from 5 clusters):

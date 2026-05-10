@@ -283,7 +283,7 @@ tolerance.
 
 Expected files: `src/core/synthesis.rs`, `src/core/dreaming.rs`.
 
-### Step 4: Validation — fixtures + e2e + production run (AC4, AC5) ✅ pending
+### Step 4: Validation — fixtures + e2e + production run (AC4, AC5) ✅ b30a8ac+0b261db
 
 Merged from architect's CONSIDER. One production-DB pass captures both
 the rate-limit measurement and the e2e equivalence evidence.
