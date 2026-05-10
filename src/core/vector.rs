@@ -64,6 +64,20 @@ impl Db {
     /// hybrid): only `search::memory_search` (the existing hybrid orchestrator)
     /// calls this primitive. Direct external callers would bypass the RRF
     /// merge + boost-and-decay logic in `memory_search`.
+    ///
+    /// **`vec_memories` may contain rows for invalidated entries** (intentional;
+    /// F-006 design note C1). The schema-v7 sync triggers (`schema.rs:376-397`)
+    /// only fire on `INSERT` / `UPDATE OF embedding` / `DELETE` of
+    /// `memory_entries`. `Db::invalidate_memory` updates only `valid_until`
+    /// (not the embedding column), so a tombstoned row keeps its
+    /// `vec_memories` shadow row. This is by design — the per-project
+    /// `IN (SELECT id … WHERE valid_until IS NULL OR valid_until > now)`
+    /// subquery filters tombstoned rows out at query time, so result
+    /// correctness is preserved. The cost is a small `vec_memories`
+    /// row-count overhead vs `memory_entries.WHERE valid_until IS NULL`;
+    /// at personal-KB scale this overhead is negligible. See BL-013
+    /// (audit-orphan-link-row-cleanup) if the row-count divergence
+    /// becomes operationally relevant.
     pub(crate) fn search_vector(
         &self,
         query_embedding: &[f32],
