@@ -36,7 +36,7 @@
 
 **Actual files**: src/core/llm.rs, tests/llm_claude_cli.rs, docs/plans/019-synthesis-cli-json-schema.md
 
-## Step 3 — Delete brace-depth scanner; rewire to complete_structured (commit: 14ff5ef)
+## Step 3 — Delete brace-depth scanner; rewire to complete_structured (commit: 30a516c)
 **Decisions**:
 - `parse_synthesis_response` body collapses to a single `serde_json::from_str` against `RawEnvelope`. The schema-validated JSON object handed in by `extract_structured_output` is contractually clean — no preamble/postamble/fence tolerance needed.
 - 4 in-tree mock providers (`FixedProvider`/`PanicProvider`/`TimeoutOnFirst`/`ClusterSizeAwareProvider`) override `complete_structured` to delegate to their existing `complete` impl (returning the same canned payload, ignoring `_schema`). Trait default impl returns `UnknownProvider` — would have made all 7 dreaming tests fail without the override.

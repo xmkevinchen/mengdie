@@ -237,7 +237,7 @@ dep-analyst accepted).
 
 Expected files: `src/core/llm.rs`, `tests/llm_claude_cli.rs`.
 
-### Step 3: Replace synthesis parse path; delete brace-depth scanner (AC3) ✅ 14ff5ef
+### Step 3: Replace synthesis parse path; delete brace-depth scanner (AC3) ✅ 30a516c
 
 With Step 2's `complete_structured` returning a pre-validated JSON object
 string, `parse_synthesis_response` no longer needs preamble / postamble
@@ -288,7 +288,7 @@ Expected files: `src/core/synthesis.rs`, `src/core/dreaming.rs`.
 Merged from architect's CONSIDER. One production-DB pass captures both
 the rate-limit measurement and the e2e equivalence evidence.
 
-- [ ] **Backup the production DB** before any live LLM call (Doodlestein-
+- [x] **Backup the production DB** before any live LLM call (Doodlestein-
       adversarial #4):
       ```
       cp ~/.mengdie/db.sqlite ~/.mengdie/db.sqlite.bak-pre-019-$(date +%s)
@@ -300,20 +300,20 @@ the rate-limit measurement and the e2e equivalence evidence.
       regrets, restore from the timestamped backup. State the backup
       path in `docs/spikes/019-rate-limit-measurement.md` so it's
       recoverable.
-- [ ] **Create** `tests/fixtures/` directory (does not exist today).
+- [x] **Create** `tests/fixtures/` directory (does not exist today).
       Add `tests/fixtures/.gitkeep`.
-- [ ] **Hand-craft** minimal wrapper fixtures
+- [x] **Hand-craft** minimal wrapper fixtures
       `tests/fixtures/synthesis-019-wrapper-success.json` (synthesis-shape
       `structured_output`) and `tests/fixtures/synthesis-019-wrapper-skip.json`
       (skip-shape). Include only fields the parser reads: `is_error`,
       `result`, `structured_output`. Do NOT capture live output.
-- [ ] **Integration test** `tests/synthesis_e2e.rs::wrapper_to_synthesis_outcome`:
+- [x] **Integration test** `tests/synthesis_e2e.rs::wrapper_to_synthesis_outcome`:
       load each fixture, parse via the `complete_structured` extraction
       path, then through `parse_synthesis_response`. Both fixtures must
       produce the expected `SynthesisOutcome` variant. Match on **shape**
       (variant + field types + non-emptiness), not on exact values; use
       `serde_json::Value::get()` chains where field-presence is checked.
-- [ ] **Rate-limit instrumentation** — extend `complete_structured` to
+- [x] **Rate-limit instrumentation** — extend `complete_structured` to
       log via `tracing::info!` per-call: `total_cost_usd`,
       `cache_creation_input_tokens`, `cache_read_input_tokens`,
       `output_tokens`, `duration_ms` from the wrapper's `usage`

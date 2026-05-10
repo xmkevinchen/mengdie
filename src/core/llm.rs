@@ -567,14 +567,44 @@ struct WrapperEnvelope {
     result: String,
     #[serde(default)]
     structured_output: Option<serde_json::Value>,
+
+    // Metrics fields — used only for rate-limit observability via tracing.
+    // Plan 019 Step 4: per-call instrumentation for the production-DB
+    // measurement pass; values vary across CLI versions and runs (the
+    // hand-crafted fixtures don't include these — `serde(default)` keeps
+    // deserialization tolerant).
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 /// Parse claude-CLI's structured-output wrapper and extract the
-/// `.structured_output` value as a JSON string. Pure and sync — no I/O,
-/// no spawning. Crate-private testing seam.
+/// `.structured_output` value as a JSON string. Pure (no I/O), sync (no
+/// spawning), but emits `tracing::info!` on rate-limit observability
+/// data when the wrapper carries it (plan 019 Step 4 instrumentation).
+/// Crate-private testing seam.
 pub(crate) fn extract_structured_output(stdout: &str) -> Result<String, LlmError> {
     let env: WrapperEnvelope = serde_json::from_str(stdout)
         .map_err(|source| LlmError::StructuredOutputWrapperInvalid { source })?;
+
+    // Plan 019 Step 4: rate-limit instrumentation. When the wrapper
+    // carries `usage` / `total_cost_usd` / `duration_ms` (real claude-CLI
+    // output does; hand-crafted test fixtures don't), emit per-call
+    // metrics so the operator can aggregate them across one Dreaming
+    // pass. Hand-crafted fixtures with no metrics fields skip this log
+    // line silently — the `if` condition guards against emitting an
+    // all-`None` entry that would clutter logs without information.
+    if env.usage.is_some() || env.total_cost_usd.is_some() || env.duration_ms.is_some() {
+        tracing::info!(
+            duration_ms = env.duration_ms,
+            total_cost_usd = env.total_cost_usd,
+            usage = ?env.usage,
+            "claude-CLI structured-output call metrics"
+        );
+    }
 
     if env.is_error {
         // Model-level error: CLI exit code is 0 (subprocess succeeded);
