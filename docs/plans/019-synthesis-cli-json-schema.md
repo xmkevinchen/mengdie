@@ -91,7 +91,7 @@ Expected files: `docs/spikes/019-synthesis-cli-stdin-vs-argv-probe.md` (new).
 
 ## Steps
 
-### Step 1: Schema design + SYSTEM_PROMPT update (AC1)
+### Step 1: Schema design + SYSTEM_PROMPT update (AC1) ✅ 0b9bd76
 
 The schema covers both `SynthesisOutcome` arms (synthesis vs skip) because
 schema-constrained generation will force the model to fabricate syntheses
@@ -146,14 +146,14 @@ schema's "I refuse" path is not abused.
 
 Expected files: `src/core/synthesis.rs`.
 
-### Step 2: ClaudeCliProvider — `complete_structured` sibling method (AC2)
+### Step 2: ClaudeCliProvider — `complete_structured` sibling method (AC2) ✅ pending
 
 Add a structured-output sibling method on `LlmProvider`. NO version
 pre-flight probe — failures surface via error-message hint instead
 (Doodlestein-regret + Doodlestein-adversarial convergent finding,
 dep-analyst accepted).
 
-- [ ] Add `complete_structured` to the `LlmProvider` trait body **with a
+- [x] Add `complete_structured` to the `LlmProvider` trait body **with a
       default implementation** that returns
       `Err(LlmError::UnknownProvider("structured output not supported by
       this provider".into()))`. Test mocks (`FixedProvider`, `PanicProvider`,
@@ -164,7 +164,7 @@ dep-analyst accepted).
       semantic stretch (the provider is known, the capability isn't);
       add a `CapabilityNotSupported` variant if a second non-supporting
       provider lands."*
-- [ ] Add `build_structured_command(&self, system: &str, schema: &str) ->
+- [x] Add `build_structured_command(&self, system: &str, schema: &str) ->
       tokio::process::Command` as a sibling of `build_command`. Argv
       shape (Option A per Pre-Step):
       `claude -p --json-schema <schema> --output-format json
@@ -175,7 +175,7 @@ dep-analyst accepted).
       emit `--json-schema` as TWO `.arg()` calls
       (`cmd.arg("--json-schema").arg(schema)`), never as a single combined
       string.
-- [ ] Add NEW constant `pub const CLAUDE_CLI_STRUCTURED_FLAGS: &[&str]`
+- [x] Add NEW constant `pub const CLAUDE_CLI_STRUCTURED_FLAGS: &[&str]`
       listing flags emitted ONLY by `build_structured_command` (i.e.,
       `--json-schema`). The existing `CLAUDE_CLI_FLAGS` constant remains
       unchanged — it tracks flags emitted by `build_command` (the
@@ -185,11 +185,11 @@ dep-analyst accepted).
       (llm.rs:616-628), which iterates the constant and asserts every
       entry appears in `build_command` argv. Two argv paths → two
       constants; clear ownership; no test logic forks.
-- [ ] Add a parallel drift-guard test
+- [x] Add a parallel drift-guard test
       `claude_cli_structured_flags_constant_matches_build_structured_command_argv`
       that iterates `CLAUDE_CLI_STRUCTURED_FLAGS` and asserts every entry
       appears in `build_structured_command` argv.
-- [ ] Add `LlmError::StructuredOutputMissing` (wrapper parsed but
+- [x] Add `LlmError::StructuredOutputMissing` (wrapper parsed but
       `.structured_output` field is null/absent) and
       `LlmError::StructuredOutputWrapperInvalid` (stdout is not parseable
       as the claude wrapper envelope). Both distinct from `EmptyOutput`
@@ -197,7 +197,7 @@ dep-analyst accepted).
       messages MUST end with the diagnostic hint** `"(verify claude
       >= 2.1.138 supports --json-schema)"` so the operator sees the
       version-mismatch hypothesis without a startup probe.
-- [ ] In `complete_structured`, after `classify_output` succeeds:
+- [x] In `complete_structured`, after `classify_output` succeeds:
       1. Parse stdout as `WrapperEnvelope { is_error: bool, result: String,
          structured_output: Option<serde_json::Value> }`. Accept any
          additional fields (no `additionalProperties: false` on the
@@ -213,14 +213,14 @@ dep-analyst accepted).
       5. Otherwise return `serde_json::to_string(&structured_output)?`
          so the caller can deserialize into the synthesis-or-skip union
          without re-parsing the wrapper.
-- [ ] Add a code comment above `WrapperEnvelope` definition: *"Wrapper
+- [x] Add a code comment above `WrapperEnvelope` definition: *"Wrapper
       shape pinned to claude-CLI 2.1.138 (verified 2026-05-09). If
       Anthropic renames `is_error` to `error` in a future version, this
       code silently treats `is_error` as false, and a model-level error
       propagates as StructuredOutputMissing rather than NonZeroExit.
       Acceptable for personal-use single-operator tool. Re-verify on
       claude-CLI version bump."*
-- [ ] Unit tests:
+- [x] Unit tests:
    - `build_structured_command_argv_includes_json_schema_flag`
    - `build_structured_command_uses_output_format_json` (vs text path)
    - `build_structured_command_passes_prompt_as_positional_argv` (Option A

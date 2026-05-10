@@ -97,6 +97,21 @@ pub enum LlmError {
 
     #[error("CLI process terminated by signal")]
     Signal,
+
+    #[error(
+        "structured-output wrapper missing .structured_output field \
+         (verify claude >= 2.1.138 supports --json-schema)"
+    )]
+    StructuredOutputMissing,
+
+    #[error(
+        "structured-output wrapper failed to parse: {source} \
+         (verify claude >= 2.1.138 supports --json-schema)"
+    )]
+    StructuredOutputWrapperInvalid {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// Classify a captured `std::process::Output` into either the stdout string
@@ -179,6 +194,28 @@ pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<String, LlmError>> +
 
 pub trait LlmProvider: Send + Sync {
     fn complete<'a>(&'a self, system: &'a str, prompt: &'a str) -> LlmFuture<'a>;
+
+    /// Token-decode-constrained structured output. Schema is provider-
+    /// interpreted; for `ClaudeCliProvider` it's the JSON Schema string
+    /// passed via the `--json-schema` flag. Default impl returns
+    /// `UnknownProvider` so non-supporting providers don't have to opt-in.
+    ///
+    /// Reusing `UnknownProvider` here is a semantic stretch (the provider
+    /// IS known, the capability isn't); add a `CapabilityNotSupported`
+    /// variant if a second non-supporting provider lands.
+    fn complete_structured<'a>(
+        &'a self,
+        _system: &'a str,
+        _prompt: &'a str,
+        _schema: &'a str,
+    ) -> LlmFuture<'a> {
+        Box::pin(async {
+            Err(LlmError::UnknownProvider(
+                "structured output not supported by this provider".to_string(),
+            ))
+        })
+    }
+
     fn model(&self) -> &str;
 }
 
@@ -215,6 +252,19 @@ pub const CLAUDE_CLI_FLAGS: &[&str] = &[
     "--model",
     "--system-prompt",
 ];
+
+/// Flags emitted ONLY by `ClaudeCliProvider::build_structured_command`
+/// (the `--json-schema` structured-output path), not by `build_command`.
+///
+/// Plan 019 / Doodlestein-adversarial #1: appending `--json-schema` to
+/// `CLAUDE_CLI_FLAGS` would break the existing
+/// `claude_cli_flags_constant_matches_build_command_argv` test, which
+/// asserts every entry of that constant appears in `build_command`'s
+/// argv. Two argv paths → two constants; clear ownership; no test
+/// logic forks. The parallel drift-guard test
+/// `claude_cli_structured_flags_constant_matches_build_structured_command_argv`
+/// pins the structured-path flag set.
+pub const CLAUDE_CLI_STRUCTURED_FLAGS: &[&str] = &["--json-schema"];
 
 pub struct ClaudeCliProvider {
     cli_path: PathBuf,
@@ -269,6 +319,64 @@ impl ClaudeCliProvider {
             Err(e) => return Err(LlmError::Spawn(e)),
         };
         drive_subprocess(child, prompt.as_bytes(), self.timeout).await
+    }
+
+    /// Build the `Command` for the structured-output path (Plan 019 / BL-027
+    /// Path B). Argv shape per Pre-Step Option A: passes `--json-schema
+    /// <schema>` and `--output-format json` (vs `text` on the legacy
+    /// `build_command` path), then appends the prompt as the last positional
+    /// argv argument and closes stdin with `Stdio::null()`.
+    ///
+    /// Privacy posture: same class as `build_command` per
+    /// `docs/spikes/019-synthesis-cli-stdin-vs-argv-probe.md` — both
+    /// `--system-prompt` value and the positional prompt are visible to
+    /// `ps aux` for the duration of the subprocess. Acceptable for a
+    /// single-user personal tool; not a class escalation.
+    pub(crate) fn build_structured_command(
+        &self,
+        system: &str,
+        prompt: &str,
+        schema: &str,
+    ) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(&self.cli_path);
+        cmd.arg("-p")
+            .arg("--json-schema")
+            .arg(schema)
+            .arg("--output-format")
+            .arg("json")
+            .arg("--no-session-persistence")
+            .arg("--permission-mode")
+            .arg("bypassPermissions")
+            .arg("--tools")
+            .arg("")
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--system-prompt")
+            .arg(system)
+            .arg(prompt) // positional argv (Option A)
+            .stdin(Stdio::null()) // Option A: no stdin write
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        cmd
+    }
+
+    async fn complete_structured_impl(
+        &self,
+        system: &str,
+        prompt: &str,
+        schema: &str,
+    ) -> Result<String, LlmError> {
+        let mut cmd = self.build_structured_command(system, prompt, schema);
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(LlmError::BinaryNotFound);
+            }
+            Err(e) => return Err(LlmError::Spawn(e)),
+        };
+        let stdout_str = drive_subprocess_no_stdin(child, self.timeout).await?;
+        extract_structured_output(&stdout_str)
     }
 }
 
@@ -377,9 +485,132 @@ pub(crate) async fn drive_subprocess(
     })
 }
 
+/// Subprocess driver for the structured-output path (stdin closed via
+/// `Stdio::null()`). No stdin writer task — only stdout and stderr
+/// readers plus a timeout-bounded reap. Trimmed parallel of
+/// `drive_subprocess` for the no-input case; sharing the body via
+/// `Option<&[u8]>` would force `drive_subprocess` to handle a "no
+/// writer" branch that adds more complexity than two siblings cost.
+pub(crate) async fn drive_subprocess_no_stdin(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+) -> Result<String, LlmError> {
+    let mut stdout = child.stdout.take().expect("stdout was piped at build time");
+    let mut stderr = child.stderr.take().expect("stderr was piped at build time");
+
+    let stdout_reader = async move {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).await.map(|_| buf)
+    };
+    let stderr_reader = async move {
+        let mut buf = Vec::new();
+        stderr.read_to_end(&mut buf).await.map(|_| buf)
+    };
+
+    let io_future = async move {
+        let (stdout_res, stderr_res) = tokio::join!(stdout_reader, stderr_reader);
+        let stdout_bytes = stdout_res.map_err(|source| LlmError::Io {
+            op: IoOp::ReadStdout,
+            source,
+        })?;
+        let stderr_bytes = stderr_res.map_err(|source| LlmError::Io {
+            op: IoOp::ReadStderr,
+            source,
+        })?;
+        Ok::<_, LlmError>((stdout_bytes, stderr_bytes))
+    };
+
+    let (stdout_bytes, stderr_bytes) = match tokio::time::timeout(timeout, io_future).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(e);
+        }
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(LlmError::Timeout(timeout));
+        }
+    };
+
+    let status = child.wait().await.map_err(|source| LlmError::Io {
+        op: IoOp::Wait,
+        source,
+    })?;
+
+    classify_output(Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+/// claude-CLI's `--output-format json` wrapper envelope (plan 019).
+///
+/// **Wrapper shape pinned to claude-CLI 2.1.138 (verified 2026-05-09).**
+/// If Anthropic renames `is_error` to `error` in a future version, this
+/// code silently treats `is_error` as false, and a model-level error
+/// propagates as `StructuredOutputMissing` rather than `NonZeroExit`.
+/// Acceptable for personal-use single-operator tool. Re-verify on
+/// claude-CLI version bump.
+///
+/// Many other wrapper fields exist (`session_id`, `uuid`, `duration_ms`,
+/// `total_cost_usd`, `usage`, etc.) — all ignored. `serde(default)` on
+/// the struct keeps deserialization tolerant of new fields landing
+/// upstream without breaking the parse.
+#[derive(serde::Deserialize, Debug)]
+struct WrapperEnvelope {
+    #[serde(default)]
+    is_error: bool,
+    #[serde(default)]
+    result: String,
+    #[serde(default)]
+    structured_output: Option<serde_json::Value>,
+}
+
+/// Parse claude-CLI's structured-output wrapper and extract the
+/// `.structured_output` value as a JSON string. Pure and sync — no I/O,
+/// no spawning. Crate-private testing seam.
+pub(crate) fn extract_structured_output(stdout: &str) -> Result<String, LlmError> {
+    let env: WrapperEnvelope = serde_json::from_str(stdout)
+        .map_err(|source| LlmError::StructuredOutputWrapperInvalid { source })?;
+
+    if env.is_error {
+        // Model-level error: CLI exit code is 0 (subprocess succeeded);
+        // the model returned an error inside the wrapper. Surface via
+        // existing NonZeroExit shape so retry classification stays
+        // stable — `result` carries the human-readable error text.
+        return Err(LlmError::NonZeroExit {
+            code: 0,
+            stderr: env.result,
+            kind: ExitKind::Other,
+        });
+    }
+
+    let value = env
+        .structured_output
+        .ok_or(LlmError::StructuredOutputMissing)?;
+
+    serde_json::to_string(&value).map_err(|source| {
+        // Should be unreachable — we just parsed it from JSON. Keep as
+        // a safety net for serde_json internal bugs.
+        LlmError::StructuredOutputWrapperInvalid { source }
+    })
+}
+
 impl LlmProvider for ClaudeCliProvider {
     fn complete<'a>(&'a self, system: &'a str, prompt: &'a str) -> LlmFuture<'a> {
         Box::pin(self.complete_impl(system, prompt))
+    }
+
+    fn complete_structured<'a>(
+        &'a self,
+        system: &'a str,
+        prompt: &'a str,
+        schema: &'a str,
+    ) -> LlmFuture<'a> {
+        Box::pin(self.complete_structured_impl(system, prompt, schema))
     }
 
     fn model(&self) -> &str {
@@ -789,5 +1020,171 @@ mod tests {
         // IoOp Display also used in error format string.
         assert_eq!(format!("{}", IoOp::ReadStdout), "read stdout");
         assert_eq!(format!("{}", IoOp::Wait), "wait for subprocess");
+    }
+
+    // ---- Plan 019: build_structured_command + wrapper-envelope parsing ----
+
+    #[test]
+    fn build_structured_command_argv_includes_json_schema_flag() {
+        let p = provider_for("/usr/bin/claude", "claude-sonnet-4-6");
+        let cmd = p.build_structured_command("sys", "user prompt", r#"{"oneOf":[]}"#);
+        let argv = argv_of(&cmd);
+        assert!(
+            argv.iter().any(|a| a == "--json-schema"),
+            "argv must include --json-schema flag: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == r#"{"oneOf":[]}"#),
+            "argv must include schema string as a separate element: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn build_structured_command_uses_output_format_json() {
+        let p = provider_for("/usr/bin/claude", "claude-sonnet-4-6");
+        let cmd = p.build_structured_command("sys", "user prompt", "{}");
+        let argv = argv_of(&cmd);
+        // Find --output-format and assert next element is "json", not "text".
+        let pos = argv
+            .iter()
+            .position(|a| a == "--output-format")
+            .expect("--output-format flag must be present");
+        assert_eq!(
+            argv.get(pos + 1).map(String::as_str),
+            Some("json"),
+            "structured path must use --output-format json (not text): {argv:?}"
+        );
+    }
+
+    #[test]
+    fn build_structured_command_passes_prompt_as_positional_argv() {
+        // Pre-Step Option A: prompt is the LAST positional argv argument
+        // (after all named flags), not piped on stdin.
+        let p = provider_for("/usr/bin/claude", "claude-sonnet-4-6");
+        let cmd = p.build_structured_command("sys body", "the user prompt body", r#"{"oneOf":[]}"#);
+        let argv = argv_of(&cmd);
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("the user prompt body"),
+            "prompt must be the last positional argv element: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn parse_wrapper_extracts_structured_output_happy_path() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"name":"Alice","age":30}}"#;
+        let extracted = extract_structured_output(stdout).expect("happy path must succeed");
+        // Round-trip through serde_json::Value to compare structurally
+        // (key ordering in stringified JSON is implementation-defined).
+        let parsed: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"name": "Alice", "age": 30}),
+            "extracted payload must equal the structured_output object"
+        );
+    }
+
+    #[test]
+    fn parse_wrapper_is_error_true_maps_to_non_zero_exit() {
+        let stdout =
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"the model refused"}"#;
+        match extract_structured_output(stdout) {
+            Err(LlmError::NonZeroExit { code, kind, stderr }) => {
+                assert_eq!(
+                    code, 0,
+                    "is_error=true means CLI exited 0 but model failed; code stays 0"
+                );
+                assert_eq!(kind, ExitKind::Other);
+                assert_eq!(stderr, "the model refused");
+            }
+            other => panic!("expected NonZeroExit (model error), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_wrapper_missing_structured_output_maps_to_missing_variant() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"result":"some text but no structured_output field"}"#;
+        match extract_structured_output(stdout) {
+            Err(LlmError::StructuredOutputMissing) => {}
+            other => panic!("expected StructuredOutputMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_wrapper_malformed_envelope_maps_to_wrapper_invalid_variant() {
+        let stdout = "this is not JSON at all";
+        match extract_structured_output(stdout) {
+            Err(LlmError::StructuredOutputWrapperInvalid { source: _ }) => {}
+            other => panic!("expected StructuredOutputWrapperInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_messages_contain_version_hint() {
+        // Pin the operator-facing diagnostic contract: both new error
+        // variants' Display strings end with the version hint, so a
+        // confused operator running an old claude-CLI sees the
+        // version-mismatch hypothesis without a startup probe (per
+        // Doodlestein-regret + adversarial #3 convergent finding,
+        // dep-analyst Risk 1 downgraded MUST-FIX → CONSIDER).
+        let missing = format!("{}", LlmError::StructuredOutputMissing);
+        assert!(
+            missing.contains("verify claude >= 2.1.138 supports --json-schema"),
+            "StructuredOutputMissing message must end with version hint: {missing}"
+        );
+
+        let invalid = format!(
+            "{}",
+            LlmError::StructuredOutputWrapperInvalid {
+                source: serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+            }
+        );
+        assert!(
+            invalid.contains("verify claude >= 2.1.138 supports --json-schema"),
+            "StructuredOutputWrapperInvalid message must end with version hint: {invalid}"
+        );
+    }
+
+    #[test]
+    fn claude_cli_structured_flags_constant_matches_build_structured_command_argv() {
+        // Drift-guard parallel of `claude_cli_flags_constant_matches_build_command_argv`
+        // (plan 019 Step 2 — Doodlestein-adversarial #1 mitigation).
+        let p = provider_for("claude", "claude-sonnet-4-6");
+        let argv = argv_of(&p.build_structured_command("sys", "prompt", "{}"));
+        for flag in CLAUDE_CLI_STRUCTURED_FLAGS {
+            assert!(
+                argv.iter().any(|a| a == flag),
+                "CLAUDE_CLI_STRUCTURED_FLAGS contains {flag:?} but build_structured_command argv \
+                 does not — update either the constant or build_structured_command. argv: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_complete_structured_returns_unknown_provider() {
+        // A trivial mock that doesn't override complete_structured —
+        // exercises the trait's default impl returning UnknownProvider.
+        struct Mock;
+        impl LlmProvider for Mock {
+            fn complete<'a>(&'a self, _system: &'a str, _prompt: &'a str) -> LlmFuture<'a> {
+                Box::pin(async { Ok("ignored".to_string()) })
+            }
+            fn model(&self) -> &str {
+                "mock"
+            }
+        }
+
+        let mock = Mock;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async { mock.complete_structured("sys", "user", "{}").await });
+        match result {
+            Err(LlmError::UnknownProvider(msg)) => {
+                assert!(
+                    msg.contains("structured output not supported"),
+                    "default impl must explain capability gap: {msg}"
+                );
+            }
+            other => panic!("expected default impl to return UnknownProvider, got {other:?}"),
+        }
     }
 }

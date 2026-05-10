@@ -19,7 +19,9 @@
 use tokio::process::Command;
 
 use mengdie::core::config::{ClaudeCliConfig, LlmConfig};
-use mengdie::core::llm::{ClaudeCliProvider, LlmProvider, CLAUDE_CLI_FLAGS};
+use mengdie::core::llm::{
+    ClaudeCliProvider, LlmProvider, CLAUDE_CLI_FLAGS, CLAUDE_CLI_STRUCTURED_FLAGS,
+};
 
 /// Returns true if `claude` binary is discoverable on PATH.
 async fn claude_on_path() -> bool {
@@ -98,6 +100,45 @@ async fn help_output_contains_all_flags_we_emit() {
             help_text.contains(flag),
             "`claude --help` output does not contain flag {flag:?} — \
              build_command argv contract may be broken. Full output follows:\n{help_text}"
+        );
+    }
+}
+
+/// Plan 019: parallel of `help_output_contains_all_flags_we_emit` for
+/// the structured-output path. `--json-schema` is required by
+/// `build_structured_command` and was first available in claude-CLI
+/// 2.1.138 (per BL-027 verification + dep-analyst plan-review finding).
+/// Operators on older versions get a clear "flag missing" diagnostic
+/// from this test instead of the runtime `StructuredOutputWrapperInvalid`
+/// surface (which carries a version-hint suffix anyway, but proactive
+/// detection beats reactive).
+#[tokio::test]
+#[ignore = "requires claude CLI >= 2.1.138 on PATH; run with --ignored"]
+async fn help_output_contains_all_structured_flags_we_emit() {
+    if !claude_on_path().await {
+        eprintln!("[SKIP] `claude` binary not found on PATH; skipping structured help smoke test.");
+        return;
+    }
+
+    let output = Command::new("claude")
+        .arg("--help")
+        .output()
+        .await
+        .expect("failed to run `claude --help`");
+    assert!(
+        output.status.success(),
+        "`claude --help` exited non-zero: {:?}",
+        output.status
+    );
+    let help_text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+
+    for flag in CLAUDE_CLI_STRUCTURED_FLAGS {
+        assert!(
+            help_text.contains(flag),
+            "`claude --help` does not contain {flag:?} — \
+             upgrade claude to >= 2.1.138 (per plan 019 / BL-027). \
+             Full output follows:\n{help_text}"
         );
     }
 }
