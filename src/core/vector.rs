@@ -311,4 +311,131 @@ mod tests {
         let results = db.search_vector(&q, Some("proj"), 10).unwrap();
         assert_eq!(results.len(), 0);
     }
+
+    /// F-006 Step 5 / C2 — TEXT PK acknowledgment test.
+    ///
+    /// `vec_memories` is created with `memory_id text primary key` (per
+    /// `schema.rs:347`). This test guards against a future refactor
+    /// accidentally dropping the explicit TEXT PK in favor of the implicit
+    /// rowid (which would re-introduce rowid-drift problems sqlite-vec
+    /// virtual tables can hit on partial sync).
+    ///
+    /// Implementation note: `pragma_table_info('vec_memories')` returns
+    /// an empty `type` column for vec0 virtual tables (sqlite-vec doesn't
+    /// populate it through the standard pragma path). Grep the literal
+    /// `CREATE VIRTUAL TABLE` statement from `sqlite_master.sql` instead
+    /// — that's the actual schema-author contract.
+    #[test]
+    fn test_vec_memories_text_pk() {
+        let db = test_db();
+        let conn = db.lock_conn().unwrap();
+        let create_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_memories'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("vec_memories CREATE statement should exist in sqlite_master");
+
+        let lower = create_sql.to_lowercase();
+        assert!(
+            lower.contains("memory_id text primary key"),
+            "vec_memories CREATE must declare `memory_id text primary key`; got: {create_sql}"
+        );
+        // Belt-and-suspenders: also confirm we're looking at a vec0 virtual table
+        // (not a regular table that happened to be named vec_memories).
+        assert!(
+            lower.contains("using vec0"),
+            "vec_memories must be a vec0 virtual table; got: {create_sql}"
+        );
+    }
+
+    /// F-006 Step 5 / C5 — EXPLAIN QUERY PLAN smoke test.
+    ///
+    /// Asserts the per-project `search_vector` query uses the vec0
+    /// virtual-table path (not a fallback table-scan). SQLite's EQP
+    /// output for a vec0-virtual-table consumer contains the substring
+    /// `VIRTUAL TABLE INDEX` (revised from the original `USING vec0`
+    /// target per Codex cross-family plan-review feedback — `USING vec0`
+    /// is the source-side keyword; `VIRTUAL TABLE INDEX` is what SQLite
+    /// actually emits in the EQP plan output).
+    #[test]
+    fn test_vec_search_uses_vec0_match() {
+        let db = test_db();
+        let conn = db.lock_conn().unwrap();
+
+        // Mirror the per-project search_vector SQL shape (the bound
+        // values don't matter for EQP, but the SQL structure must match).
+        let plan_sql = "EXPLAIN QUERY PLAN \
+                        SELECT v.memory_id, v.distance \
+                        FROM vec_memories v \
+                        WHERE v.embedding MATCH ?1 AND v.k = ?2 \
+                          AND v.memory_id IN ( \
+                              SELECT id FROM memory_entries \
+                              WHERE project_id = ?3 \
+                                AND (valid_until IS NULL OR valid_until > ?4) \
+                          ) \
+                        ORDER BY v.distance";
+
+        let dummy_blob = embedding_to_blob(&make_384d(&[1.0, 0.0, 0.0]));
+        let mut stmt = conn.prepare(plan_sql).unwrap();
+        let plan_rows: Vec<String> = stmt
+            .query_map(
+                rusqlite::params![dummy_blob, 5_i64, "proj", "2026-01-01T00:00:00Z"],
+                |r| r.get::<_, String>(3), // EQP detail column
+            )
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let plan_text = plan_rows.join("\n");
+        assert!(
+            plan_text.contains("VIRTUAL TABLE INDEX"),
+            "EQP must show vec0 virtual-table path, got: {plan_text}"
+        );
+    }
+
+    /// F-006 Step 5 / C7 — dim-mismatch trigger-skip test.
+    ///
+    /// schema-v7 `vec_memories_insert` trigger is gated on
+    /// `WHEN NEW.embedding_dim = 384`. A 3-d embedding stored at the
+    /// `memory_entries` row should NOT propagate to `vec_memories`.
+    /// This test guards against an accidental WHEN-clause regression
+    /// that would push small test vectors into the vec0 vtable (which
+    /// expects float[384] only).
+    #[test]
+    fn test_dim_mismatch_skips_vec_memories() {
+        let db = test_db();
+        let id = db
+            .insert_memory(NewMemory {
+                project_id: "proj".to_string(),
+                source_file: format!("test-{}.md", uuid::Uuid::new_v4()),
+                source_type: "conclusion".to_string(),
+                knowledge_type: "decisional".to_string(),
+                title: "Test".to_string(),
+                content: "test content".to_string(),
+                entities: "test".to_string(),
+                embedding: None,
+                embedding_dim: None,
+                is_longterm: false,
+            })
+            .unwrap();
+
+        // Store a 3-d embedding (NOT 384-d). The trigger WHEN clause
+        // should skip vec_memories propagation.
+        db.store_embedding(&id, &[1.0_f32, 0.0, 0.0], 3).unwrap();
+
+        let conn = db.lock_conn().unwrap();
+        let vec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vec_memories WHERE memory_id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            vec_count, 0,
+            "vec_memories must NOT contain a row for a 3-d embedding (trigger WHEN clause should skip dim != 384)"
+        );
+    }
 }
