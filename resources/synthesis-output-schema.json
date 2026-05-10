@@ -1,32 +1,15 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$comment": "Token-decode-constrained structured output for mengdie's synthesis path. Consumed via claude-CLI's `--json-schema` flag. Plan 019 / BL-027 Path B. Embedded into src/core/synthesis.rs via include_str! at compile time.",
-  "oneOf": [
-    {
-      "$comment": "synthesis shape — produced when the cluster has a genuine common thread",
-      "type": "object",
-      "properties": {
-        "title": { "type": "string", "maxLength": 80 },
-        "content": { "type": "string" },
-        "entities": {
-          "type": "array",
-          "items": { "type": "string" },
-          "minItems": 2,
-          "maxItems": 6
-        }
-      },
-      "required": ["title", "content", "entities"],
-      "additionalProperties": false
-    },
-    {
-      "$comment": "skip shape — produced when the cluster lacks a meaningful common thread; minLength:20 on `reason` is the laziness tax (plan 019 Step 1)",
-      "type": "object",
-      "properties": {
-        "skip": { "const": true },
-        "reason": { "type": "string", "minLength": 20 }
-      },
-      "required": ["skip", "reason"],
-      "additionalProperties": false
+  "type": "object",
+  "properties": {
+    "skip":     { "type": "boolean" },
+    "reason":   { "type": "string", "minLength": 20 },
+    "title":    { "type": "string", "maxLength": 80 },
+    "content":  { "type": "string" },
+    "entities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 6
     }
-  ]
+  },
+  "required": ["skip"]
 }

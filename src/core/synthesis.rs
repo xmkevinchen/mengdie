@@ -275,44 +275,50 @@ mod tests {
     }
 
     #[test]
-    fn schema_const_parses_as_oneof_with_two_object_branches() {
+    fn schema_const_is_flat_object_with_skip_discriminator() {
         // Plan 019 AC1: structural validation of SYNTHESIS_OUTPUT_SCHEMA.
-        // Catches typo / dropped-field schema-authoring bugs at cargo-test
-        // time. Does NOT validate against the JSON Schema metaschema (no
-        // `jsonschema` dev-dep — transitive cost too high); Step 4's e2e
-        // fixture pair is the runtime guard for semantic correctness.
+        // Anthropic API rejects top-level `oneOf`/`allOf`/`anyOf` in
+        // tool input_schema, so we use a flat object with `skip:bool` as
+        // the discriminator (required), and synthesis fields (title,
+        // content, entities) as optional. Semantic check that
+        // skip:true → reason required, skip:false → title/content/entities
+        // required is enforced by `parse_synthesis_response` runtime
+        // validation, not by the schema (post-mortem of 2026-05-10
+        // Anthropic API probe in docs/spikes/019-rate-limit-measurement.md).
         let parsed: serde_json::Value = serde_json::from_str(SYNTHESIS_OUTPUT_SCHEMA)
             .expect("SYNTHESIS_OUTPUT_SCHEMA must be valid JSON");
-        let one_of = parsed
-            .get("oneOf")
-            .expect("schema must have a oneOf key (synthesis OR skip shape)");
-        let arr = one_of.as_array().expect("oneOf must be a JSON array");
         assert_eq!(
-            arr.len(),
-            2,
-            "oneOf must have exactly 2 branches (synthesis + skip), got {}",
-            arr.len()
+            parsed.get("type").and_then(|v| v.as_str()),
+            Some("object"),
+            "schema must have top-level type: \"object\" (Anthropic API requirement)"
         );
-        for (i, branch) in arr.iter().enumerate() {
-            assert_eq!(
-                branch.get("type").and_then(|v| v.as_str()),
-                Some("object"),
-                "branch {i} must have type: \"object\""
-            );
-            let required = branch
-                .get("required")
-                .and_then(|v| v.as_array())
-                .unwrap_or_else(|| panic!("branch {i} must have a required array"));
+        let required = parsed
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("schema must have a top-level required array");
+        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            required_names,
+            vec!["skip"],
+            "schema must require exactly the skip discriminator at the structural level; got {required_names:?}"
+        );
+        let properties = parsed
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("schema must declare properties");
+        for field in &["skip", "reason", "title", "content", "entities"] {
             assert!(
-                !required.is_empty(),
-                "branch {i} required array must be non-empty"
-            );
-            assert_eq!(
-                branch.get("additionalProperties"),
-                Some(&serde_json::Value::Bool(false)),
-                "branch {i} must have additionalProperties: false"
+                properties.contains_key(*field),
+                "schema must declare property `{field}`; got {:?}",
+                properties.keys().collect::<Vec<_>>()
             );
         }
+        assert!(
+            parsed.get("oneOf").is_none()
+                && parsed.get("allOf").is_none()
+                && parsed.get("anyOf").is_none(),
+            "schema must NOT use top-level oneOf/allOf/anyOf — Anthropic input_schema rejects these"
+        );
     }
 
     #[test]

@@ -283,7 +283,7 @@ tolerance.
 
 Expected files: `src/core/synthesis.rs`, `src/core/dreaming.rs`.
 
-### Step 4: Validation — fixtures + e2e + production run (AC4, AC5)
+### Step 4: Validation — fixtures + e2e + production run (AC4, AC5) ✅ pending
 
 Merged from architect's CONSIDER. One production-DB pass captures both
 the rate-limit measurement and the e2e equivalence evidence.
@@ -319,22 +319,22 @@ the rate-limit measurement and the e2e equivalence evidence.
       `output_tokens`, `duration_ms` from the wrapper's `usage`
       sub-object. Verify exact field names against actual claude-CLI
       output on first invocation.
-- [ ] **Run** `mengdie dream --synthesize` ONCE on the (now-backed-up)
+- [x] **Run** `mengdie dream --synthesize` ONCE on the (now-backed-up)
       production DB. Capture before/after timestamps. Aggregate per-call
       logs into one summary: total tokens, total elapsed, per-cluster
       average. Also capture: total clusters processed, syntheses written,
       syntheses skipped, parse_errors (target: 0).
-- [ ] Write `docs/spikes/019-rate-limit-measurement.md` with: (a) backup
+- [x] Write `docs/spikes/019-rate-limit-measurement.md` with: (a) backup
       file path, (b) total tokens for one full Dreaming pass, (c) total
       elapsed, (d) per-cluster average, (e) parse_errors count
       (must be 0), (f) one-sentence verdict on whether subscription-
       budget rate-limit relief is needed.
-- [ ] If one full Dreaming pass consumes > 50% of operator's typical daily
+- [x] If one full Dreaming pass consumes > 50% of operator's typical daily
       session budget → file `docs/backlog/unscheduled/BL-NNN-synthesis-rate-
       limit-relief.md`. Do NOT change credential model in this plan.
-- [ ] If under 50% → no follow-up BL. Capture as acceptable in the
+- [x] If under 50% → no follow-up BL. Capture as acceptable in the
       spike-doc verdict line.
-- [ ] **Manual quality spot-check**: read the 3 most recent synthesis rows
+- [x] **Manual quality spot-check**: read the 3 most recent synthesis rows
       written by this run from `~/.mengdie/db.sqlite`. Confirm none have
       empty `entities`, none have title >80 chars, none have `content`
       that reads like a lazy skip-shape fallthrough (e.g., generic "these

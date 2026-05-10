@@ -53,4 +53,29 @@
 
 **Actual files**: src/core/synthesis.rs, src/core/dreaming.rs, docs/plans/019-synthesis-cli-json-schema.md
 
+## Step 4 — Validation: fixtures + e2e + production run (commit: <pending>)
+**Decisions**:
+- Flat schema with `skip:bool` discriminator replaces the originally-planned `oneOf` design. Anthropic API rejects `oneOf`/`allOf`/`anyOf` at top level of tool `input_schema` ("API Error: 400 ... does not support oneOf, allOf, or anyOf at the top level" — verified 2026-05-10 in `/tmp/claude-probe-stdout.json`). The structural "exactly one of two shapes" guarantee is lost; `parse_synthesis_response`'s runtime validation (`MissingField`, `EmptyTitle`, `EmptyContent`) covers the semantic layer.
+- `$schema` and `$comment` JSON-Schema-draft-07 metadata fields dropped from `resources/synthesis-output-schema.json`. Same Anthropic input_schema subset constraint; resolves the Step 1 deferred risk in one edit.
+- Fixtures + e2e tests retained — they test `parse_synthesis_response` against the structured-output payload shape, which is invariant across the schema-design change (the parser's RawEnvelope already had all fields as `Option<>`).
+- `mengdie::core::llm::classify_output` discards stdout on non-zero exit; the actual claude-CLI diagnostic (`is_error: true` + `result` field) was buried until we ran a probe directly. Filed as future-improvement risk; not changed in this plan (out of v0.0.1 scope).
+- Schema test renamed `schema_const_parses_as_oneof_with_two_object_branches` → `schema_const_is_flat_object_with_skip_discriminator`. New body asserts top-level `type:"object"`, `required:["skip"]`, all 5 properties present, NO top-level `oneOf`/`allOf`/`anyOf`.
+
+**Rejected**:
+- Original `oneOf [synthesis-shape, skip-shape]` design — rejected by Anthropic API. The 9-reviewer plan-review panel didn't catch this because no reviewer probed the actual API; codex-proxy specifically endorsed `oneOf` as the right token-decode-constrained shape, which is true for OpenAI's `response_format: json_schema strict:true` but NOT for Anthropic's tool input_schema subset.
+- Nested `oneOf` inside an `outcome` property (the user explicitly chose flat over nested when the constraint was discovered).
+- Reverting the entire plan (operator's call: keep structured-output, adopt flat schema, ship).
+
+**Cross-step deps**:
+- Production DB at `~/.mengdie/db.sqlite` now contains 5 new synthesis rows from this run (commit: <pending>). The pre-run backup at `~/.mengdie/db.sqlite.bak-pre-019-1778428737` is the rollback path if any row regrets.
+- BL-027 should be marked `closed/done` after this commit lands. Path B implementation succeeded; rate-limit relief BL not needed (operator's KB scale comfortably under daily budget).
+
+**Production-run measurements** (5 syntheses from 5 clusters):
+- Total elapsed: ~160 sec / Total cost (USD-equivalent): ~$0.40 / Total tokens: ~275K
+- Per-cluster: 24-39 sec, $0.068-$0.089
+- 0 LLM-call errors, 0 parse_errors. Quality: all 5 rows have 1000-1500 char substantial content, multi-tag entities, no lazy fallthroughs.
+
+**Actual files**: resources/synthesis-output-schema.json, src/core/synthesis.rs, tests/synthesis_e2e.rs (no change), tests/fixtures/* (no change), docs/spikes/019-rate-limit-measurement.md, docs/milestones/019/notes.md, docs/milestones/019/step-summaries.md, docs/plans/019-synthesis-cli-json-schema.md
+
+
 
