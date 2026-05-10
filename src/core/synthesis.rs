@@ -2,7 +2,31 @@ use serde::Deserialize;
 
 use crate::core::db::MemoryEntry;
 
-const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Most clusters have a genuine common thread; when they do, output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON. If the memories do NOT share a meaningful common thread (they are merely adjacent topics or share vocabulary without shared intent), output exactly the JSON object {\"skip\": true, \"reason\": \"<one short sentence>\"} instead. Do not invent a consolidation when none exists.";
+const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Output JSON matching one of two shapes. The synthesis shape has keys title, content, entities: title ≤ 80 chars; content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths; entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). The skip shape has keys skip (must be true) and reason. Only skip if the cluster demonstrates fundamental semantic incoherence (state specifically what prevents synthesis). Otherwise you MUST synthesize even a minimal common thread. No markdown, no prose outside the JSON. Do not invent a consolidation when none exists; do not abuse the skip shape as a shortcut.";
+
+/// JSON Schema for token-decode-constrained structured output via
+/// claude-CLI's `--json-schema` flag (plan 019 / BL-027 Path B).
+///
+/// The schema lives in `resources/synthesis-output-schema.json` so it
+/// stays editor-highlightable, jq-able, and free of Rust string-escape
+/// noise. `include_str!` embeds the file contents into the binary at
+/// compile time — zero runtime cost, no I/O.
+///
+/// Top-level `oneOf` covers two shapes — synthesis and skip — so the
+/// model has a legal "I refuse" path within the schema (BL-027 boundary
+/// finding: schema-constrained generation will fabricate output to
+/// satisfy the schema if no escape hatch exists). `skip.reason.minLength:
+/// 20` raises the cost of lazy-skip decisions (codex-proxy plan-review
+/// finding: structural constraint amplifies the prompt-engineering
+/// anti-laziness lever).
+///
+/// `#[allow(dead_code)]`: temporary — consumed by `dreaming.rs` in Step 3
+/// of plan 019 when the call site switches from `complete` to
+/// `complete_structured(... SYNTHESIS_OUTPUT_SCHEMA)`. Remove this
+/// attribute when Step 3's `dreaming.rs` change lands.
+#[allow(dead_code)]
+pub(crate) const SYNTHESIS_OUTPUT_SCHEMA: &str =
+    include_str!("../../resources/synthesis-output-schema.json");
 
 pub const CONTENT_CHAR_LIMIT: usize = 4000;
 const TITLE_HARD_CAP: usize = 200;
@@ -186,7 +210,7 @@ fn extract_first_json_object(raw: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    const EXPECTED_SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Most clusters have a genuine common thread; when they do, output ONLY a JSON object with keys title, content, entities. title ≤ 80 chars. content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths. entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). No markdown, no prose outside the JSON. If the memories do NOT share a meaningful common thread (they are merely adjacent topics or share vocabulary without shared intent), output exactly the JSON object {\"skip\": true, \"reason\": \"<one short sentence>\"} instead. Do not invent a consolidation when none exists.";
+    const EXPECTED_SYSTEM_PROMPT: &str = "You are consolidating related engineering memories. Output JSON matching one of two shapes. The synthesis shape has keys title, content, entities: title ≤ 80 chars; content 3–6 sentences, self-contained, cites the underlying decisions without naming file paths; entities is an array of 2–6 compound tags (lowercase, hyphen-separated, no spaces). The skip shape has keys skip (must be true) and reason. Only skip if the cluster demonstrates fundamental semantic incoherence (state specifically what prevents synthesis). Otherwise you MUST synthesize even a minimal common thread. No markdown, no prose outside the JSON. Do not invent a consolidation when none exists; do not abuse the skip shape as a shortcut.";
 
     // Test helper: unwrap SynthesisOutcome::Synthesized variant; panic otherwise.
     // Used by the tests that existed pre-SynthesisOutcome migration and still
@@ -287,6 +311,47 @@ mod tests {
         };
         let (sys, _user) = build_synthesis_prompt(&input);
         assert_eq!(sys, EXPECTED_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn schema_const_parses_as_oneof_with_two_object_branches() {
+        // Plan 019 AC1: structural validation of SYNTHESIS_OUTPUT_SCHEMA.
+        // Catches typo / dropped-field schema-authoring bugs at cargo-test
+        // time. Does NOT validate against the JSON Schema metaschema (no
+        // `jsonschema` dev-dep — transitive cost too high); Step 4's e2e
+        // fixture pair is the runtime guard for semantic correctness.
+        let parsed: serde_json::Value = serde_json::from_str(SYNTHESIS_OUTPUT_SCHEMA)
+            .expect("SYNTHESIS_OUTPUT_SCHEMA must be valid JSON");
+        let one_of = parsed
+            .get("oneOf")
+            .expect("schema must have a oneOf key (synthesis OR skip shape)");
+        let arr = one_of.as_array().expect("oneOf must be a JSON array");
+        assert_eq!(
+            arr.len(),
+            2,
+            "oneOf must have exactly 2 branches (synthesis + skip), got {}",
+            arr.len()
+        );
+        for (i, branch) in arr.iter().enumerate() {
+            assert_eq!(
+                branch.get("type").and_then(|v| v.as_str()),
+                Some("object"),
+                "branch {i} must have type: \"object\""
+            );
+            let required = branch
+                .get("required")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("branch {i} must have a required array"));
+            assert!(
+                !required.is_empty(),
+                "branch {i} required array must be non-empty"
+            );
+            assert_eq!(
+                branch.get("additionalProperties"),
+                Some(&serde_json::Value::Bool(false)),
+                "branch {i} must have additionalProperties: false"
+            );
+        }
     }
 
     #[test]

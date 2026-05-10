@@ -99,7 +99,7 @@ for clusters that lack a common thread (BL-027 boundary finding). The
 prompt body explicitly discourages lazy skips (codex-proxy finding) so the
 schema's "I refuse" path is not abused.
 
-- [ ] Add `pub(crate) const SYNTHESIS_OUTPUT_SCHEMA: &str` in
+- [x] Add `pub(crate) const SYNTHESIS_OUTPUT_SCHEMA: &str` in
       `src/core/synthesis.rs` immediately after the existing `SYSTEM_PROMPT`
       constant. JSON Schema document (string-encoded JSON) with top-level
       `oneOf`:
@@ -120,14 +120,14 @@ schema's "I refuse" path is not abused.
       ]}
       ```
       `skip.reason` `minLength: 20` raises the cost of lazy-skip decisions.
-- [ ] Update `SYSTEM_PROMPT` body so the natural-language instruction
+- [x] Update `SYSTEM_PROMPT` body so the natural-language instruction
       (a) names the two output shapes ("synthesis shape" and "skip shape"),
       (b) carries the anti-lazy language verbatim: *"Only skip if the
       cluster demonstrates fundamental semantic incoherence (state
       specifically what prevents synthesis). Otherwise you MUST synthesize
       even a minimal common thread."* The schema constraint and the prose
       must not contradict; if they drift, the schema wins.
-- [ ] Add unit test `schema_const_parses_as_oneof_with_two_object_branches`
+- [x] Add unit test `schema_const_parses_as_oneof_with_two_object_branches`
       (more precise than the original `schema_const_is_valid_json` per
       Doodlestein-adversarial #2). Test parses the constant via
       `serde_json::from_str::<serde_json::Value>` AND asserts:
