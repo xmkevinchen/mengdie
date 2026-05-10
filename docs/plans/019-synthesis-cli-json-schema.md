@@ -76,7 +76,7 @@ Per Doodlestein-strategic finding (architect accepted): BL-027's verification
 block already executed the smoke test on 2026-05-09 in `/tmp/headless-verify/`.
 The discovery is done; this Pre-Step is a documentation write, not a re-run.
 
-- [ ] Write `docs/spikes/019-synthesis-cli-stdin-vs-argv-probe.md`. Record
+- [x] Write `docs/spikes/019-synthesis-cli-stdin-vs-argv-probe.md`. Record
       **Option A** (prompt as positional argv, stdin null/closed) as the
       chosen path. Cite BL-027 verification evidence (2026-05-09,
       `/tmp/headless-verify/`) as the smoke-test record. State the
