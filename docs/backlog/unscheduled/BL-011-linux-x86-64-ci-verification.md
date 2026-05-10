@@ -33,14 +33,20 @@ Move this BL to a sprint when the Forgejo CI runner is provisioned for Linux x86
 
 When this BL is picked up, verification is:
 
-1. **Static-link confirmation**: run `cargo build --release` on Linux x86_64; verify the produced binary has no dynamic dependency on a sqlite-vec shared library. Equivalent of macOS spike's `otool -L` check is `ldd target/release/mengdie | grep -i vec` returning empty (no `libsqlite_vec.so` or similar).
+1. **Static-link confirmation**: run `cargo build --release` on Linux x86_64; verify the produced binary has no dynamic dependency on a sqlite-vec shared library. Use `readelf -d target/release/mengdie | grep -i NEEDED` (or `objdump -p`) to list dynamically-linked libraries and confirm no `libsqlite_vec.so` / similar entry. The simpler `ldd | grep -i vec` is a useful negative check but inconclusive in fully-static / musl / `dlopen`-style edge cases (per Codex F-006 review feedback); `readelf -d` NEEDED enumeration is the more authoritative form.
 2. **Symbol presence**: `nm target/release/mengdie | grep sqlite3_vec_init` returns a non-empty match (the symbol is present in the static text section, as on macOS).
-3. **Runtime tests pass**: full `cargo test --release` passes on the Linux x86_64 runner. Specifically, `core::vector::*` tests + `core::schema::*` v7 migration tests must pass — these exercise the vec0 module loading path through both auto-extension registration (`db.rs::ensure_sqlite_vec_registered`) and the schema-v7 migration's `CREATE VIRTUAL TABLE … USING vec0(…)`.
+3. **Runtime tests pass**: full `cargo test --release` passes on the Linux x86_64 runner. Specifically, `core::vector::*` tests + `core::schema::*` v7 migration tests must pass — these exercise the vec0 module loading path through both auto-extension registration (`db.rs::ensure_sqlite_vec_registered`) and the schema-v7 migration's `CREATE VIRTUAL TABLE … USING vec0(…)`. **Also run `cargo test --test embeddings -- --ignored`** to cover the F-006 fastembed unit-norm assumption (the test is `#[ignore]` by default to avoid 90MB downloads in normal `cargo test` runs; CI must opt in explicitly per F-006 architect Q3 review).
 4. **No `cargo build` warnings about dynamic linking**: the build output must not contain `-lvec` or similar dynamic-link flags. The cc-rs build script is supposed to compile sqlite-vec C source directly into the binary; any indirect-link path would be a regression vs the macOS PASS_STATIC verdict.
 
 If all four pass, mark BL-011 closed and amend `docs/spikes/sqlite-vec-distribution.md` outcome to `PASS_STATIC_CROSS_PLATFORM` (or whatever verbiage the spike author prefers); F-001 spike's follow-up obligation is then resolved.
 
 If any step fails, BL-011 escalates to a real engineering issue (root-cause why static-link doesn't transfer; potentially blocks Linux distribution of mengdie).
+
+## Distribution scope caveat (until BL-011 closes)
+
+Per F-006 challenger #4 review feedback, while this BL sits in `defer-until-trigger`, mengdie's Linux distribution status is **unverified**. Code-level mechanism (cc-rs static build) suggests cross-platform parity but the empirical confirmation is pending. Any user-facing distribution channel (README, release notes, install docs) should note that mengdie is currently verified only on macOS arm64 — Linux builds may work but are unverified until BL-011 closes.
+
+If BL-011 sits without trigger firing for >6 months and Linux distribution becomes operationally relevant, treat the elapsed-time signal as a soft trigger: revisit whether to provision the Linux runner specifically to close the gap, or to formalize the macOS-only distribution scope in the README.
 
 ## Out of scope
 
