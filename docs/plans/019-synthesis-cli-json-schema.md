@@ -3,7 +3,7 @@ id: "019"
 title: "synthesis.rs JSON parser — adopt claude-CLI --json-schema structured output"
 type: plan
 created: 2026-05-09
-status: reviewed
+status: done
 discussion: ""
 feature: ""
 ---
