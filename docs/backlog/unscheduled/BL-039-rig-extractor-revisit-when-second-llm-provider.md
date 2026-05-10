@@ -4,7 +4,7 @@ title: "Re-evaluate rig::Extractor adoption when mengdie ships its second LLM pr
 status: open
 created: 2026-05-10
 origin: "plan 019 retrospective — Path B (claude-CLI --json-schema) shipped flat-schema workaround for Anthropic's input_schema subset (no top-level oneOf/allOf/anyOf); per-provider schema-translation is exactly what rig::Extractor encapsulates"
-trigger: "mengdie's second LLM provider lands (codex-CLI as primary, async-openai HTTP, or any non-claude-CLI backend) — at the moment a second provider impl is being built or planned"
+trigger: "concrete code-artifact signal — fires the moment a SECOND match arm is being added to `src/core/llm.rs::build_provider`, OR a SECOND `impl LlmProvider for X` block is being authored in src/core/llm.rs, OR Cargo.toml gains a non-claude HTTP client / SDK dep (async-openai, async-anthropic, etc.). The `build_provider` site carries an inline NOTE pointing at this BL — that comment IS the tripwire."
 depends_on: [BL-027]
 size: M
 v_target: "post-v0.0.1 — when N_providers >= 2"
@@ -72,19 +72,34 @@ Rough breakeven (estimate, validate at trigger time):
 | 2 | 80 (2x fixup + error-mapping) | 220 (adapter + 1 model impl) | borderline |
 | 3+ | 130+ | 240 | yes |
 
-## Trigger
+## Trigger (sharpened 2026-05-10 per plan 019 review)
 
-Fires the moment a second LLM provider impl is being planned or built.
-Common landing scenarios:
+**Concrete code-artifact tripwires** — fires the moment any of these
+shows up in a PR / commit / WIP branch:
 
-1. **codex-CLI as primary or fallback** — different `--output-schema`
-   subset (raw JSON output vs claude's wrapper); BL-027 marks this
-   "Optional, not in v0.0.1 scope".
-2. **async-openai HTTP** — would also unlock non-claude budgets and
-   bypass the `--bare` + `ANTHROPIC_API_KEY` migration risk.
-3. **Local oMLX endpoint** — already used elsewhere in this project;
-   could become a fallback provider for mengdie's synthesis when
-   rate-limited.
+1. **`src/core/llm.rs::build_provider` gains a second `match` arm**
+   beyond the current `"claude-cli"` arm. The inline NOTE on
+   `build_provider` (added by plan 019 review) points operators at this
+   BL exactly at that junction; the comment IS the operational
+   tripwire — no external review cadence needed.
+2. **A second `impl LlmProvider for X` block** anywhere in `src/core/llm.rs`
+   beyond the existing `impl LlmProvider for ClaudeCliProvider`. Grep
+   target: `rg "^impl LlmProvider for" src/core/llm.rs | wc -l > 1`.
+3. **Cargo.toml gains a non-claude LLM SDK / HTTP client dep** —
+   `async-openai`, `async-anthropic`, `genai`, `rig-core`,
+   `openai-api-rs`, etc. Grep target on `Cargo.toml` `[dependencies]`.
+
+Common landing scenarios (still informational, just no longer the
+trigger itself):
+
+- **codex-CLI as primary or fallback** — different `--output-schema`
+  subset (raw JSON output vs claude's wrapper); BL-027 marks this
+  "Optional, not in v0.0.1 scope".
+- **async-openai HTTP** — would also unlock non-claude budgets and
+  bypass the `--bare` + `ANTHROPIC_API_KEY` migration risk.
+- **Local oMLX endpoint** — already used elsewhere in this project;
+  could become a fallback provider for mengdie's synthesis when
+  rate-limited.
 
 When the trigger fires, evaluate:
 

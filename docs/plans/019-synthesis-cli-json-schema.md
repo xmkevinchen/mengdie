@@ -351,22 +351,33 @@ relief.md` or `BL-NNN-synthesis-prompt-tuning.md`.
 
 ## Acceptance Criteria
 
-### AC1: Pre-Step result documented; oneOf schema structurally valid
+### AC1: Pre-Step result documented; flat-shape schema structurally valid
+
+**AC evolution**: this AC was originally written against a `oneOf
+[synthesis-shape, skip-shape]` schema design. Step 4 production probe
+discovered Anthropic API rejects top-level `oneOf`/`allOf`/`anyOf` in
+tool `input_schema` (commit `0b261db`). Schema rewritten as flat object
+with `skip:bool` discriminator; the test was renamed and inverted to
+assert `oneOf` is ABSENT. See `docs/spikes/019-rate-limit-measurement.md`
+"Schema-shape post-mortem" for the full incident write-up. The verification
+commands below reflect the shipped (flat) shape, not the originally-
+planned `oneOf` shape — AC1 is now history-aware.
 
 `docs/spikes/019-synthesis-cli-stdin-vs-argv-probe.md` exists, naming
 Option A with the BL-027 verification citation. The schema constant
-`SYNTHESIS_OUTPUT_SCHEMA` parses as JSON AND has a `oneOf` array of
-exactly 2 object-shaped entries each with non-empty `required` and
-`additionalProperties: false` (`schema_const_parses_as_oneof_with_two_
-object_branches` test passes). SYSTEM_PROMPT contains the anti-lazy-skip
-language verbatim. **Note**: the test confirms structural correctness of
-the schema constant; it does NOT validate the constant against the
-JSON Schema metaschema (no `jsonschema` dev-dep), so subtle
-schema-authoring bugs that produce a structurally valid but semantically
-incorrect schema can still ship — Step 4's e2e fixture pair is the
-runtime guard for that class.
+`SYNTHESIS_OUTPUT_SCHEMA` parses as JSON AND is a flat object with
+top-level `type: "object"`, `required: ["skip"]`, and 5 declared
+properties (`skip`, `reason`, `title`, `content`, `entities`); it does
+NOT carry top-level `oneOf`/`allOf`/`anyOf` (Anthropic input_schema
+subset constraint). SYSTEM_PROMPT contains the anti-lazy-skip language
+verbatim. **Note**: schema validation is now structural-only
+(shape + types + `required:[skip]`); the mutually-exclusive
+"synthesis OR skip" guarantee that `oneOf` would have provided is lost
+and re-enforced at runtime by `parse_synthesis_response`'s field-presence
+validation (`MissingField`/`EmptyTitle`/`EmptyContent`). Step 4's e2e
+fixture pair is the integration guard for the parse path.
 **Verification**: `test -f docs/spikes/019-synthesis-cli-stdin-vs-argv-probe.md`
-exits 0; `cargo test --package mengdie schema_const_parses_as_oneof_with_two_object_branches`
+exits 0; `cargo test --package mengdie schema_const_is_flat_object_with_skip_discriminator`
 passes; `grep "Only skip if the cluster demonstrates fundamental"
 src/core/synthesis.rs` returns 1 hit.
 

@@ -17,6 +17,23 @@ Restore (if a future run regrets):
 cp ~/.mengdie/db.sqlite.bak-pre-019-1778428737 ~/.mengdie/db.sqlite
 ```
 
+**Backup permissions hardening** (security-reviewer finding, plan 019
+final review): `cp` inherits the umask and produces mode-644 backup
+files (`-rw-r--r--`) on macOS. Group `staff` includes all standard
+local users — meaning any additional account on the same machine can
+read the backup, which contains the full personal KB including all
+synthesized memories. For single-user macOS this is low-impact but not
+zero. Operational convention for future backups:
+
+```bash
+umask 077                                                    # before cp, OR
+chmod 600 ~/.mengdie/db.sqlite.bak-pre-019-1778428737        # after cp
+```
+
+The existing backup file from 2026-05-10 (`-pre-019-1778428737`) was
+created with default umask; chmod it now if multiple-user posture on
+this machine ever changes.
+
 ## Schema-shape post-mortem (2026-05-10)
 
 The plan's original `oneOf` design was rejected by Anthropic API at

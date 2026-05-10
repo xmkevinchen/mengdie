@@ -12,17 +12,31 @@ const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories.
 /// noise. `include_str!` embeds the file contents into the binary at
 /// compile time — zero runtime cost, no I/O.
 ///
-/// Top-level `oneOf` covers two shapes — synthesis and skip — so the
-/// model has a legal "I refuse" path within the schema (BL-027 boundary
-/// finding: schema-constrained generation will fabricate output to
-/// satisfy the schema if no escape hatch exists). `skip.reason.minLength:
+/// Shape is a **flat object** with `skip:bool` as the only required field
+/// — NOT the `oneOf [synthesis-shape, skip-shape]` design originally
+/// planned. Step 4 production probe found Anthropic API rejects
+/// `oneOf`/`allOf`/`anyOf` at the top level of tool `input_schema`
+/// ("API Error: 400 ... does not support oneOf, allOf, or anyOf at the
+/// top level"); the schema was flattened with `required: ["skip"]` so
+/// the model still must produce a discriminator, but all synthesis
+/// fields (title/content/entities) and `reason` are schema-optional.
+/// `parse_synthesis_response`'s runtime field-presence validation
+/// (`MissingField`/`EmptyTitle`/`EmptyContent`) covers the semantic
+/// shape that `oneOf` would have enforced structurally. `reason.minLength:
 /// 20` raises the cost of lazy-skip decisions (codex-proxy plan-review
-/// finding: structural constraint amplifies the prompt-engineering
-/// anti-laziness lever).
+/// finding); the anti-laziness lever now leans more heavily on the
+/// prompt (see `SYSTEM_PROMPT` above) than on the schema.
+///
+/// See `docs/spikes/019-rate-limit-measurement.md` "Schema-shape
+/// post-mortem" for the incident write-up. The schema lives in
+/// `resources/synthesis-output-schema.json` so it stays editor-
+/// highlightable, jq-able, and free of Rust string-escape noise;
+/// `include_str!` embeds the file at compile time — zero runtime cost,
+/// no I/O.
 ///
 /// Consumed by `dreaming.rs` (`run_synthesis_pass`) — passed to
 /// `LlmProvider::complete_structured` so the model's output is
-/// token-decode-constrained to one of the two schema branches.
+/// token-decode-constrained to the shape described above.
 pub(crate) const SYNTHESIS_OUTPUT_SCHEMA: &str =
     include_str!("../../resources/synthesis-output-schema.json");
 

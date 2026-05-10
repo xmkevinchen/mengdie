@@ -224,6 +224,16 @@ pub trait LlmProvider: Send + Sync {
 /// `"claude-cli"` is supported; other provider strings yield
 /// `LlmError::UnknownProvider` so misconfiguration surfaces at startup
 /// rather than silently building a Claude provider.
+///
+/// **NOTE — BL-039 trigger site**: adding a second `match` arm here
+/// (i.e., a second `impl LlmProvider for ...`) is the concrete
+/// code-artifact signal that BL-039 specifies. Before adding the second
+/// arm, re-read `docs/backlog/unscheduled/BL-039-rig-extractor-revisit-
+/// when-second-llm-provider.md` — the trade-off between
+/// `rig::Extractor`'s per-provider schema translation and rolling
+/// another bespoke `complete_structured` impl changes at exactly this
+/// junction. Plan 019 retrospective: this annotation prevents
+/// re-discovering the flat-schema-per-provider tax from scratch.
 pub fn build_provider(cfg: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
     match cfg.provider.as_str() {
         "claude-cli" => Ok(Box::new(ClaudeCliProvider::from_config(cfg))),
@@ -243,6 +253,9 @@ pub fn build_provider(cfg: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmError>
 /// when OpenAI / other providers land, each provider owns its own
 /// flag list; this constant will NOT become a generic
 /// `LlmProvider::argv_flags()` method.
+///
+/// **Counterpart**: see `CLAUDE_CLI_STRUCTURED_FLAGS` for flags emitted
+/// only by `build_structured_command` (the `--json-schema` path).
 pub const CLAUDE_CLI_FLAGS: &[&str] = &[
     "-p",
     "--output-format",
