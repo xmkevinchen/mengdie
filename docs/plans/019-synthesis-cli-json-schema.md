@@ -146,7 +146,7 @@ schema's "I refuse" path is not abused.
 
 Expected files: `src/core/synthesis.rs`.
 
-### Step 2: ClaudeCliProvider — `complete_structured` sibling method (AC2) ✅ pending
+### Step 2: ClaudeCliProvider — `complete_structured` sibling method (AC2) ✅ fae11f8
 
 Add a structured-output sibling method on `LlmProvider`. NO version
 pre-flight probe — failures surface via error-message hint instead
@@ -237,16 +237,16 @@ dep-analyst accepted).
 
 Expected files: `src/core/llm.rs`, `tests/llm_claude_cli.rs`.
 
-### Step 3: Replace synthesis parse path; delete brace-depth scanner (AC3)
+### Step 3: Replace synthesis parse path; delete brace-depth scanner (AC3) ✅ 14ff5ef
 
 With Step 2's `complete_structured` returning a pre-validated JSON object
 string, `parse_synthesis_response` no longer needs preamble / postamble
 tolerance.
 
-- [ ] Update `src/core/dreaming.rs` line 493 region: switch the call from
+- [x] Update `src/core/dreaming.rs` line 493 region: switch the call from
       `provider.complete(&system, &user)` to
       `provider.complete_structured(&system, &user, SYNTHESIS_OUTPUT_SCHEMA)`.
-- [ ] In `src/core/synthesis.rs::parse_synthesis_response`:
+- [x] In `src/core/synthesis.rs::parse_synthesis_response`:
       1. Delete `extract_first_json_object` (lines 153-183).
       2. Delete `SynthesisError::NoJsonObject` variant.
       3. Pass `raw` directly to `serde_json::from_str::<RawEnvelope>`.
@@ -254,7 +254,7 @@ tolerance.
 
 **Test handling:**
 
-- [ ] **Delete** these tests (brace-depth-scanner-specific; cannot arise
+- [x] **Delete** these tests (brace-depth-scanner-specific; cannot arise
       under structured-output mode):
    - `parser_tolerates_preamble`
    - `parser_tolerates_postamble`
@@ -262,7 +262,7 @@ tolerance.
    - `parser_escaped_quote_with_unbalanced_inner_brace_is_handled`
    - `parser_balanced_braces_inside_escaped_string`
    - `parser_inner_braces_in_content`
-- [ ] **Repurpose** `parser_skip_with_llm_preamble_still_parses` (preserve
+- [x] **Repurpose** `parser_skip_with_llm_preamble_still_parses` (preserve
       audit trail per architect MUST FIX). Rename to
       `skip_response_without_preamble_parses_cleanly`; body tests that a
       clean structured-output skip JSON (no preamble — that's the new
@@ -270,12 +270,12 @@ tolerance.
       `// Plan 019: original test name was
       parser_skip_with_llm_preamble_still_parses; preamble case can no
       longer arise under --json-schema mode.`
-- [ ] **Delete** `parser_malformed_json` (dead code under structured-output
+- [x] **Delete** `parser_malformed_json` (dead code under structured-output
       mode; claude rejects malformed inner JSON at the schema-validation
       level).
-- [ ] **Convert** `parser_not_json_at_all` to
+- [x] **Convert** `parser_not_json_at_all` to
       `parser_empty_string_returns_invalid_json`.
-- [ ] **Keep unchanged**: `parser_happy_path`, `parser_missing_title`,
+- [x] **Keep unchanged**: `parser_happy_path`, `parser_missing_title`,
       `parser_empty_title`, `parser_empty_content`,
       `parser_entities_as_objects_rejected`, `parser_skip_happy_path`,
       `parser_skip_missing_reason_returns_empty_string`,

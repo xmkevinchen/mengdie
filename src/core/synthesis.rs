@@ -20,11 +20,9 @@ const SYSTEM_PROMPT: &str = "You are consolidating related engineering memories.
 /// finding: structural constraint amplifies the prompt-engineering
 /// anti-laziness lever).
 ///
-/// `#[allow(dead_code)]`: temporary — consumed by `dreaming.rs` in Step 3
-/// of plan 019 when the call site switches from `complete` to
-/// `complete_structured(... SYNTHESIS_OUTPUT_SCHEMA)`. Remove this
-/// attribute when Step 3's `dreaming.rs` change lands.
-#[allow(dead_code)]
+/// Consumed by `dreaming.rs` (`run_synthesis_pass`) — passed to
+/// `LlmProvider::complete_structured` so the model's output is
+/// token-decode-constrained to one of the two schema branches.
 pub(crate) const SYNTHESIS_OUTPUT_SCHEMA: &str =
     include_str!("../../resources/synthesis-output-schema.json");
 
@@ -59,8 +57,6 @@ pub enum SynthesisOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SynthesisError {
-    #[error("no JSON object found in LLM response")]
-    NoJsonObject,
     #[error("invalid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
     #[error("missing required field: {field}")]
@@ -117,8 +113,11 @@ pub fn parse_synthesis_response(
     raw: &str,
     source_ids: &[String],
 ) -> Result<SynthesisOutcome, SynthesisError> {
-    let json_slice = extract_first_json_object(raw).ok_or(SynthesisError::NoJsonObject)?;
-
+    // Plan 019 Step 3: brace-depth scanner deleted. The LLM response
+    // arrives via `LlmProvider::complete_structured`, which extracts the
+    // wrapper's `.structured_output` field and re-serializes it. The
+    // bytes handed to this parser are guaranteed to be a single JSON
+    // object — no preamble/postamble tolerance needed.
     #[derive(Deserialize)]
     struct RawEnvelope {
         skip: Option<bool>,
@@ -128,7 +127,7 @@ pub fn parse_synthesis_response(
         entities: Option<Vec<String>>,
     }
 
-    let parsed: RawEnvelope = serde_json::from_str(json_slice)?;
+    let parsed: RawEnvelope = serde_json::from_str(raw)?;
 
     // Null-escape-hatch: LLM returned `{"skip": true, ...}` signaling the
     // cluster lacks a meaningful common thread. Return Skipped without
@@ -166,44 +165,6 @@ pub fn parse_synthesis_response(
         entities: entities.join(","),
         source_memory_ids: source_ids.to_vec(),
     }))
-}
-
-/// Extract the first complete top-level JSON object from `raw`, ignoring
-/// braces that appear inside JSON string literals. The scanner tracks
-/// `in_string` + escape state so adversarial content like
-/// `"quote with \"{unbalanced"` does not cause the brace counter to terminate
-/// early or over-capture. Falls through to serde_json for any syntactic
-/// validity check — this helper only locates the object boundary.
-fn extract_first_json_object(raw: &str) -> Option<&str> {
-    let bytes = raw.as_bytes();
-    let start = bytes.iter().position(|&b| b == b'{')?;
-    let mut depth: i32 = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&raw[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -365,29 +326,12 @@ mod tests {
         assert_eq!(draft.source_memory_ids, ids);
     }
 
-    #[test]
-    fn parser_tolerates_preamble() {
-        let raw = "Sure! Here:\n\n{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}";
-        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
-        assert_eq!(draft.title, "X");
-        assert_eq!(draft.entities, "a");
-    }
-
-    #[test]
-    fn parser_tolerates_postamble() {
-        let raw = "{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}\n\nHope that helps!";
-        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
-        assert_eq!(draft.title, "X");
-    }
-
-    #[test]
-    fn parser_inner_braces_in_content() {
-        let raw = r#"{"title":"X","content":"use Arc<Mutex<{}>>","entities":[]}"#;
-        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
-        assert_eq!(draft.title, "X");
-        assert_eq!(draft.content, "use Arc<Mutex<{}>>");
-        assert_eq!(draft.entities, "");
-    }
+    // Plan 019 Step 3: parser_tolerates_preamble, parser_tolerates_postamble,
+    // and parser_inner_braces_in_content removed — all guarded the deleted
+    // brace-depth scanner. Preamble/postamble tolerance + inner-brace
+    // robustness are now structurally guaranteed by claude-CLI's
+    // --json-schema token-decode constraint, which only emits the schema-
+    // validated JSON object. See `extract_structured_output` in llm.rs.
 
     #[test]
     fn parser_missing_title() {
@@ -414,16 +358,25 @@ mod tests {
     }
 
     #[test]
-    fn parser_not_json_at_all() {
-        let err = parse_synthesis_response("I refuse.", &[]).unwrap_err();
-        assert!(matches!(err, SynthesisError::NoJsonObject));
+    fn parser_empty_string_returns_invalid_json() {
+        // Plan 019 Step 3: was `parser_not_json_at_all`. SynthesisError::
+        // NoJsonObject deleted with extract_first_json_object; the bare
+        // "I refuse." path is now handled by serde_json::from_str failing
+        // to find a JSON object. Same observable behavior, different
+        // error variant.
+        let err = parse_synthesis_response("", &[]).unwrap_err();
+        assert!(
+            matches!(err, SynthesisError::InvalidJson(_)),
+            "expected InvalidJson, got {err:?}"
+        );
     }
 
-    #[test]
-    fn parser_malformed_json() {
-        let err = parse_synthesis_response("{title: X}", &[]).unwrap_err();
-        assert!(matches!(err, SynthesisError::InvalidJson(_)));
-    }
+    // Plan 019 Step 3: parser_malformed_json deleted as dead code under
+    // structured-output mode. claude-CLI's --json-schema rejects malformed
+    // inner JSON at the schema-validation level; the wrapper would never
+    // carry malformed JSON in `.structured_output` while reporting
+    // is_error: false. The defense-in-depth value is zero because the
+    // path is unreachable.
 
     #[test]
     fn parser_entities_as_objects_rejected() {
@@ -432,38 +385,14 @@ mod tests {
         assert!(matches!(err, SynthesisError::InvalidJson(_)));
     }
 
-    #[test]
-    fn parser_escaped_quote_with_unbalanced_inner_brace_is_handled() {
-        // Review regression: the naive brace-depth counter (no string-state
-        // tracking) would see the `{` at position X inside the content string
-        // literal, increment depth, scan past an unbalanced closing `}` that
-        // would get absorbed, and then fail. With string-aware tracking, the
-        // inner `{` and `}` inside JSON string values are ignored entirely.
-        let raw = r#"{"title":"X","content":"quote with \"{unbalanced","entities":["a"]}"#;
-        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
-        assert_eq!(draft.title, "X");
-        assert_eq!(draft.content, r#"quote with "{unbalanced"#);
-        assert_eq!(draft.entities, "a");
-    }
-
-    #[test]
-    fn parser_balanced_braces_inside_escaped_string() {
-        let raw = r#"{"title":"X","content":"JSON example: \"{\"k\":1}\" end.","entities":["a"]}"#;
-        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
-        assert_eq!(draft.title, "X");
-        assert!(draft.content.contains("{\"k\":1}"));
-    }
-
-    #[test]
-    fn parser_markdown_fenced_json_extracts_cleanly() {
-        // Real LLMs sometimes wrap JSON in ```json ... ``` fences despite
-        // being told to output JSON only. The extractor should find the first
-        // `{` inside the fence and parse.
-        let raw = "```json\n{\"title\":\"X\",\"content\":\"Y.\",\"entities\":[\"a\"]}\n```";
-        let draft = unwrap_synthesized(parse_synthesis_response(raw, &[]).unwrap());
-        assert_eq!(draft.title, "X");
-        assert_eq!(draft.content, "Y.");
-    }
+    // Plan 019 Step 3: parser_escaped_quote_with_unbalanced_inner_brace_is_handled,
+    // parser_balanced_braces_inside_escaped_string, and
+    // parser_markdown_fenced_json_extracts_cleanly all removed — they
+    // guarded the deleted brace-depth scanner. Under the new structured-
+    // output contract, the parser receives a single, schema-validated JSON
+    // object directly from `extract_structured_output` in llm.rs. Inner
+    // braces and string-escape edge cases are handled by serde_json's own
+    // parser, not by mengdie code.
 
     // Plan 011 — null-escape-hatch parser tests
 
@@ -488,11 +417,21 @@ mod tests {
     }
 
     #[test]
-    fn parser_skip_with_llm_preamble_still_parses() {
-        // LLMs sometimes prepend narration despite the prompt.
-        let raw = "Sure, here you go:\n\n{\"skip\": true, \"reason\": \"topically adjacent\"}";
+    fn skip_response_without_preamble_parses_cleanly() {
+        // Plan 019 Step 3: original test name was
+        // `parser_skip_with_llm_preamble_still_parses`. Preamble case can
+        // no longer arise under --json-schema mode (claude-CLI's
+        // structured-output guarantee strips any model-added preamble).
+        // Repurposed to confirm that the new clean-input contract still
+        // routes a skip-shape JSON through the Skipped outcome — preserves
+        // the audit trail of the original design intent (LLM skip behavior
+        // is part of the contract).
+        let raw = r#"{"skip": true, "reason": "topically adjacent items"}"#;
         let outcome = parse_synthesis_response(raw, &[]).unwrap();
-        assert!(matches!(outcome, SynthesisOutcome::Skipped { .. }));
+        assert!(
+            matches!(outcome, SynthesisOutcome::Skipped { .. }),
+            "skip-shape JSON must produce Skipped outcome"
+        );
     }
 
     #[test]
