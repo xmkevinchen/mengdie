@@ -32,6 +32,67 @@ pub struct FtsResult {
     pub bm25_score: f64,
 }
 
+// ---- F-003 Wave 2 orchestrator types (plan F-003 Step 1; discussion 001 Topic 1) ----
+
+/// Controls embedding-failure behavior at the `memory_search_audited`
+/// orchestrator. Per-surface defaults per discussion 001 Topic 1:
+/// - **MCP** (`mcp_tools::search`) → `HybridOrFtsOnly` (graceful fallback to
+///   FTS-only on embed-fail; matches today's MCP behavior).
+/// - **CLI** (`cli::cmd_search`) → `HybridOrError` (hard-error on embed-fail;
+///   matches today's CLI behavior — operator surface).
+/// - **Internal/test callers** → `HybridOrError` (deterministic error path).
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackPolicy {
+    /// Embedding failure → propagate as `Err` (no FTS fallback).
+    HybridOrError,
+    /// Embedding failure → fall back to FTS-only path with normalized scores.
+    HybridOrFtsOnly,
+}
+
+/// Indicates which retrieval path produced the results in
+/// `MemorySearchOutcome`. Consumers map this to their own degraded-mode
+/// representation (e.g., MCP's `degraded` string).
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1 + Topic 6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchRoute {
+    /// Hybrid FTS5 + vector + RRF merge (the canonical path).
+    Hybrid,
+    /// FTS-only fallback (embed-fail under `FallbackPolicy::HybridOrFtsOnly`).
+    /// Scores are normalized to [0, 1] per Topic 6.
+    FtsOnly,
+}
+
+/// Populated when `SearchRoute::FtsOnly` was reached via fallback rather than
+/// explicit caller request. v0.0.1 has only one fallback reason; the enum
+/// shape leaves room for future reasons (e.g., `IndexCorrupted`,
+/// `VectorDimensionMismatch`) without breaking callers that match it
+/// exhaustively.
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackReason {
+    /// Embedding generation failed (model unavailable, ONNX runtime error,
+    /// etc.). The orchestrator fell back to FTS-only under
+    /// `FallbackPolicy::HybridOrFtsOnly`.
+    EmbeddingUnavailable,
+}
+
+/// Return value of `memory_search_audited` (plan F-003 Step 2). Carries the
+/// post-filter result list PLUS the route metadata so consumers can
+/// distinguish "0 results because hybrid found nothing" from "0 results
+/// because FTS fallback returned empty under embed-fail".
+///
+/// Plan F-003 Step 1 / discussion 001 Topic 1.
+#[derive(Debug)]
+pub struct MemorySearchOutcome {
+    pub results: Vec<SearchResult>,
+    pub route: SearchRoute,
+    pub fallback_reason: Option<FallbackReason>,
+}
+
 /// FTS5 reserved words that must be filtered from query tokens.
 const FTS5_RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
 
@@ -80,7 +141,13 @@ pub fn sanitize_fts_query(query: &str) -> String {
 impl Db {
     /// FTS5 full-text search. Returns results ranked by BM25.
     /// Filters out expired entries.
-    pub fn search_fts(
+    ///
+    /// `pub(crate)` post-F-003 (plan F-003 Step 3 / discussion 001 Topic 3
+    /// hybrid): callers go through `search::memory_search_audited` orchestrator
+    /// which owns audit-hook integration + min_score filtering + FTS-only
+    /// fallback normalization. Direct callers of `search_fts` would bypass
+    /// the orchestrator and silently break the F-002 audit invariant.
+    pub(crate) fn search_fts(
         &self,
         query: &str,
         project_id: Option<&str>,
@@ -233,6 +300,157 @@ fn rrf_merge(
     merged
 }
 
+// ---- F-003 Wave 2 orchestrator (plan F-003 Step 2) ----
+
+/// Linear-rescale-by-per-call-max normalization for FTS-only score
+/// fallback. Per discussion 001 Topic 6 + plan F-003 Step 2 HARD GATE
+/// benchmark: this function preserves upper-range discriminability
+/// (output(50)-output(5) ≈ 0.902 ≥ 0.10) and monotonicity, while sigmoid
+/// (compresses upper to ≈0.007) and tanh-half-positive (≈0.0001) both
+/// fail — the chosen function ensures `min_score` filters remain
+/// effective in degraded mode.
+///
+/// Input: `&[FtsResult]` with raw `bm25_score` (SQLite FTS5 returns BM25
+/// with sign convention where lower = better; we work on `.abs()`).
+/// Output: parallel `Vec<f64>` where each element is in [0, 1].
+///
+/// Edge cases: empty input returns empty Vec. **Range collapse**
+/// (`max - min < 1.0` — single result, all-equal scores, or
+/// near-equal scores) cannot meaningfully discriminate; all outputs
+/// are `1.0` (treat as tied at the top, "best available match"). This
+/// prevents silent suppression when caller passes explicit
+/// `min_score > 0` against a degraded fallback returning a single or
+/// uniform-score match — surfaced by Codex accumulated-Doodlestein
+/// checkpoint after Step 3 (plan F-003 milestones/notes.md
+/// adversarial-2). Earlier draft returned all `0.0` which dropped
+/// matched results below any positive threshold.
+fn linear_rescale_normalize(fts_results: &[FtsResult]) -> Vec<f64> {
+    if fts_results.is_empty() {
+        return Vec::new();
+    }
+    let abs_scores: Vec<f64> = fts_results.iter().map(|r| r.bm25_score.abs()).collect();
+    let min = abs_scores.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = abs_scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    if range < 1.0 {
+        // Range collapse — treat all results as tied at the top.
+        return vec![1.0; abs_scores.len()];
+    }
+    abs_scores
+        .iter()
+        .map(|&s| ((s - min) / range).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// FTS-only fallback path for `memory_search_audited`. Calls
+/// `db.search_fts`, hydrates each FtsResult into a SearchResult by
+/// fetching the full MemoryEntry, and normalizes scores to [0, 1] via
+/// `linear_rescale_normalize` (plan F-003 Topic 6 / discussion 001 HARD
+/// GATE).
+fn fts_only_with_normalization(
+    db: &Db,
+    query: &str,
+    project_id: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let fts_results = db.search_fts(query, project_id, limit)?;
+    let normalized_scores = linear_rescale_normalize(&fts_results);
+    let mut results = Vec::with_capacity(fts_results.len());
+    for (idx, fts) in fts_results.iter().enumerate() {
+        if let Some(entry) = db.get_memory(&fts.id)? {
+            results.push(SearchResult {
+                entry,
+                score: normalized_scores[idx],
+            });
+        }
+    }
+    Ok(results)
+}
+
+/// Free-function orchestrator over `&Db` that:
+///
+/// 1. Routes search via embedding when `query_embedding_result` is
+///    `Ok(...)`, falling back to FTS-only under
+///    `FallbackPolicy::HybridOrFtsOnly`. `Err(...)` under
+///    `FallbackPolicy::HybridOrError` propagates unchanged.
+/// 2. Applies `min_score` filter to the raw results BEFORE the audit
+///    hook fires (F-002 Doodlestein-strategic invariant: "record what
+///    the caller saw").
+/// 3. Fires the F-002 audit hook via
+///    `Db::record_search_audit_best_effort` exactly ONCE per call
+///    (replaces the two duplicated call-site hooks from F-002 Wave 1).
+/// 4. Returns route + fallback metadata so callers can map to
+///    surface-specific degraded representations.
+///
+/// `audit_start: Instant` is passed by the CALLER (preserves F-002
+/// Topic 1 Option B "took_ms includes embed latency" invariant — if
+/// the orchestrator owned the clock, embed time would be excluded).
+///
+/// `query_embedding_result` accepts the caller's `Result<Vec<f32>>`
+/// directly so the orchestrator can decide fallback based on the
+/// embedding outcome WITHOUT re-running the embedder.
+///
+/// Plan F-003 Step 2 / discussion 001 Topic 1.
+//
+// 8 parameters — each is a distinct caller concern (query, embedding result,
+// scope, limit, min_score, audit timer, fallback policy + the &Db handle).
+// Wrapping into a builder struct adds call-site indirection without reducing
+// cognitive surface; clippy's 7-arg ceiling is calibrated for typical
+// methods, not orchestration boundaries with many independent inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn memory_search_audited(
+    db: &Db,
+    query: &str,
+    query_embedding_result: anyhow::Result<Vec<f32>>,
+    project_id: Option<&str>,
+    limit: usize,
+    min_score: f64,
+    audit_start: std::time::Instant,
+    fallback_policy: FallbackPolicy,
+) -> anyhow::Result<MemorySearchOutcome> {
+    let (raw_results, route, fallback_reason) = match query_embedding_result {
+        Ok(embedding) => (
+            db.memory_search(query, &embedding, project_id, limit)?,
+            SearchRoute::Hybrid,
+            None,
+        ),
+        Err(e) => match fallback_policy {
+            FallbackPolicy::HybridOrError => {
+                tracing::warn!(error = %e, "embedding failed; HybridOrError policy returns Err");
+                return Err(e);
+            }
+            FallbackPolicy::HybridOrFtsOnly => {
+                tracing::warn!(error = %e, "embedding failed; falling back to FTS-only");
+                (
+                    fts_only_with_normalization(db, query, project_id, limit)?,
+                    SearchRoute::FtsOnly,
+                    Some(FallbackReason::EmbeddingUnavailable),
+                )
+            }
+        },
+    };
+
+    // Apply min_score filter post-search, pre-audit. F-002 Doodlestein-strategic
+    // invariant: audit records what the caller saw, not the pre-filter raw set.
+    let filtered: Vec<SearchResult> = raw_results
+        .into_iter()
+        .filter(|r| r.score >= min_score)
+        .collect();
+
+    // F-002 audit hook: caller passes audit_start so took_ms includes embed
+    // latency (Topic 1 Option B). returned_fact_ids extracted from post-filter
+    // results (Doodlestein-strategic finding).
+    let took_ms = audit_start.elapsed().as_millis() as i64;
+    let returned_fact_ids: Vec<String> = filtered.iter().map(|r| r.entry.id.clone()).collect();
+    db.record_search_audit_best_effort(query, project_id, took_ms, &returned_fact_ids);
+
+    Ok(MemorySearchOutcome {
+        results: filtered,
+        route,
+        fallback_reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +461,17 @@ mod tests {
         Db::open_in_memory().unwrap()
     }
 
+    /// Zero-pad a low-dim "key" embedding to the 384-d vec0 contract
+    /// (BL-026). Lets test cases stay readable while the post-BL-026
+    /// `vec_memories` trigger gates on `embedding_dim = 384`.
+    fn make_384d(base: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0_f32; 384];
+        for (i, &x) in base.iter().enumerate().take(384) {
+            v[i] = x;
+        }
+        v
+    }
+
     fn insert_test_memory(
         db: &Db,
         project: &str,
@@ -251,6 +480,10 @@ mod tests {
         entities: &str,
         embedding: &[f32],
     ) -> String {
+        // Pad internally to 384-d so the post-BL-026 `vec_memories` trigger
+        // fires (gates on `embedding_dim = 384`). Test call-sites remain
+        // readable with 3-d "key" vectors.
+        let padded = make_384d(embedding);
         let id = db
             .insert_memory(NewMemory {
                 project_id: project.to_string(),
@@ -260,8 +493,8 @@ mod tests {
                 title: title.to_string(),
                 content: content.to_string(),
                 entities: entities.to_string(),
-                embedding: Some(embedding_to_blob(embedding)),
-                embedding_dim: Some(embedding.len() as i64),
+                embedding: Some(embedding_to_blob(&padded)),
+                embedding_dim: Some(padded.len() as i64),
                 is_longterm: false,
             })
             .unwrap();
@@ -496,7 +729,7 @@ mod tests {
         );
 
         let results = db
-            .memory_search("JWT", &[0.9, 0.1, 0.0], Some("proj"), 10)
+            .memory_search("JWT", &make_384d(&[0.9, 0.1, 0.0]), Some("proj"), 10)
             .unwrap();
         assert!(!results.is_empty());
 
@@ -527,7 +760,9 @@ mod tests {
             &[0.9, 0.1, 0.0],
         );
 
-        let results = db.memory_search("JWT", &[1.0, 0.0, 0.0], None, 10).unwrap();
+        let results = db
+            .memory_search("JWT", &make_384d(&[1.0, 0.0, 0.0]), None, 10)
+            .unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -556,7 +791,12 @@ mod tests {
         // FTS5 should match the JWT Auth entry (contains "JWT", "auth", "tokens")
         // Both FTS and vector match → dual-ranker → score should be > 0.5
         let results = db
-            .memory_search("JWT auth tokens", &[0.9, 0.1, 0.0], Some("proj"), 10)
+            .memory_search(
+                "JWT auth tokens",
+                &make_384d(&[0.9, 0.1, 0.0]),
+                Some("proj"),
+                10,
+            )
             .unwrap();
         assert!(!results.is_empty());
         // Dual-ranker hits produce scores > 0.5 (confirming FTS5 is now contributing)
@@ -718,5 +958,330 @@ mod tests {
         let entry = entry_with(Some("not-a-date"), false);
         let out = apply_boost_and_decay(0.5, &entry, frozen_now());
         assert_eq!(out, 0.5, "malformed timestamp: treat as no decay");
+    }
+
+    // ---- F-003 Step 2 HARD GATE benchmark (plan F-003 / discussion 001 Topic 6) ----
+
+    /// HARD CORRECTNESS GATE on FTS-only score normalization function selection.
+    ///
+    /// The 5 fixture inputs span 500x (`{0.1, 1.0, 5.0, 10.0, 50.0}`) — a
+    /// pathological range that surfaces upper-end compression in non-linear
+    /// normalization functions. Three candidates were evaluated:
+    ///
+    /// - **sigmoid**: `1.0 / (1.0 + (-x).exp())` — compresses upper to ≈[0.99, 1.0].
+    /// - **tanh-half-positive**: `(x.tanh() + 1.0) / 2.0` — compresses even faster.
+    /// - **linear-rescale-by-per-call-max**: `(x - min) / max(max-min, 1.0)` — preserves
+    ///   discriminability via per-call rescaling.
+    ///
+    /// Acceptance: chosen function MUST pass (a) all outputs in [0, 1],
+    /// (b) `output(50) - output(5) >= 0.10` (upper-range discriminability),
+    /// (c) monotonicity. Sigmoid and tanh both FAIL (b) — kept here as
+    /// negative-assertion sanity checks to prevent future maintainers from
+    /// accidentally re-introducing them.
+    #[test]
+    fn test_fts_score_normalization_discriminability() {
+        let bm25_inputs = [0.1f64, 1.0, 5.0, 10.0, 50.0];
+
+        // Candidate functions:
+        let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
+        let tanh_pos = |x: f64| (x.tanh() + 1.0) / 2.0;
+
+        let sigmoid_outputs: Vec<f64> = bm25_inputs.iter().map(|&x| sigmoid(x)).collect();
+        let tanh_outputs: Vec<f64> = bm25_inputs.iter().map(|&x| tanh_pos(x)).collect();
+
+        // Linear-rescale via the production `linear_rescale_normalize` helper —
+        // ensures the test pins the exact function shape the orchestrator uses.
+        let fts_input: Vec<FtsResult> = bm25_inputs
+            .iter()
+            .map(|&x| FtsResult {
+                id: format!("fact-{x}"),
+                bm25_score: x,
+            })
+            .collect();
+        let linear_outputs = linear_rescale_normalize(&fts_input);
+
+        // ---- Negative-assertion sanity checks: sigmoid + tanh DO compress ----
+        // (proves rejection rationale; prevents future re-adoption)
+        assert!(
+            sigmoid_outputs[4] - sigmoid_outputs[2] < 0.10,
+            "sigmoid MUST compress upper range (output(50) - output(5) < 0.10) — got {} - {} = {}",
+            sigmoid_outputs[4],
+            sigmoid_outputs[2],
+            sigmoid_outputs[4] - sigmoid_outputs[2]
+        );
+        assert!(
+            tanh_outputs[4] - tanh_outputs[2] < 0.10,
+            "tanh-half-positive MUST compress upper range — got {} - {} = {}",
+            tanh_outputs[4],
+            tanh_outputs[2],
+            tanh_outputs[4] - tanh_outputs[2]
+        );
+
+        // ---- Chosen function (linear-rescale-by-per-call-max) MUST pass ----
+
+        // (a) all outputs in [0, 1]
+        for (i, &out) in linear_outputs.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&out),
+                "linear-rescale output[{i}] = {out} out of [0, 1]"
+            );
+        }
+
+        // (b) upper-range discriminability: output(50) - output(5) >= 0.10
+        let upper_diff = linear_outputs[4] - linear_outputs[2];
+        assert!(
+            upper_diff >= 0.10,
+            "linear-rescale upper-range discriminability FAILED: output(50)-output(5) = {} - {} = {} < 0.10",
+            linear_outputs[4],
+            linear_outputs[2],
+            upper_diff
+        );
+
+        // (c) monotonicity
+        for i in 1..linear_outputs.len() {
+            assert!(
+                linear_outputs[i] > linear_outputs[i - 1],
+                "linear-rescale non-monotonic at index {}: {} → {}",
+                i,
+                linear_outputs[i - 1],
+                linear_outputs[i]
+            );
+        }
+    }
+
+    /// Edge case: empty input → empty output (no panic).
+    #[test]
+    fn test_linear_rescale_normalize_empty() {
+        let out = linear_rescale_normalize(&[]);
+        assert!(out.is_empty());
+    }
+
+    /// Edge case: single element → [1.0] (range collapse; tied-at-top
+    /// semantic prevents silent suppression when caller passes
+    /// `min_score > 0`). Surfaced by Codex accumulated-Doodlestein
+    /// checkpoint post-Step 3.
+    #[test]
+    fn test_linear_rescale_normalize_single() {
+        let inp = vec![FtsResult {
+            id: "fact-1".to_string(),
+            bm25_score: 7.5,
+        }];
+        let out = linear_rescale_normalize(&inp);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], 1.0);
+    }
+
+    /// Edge case: all-equal inputs → [1, 1, ...] (range collapse;
+    /// tied-at-top semantic). Plan F-003 Codex accumulated-Doodlestein
+    /// checkpoint adversarial-2 fix.
+    #[test]
+    fn test_linear_rescale_normalize_equal_inputs() {
+        let inp: Vec<FtsResult> = (0..5)
+            .map(|i| FtsResult {
+                id: format!("fact-{i}"),
+                bm25_score: 5.0,
+            })
+            .collect();
+        let out = linear_rescale_normalize(&inp);
+        for &x in &out {
+            assert_eq!(x, 1.0);
+        }
+    }
+
+    /// Regression test for Codex accumulated-Doodlestein checkpoint
+    /// adversarial-2: a single FTS-fallback result with `min_score = 0.5`
+    /// must NOT be suppressed by the orchestrator's filter. Earlier draft
+    /// returned `0.0` for the single result, dropping it below the 0.5
+    /// threshold — silent regression vs the user's "the search found
+    /// something" expectation.
+    #[test]
+    fn test_linear_rescale_normalize_single_with_high_min_score_passes() {
+        let inp = vec![FtsResult {
+            id: "fact-only".to_string(),
+            bm25_score: 3.0,
+        }];
+        let normalized = linear_rescale_normalize(&inp);
+        assert_eq!(normalized.len(), 1);
+        // Caller's filter: results.iter().filter(|score| *score >= 0.5)
+        // With the fix, the single result passes (output 1.0 >= 0.5).
+        assert!(
+            normalized[0] >= 0.5,
+            "single result MUST pass min_score=0.5 threshold"
+        );
+    }
+
+    // ---- F-003 Step 4 orchestrator tests ----
+
+    /// AC6: orchestrator under HybridOrError + Ok(embedding) returns route Hybrid
+    /// + None fallback_reason + results matching the underlying memory_search.
+    #[test]
+    fn test_memory_search_audited_hybrid_path_returns_hybrid_route() {
+        let db = test_db();
+        let dim = 384usize;
+        let embedding = vec![0.1f32; dim];
+        let _id = insert_test_memory(&db, "proj", "test", "JWT auth content", "auth", &embedding);
+
+        let outcome = memory_search_audited(
+            &db,
+            "JWT",
+            Ok(embedding),
+            Some("proj"),
+            10,
+            0.0,
+            std::time::Instant::now(),
+            FallbackPolicy::HybridOrError,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.route, SearchRoute::Hybrid);
+        assert!(outcome.fallback_reason.is_none());
+        // memory_search returns at least one result for the matching query
+        // (FTS5 + vector both find the seeded memory).
+        assert!(
+            !outcome.results.is_empty(),
+            "expected results from hybrid path"
+        );
+    }
+
+    /// AC6: HybridOrError + Err(...) propagates the error.
+    #[test]
+    fn test_memory_search_audited_hybrid_or_error_propagates_embed_fail() {
+        let db = test_db();
+        let result = memory_search_audited(
+            &db,
+            "anything",
+            Err(anyhow::anyhow!("embed failed: model unavailable")),
+            Some("proj"),
+            10,
+            0.0,
+            std::time::Instant::now(),
+            FallbackPolicy::HybridOrError,
+        );
+        assert!(result.is_err(), "HybridOrError MUST propagate embed-fail");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("model unavailable"),
+            "expected propagated error message, got: {msg}"
+        );
+    }
+
+    /// AC6: HybridOrFtsOnly + Err(...) falls back to FTS-only with normalized
+    /// scores in [0, 1] and route=FtsOnly + fallback_reason=EmbeddingUnavailable.
+    #[test]
+    fn test_memory_search_audited_hybrid_or_fts_only_falls_back_with_normalized_scores() {
+        let db = test_db();
+        let dim = 384usize;
+        // Seed multiple matches so range > 1.0 and linear-rescale produces
+        // meaningful spread (not tied-at-top range-collapse).
+        let _id1 = insert_test_memory(
+            &db,
+            "proj",
+            "JWT auth",
+            "JWT JWT JWT auth content",
+            "auth",
+            &vec![0.1f32; dim],
+        );
+        let _id2 = insert_test_memory(
+            &db,
+            "proj",
+            "auth basics",
+            "auth basics",
+            "auth",
+            &vec![0.1f32; dim],
+        );
+
+        let outcome = memory_search_audited(
+            &db,
+            "JWT auth",
+            Err(anyhow::anyhow!("embed unavailable")),
+            Some("proj"),
+            10,
+            0.0,
+            std::time::Instant::now(),
+            FallbackPolicy::HybridOrFtsOnly,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.route, SearchRoute::FtsOnly);
+        assert_eq!(
+            outcome.fallback_reason,
+            Some(FallbackReason::EmbeddingUnavailable)
+        );
+        assert!(
+            !outcome.results.is_empty(),
+            "FTS fallback must return results"
+        );
+        for r in &outcome.results {
+            assert!(
+                (0.0..=1.0).contains(&r.score),
+                "FTS-only score must be in [0,1], got {}",
+                r.score
+            );
+        }
+    }
+
+    /// AC6: orchestrator audit hook fires exactly ONCE per call (post-filter)
+    /// from BOTH the Hybrid and FtsOnly branches. Verified by checking the
+    /// memory_search_audit table row count after each call.
+    #[test]
+    fn test_memory_search_audited_writes_audit_row_on_both_paths() {
+        let db = test_db();
+        let dim = 384usize;
+        let embedding = vec![0.1f32; dim];
+        let _id = insert_test_memory(&db, "proj", "JWT", "JWT auth", "auth", &embedding);
+
+        let count_before: i64 = db
+            .lock_conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memory_search_audit", [], |r| r.get(0))
+            .unwrap();
+
+        // Hybrid path
+        memory_search_audited(
+            &db,
+            "JWT",
+            Ok(embedding.clone()),
+            Some("proj"),
+            10,
+            0.0,
+            std::time::Instant::now(),
+            FallbackPolicy::HybridOrError,
+        )
+        .unwrap();
+
+        let count_after_hybrid: i64 = db
+            .lock_conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memory_search_audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count_after_hybrid - count_before,
+            1,
+            "Hybrid path must write exactly 1 audit row"
+        );
+
+        // FtsOnly path
+        memory_search_audited(
+            &db,
+            "JWT",
+            Err(anyhow::anyhow!("embed fail")),
+            Some("proj"),
+            10,
+            0.0,
+            std::time::Instant::now(),
+            FallbackPolicy::HybridOrFtsOnly,
+        )
+        .unwrap();
+
+        let count_after_fts: i64 = db
+            .lock_conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memory_search_audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count_after_fts - count_after_hybrid,
+            1,
+            "FtsOnly path must write exactly 1 audit row"
+        );
     }
 }

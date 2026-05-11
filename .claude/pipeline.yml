@@ -110,6 +110,39 @@ project_agents:
     specialty: "threat-modeling"
     priority: 50
     required: false
+  - name: specialized-mcp-builder
+    role: domain-expert
+    source: "agency-agents:specialized/specialized-mcp-builder.md"
+    source_sha: e12b89c5e04e2ef483120a672845a9d024318314
+    display_name: "MCP Builder"
+    imported_at: 2026-05-05
+    modified: false
+    tech_stack: []
+    specialty: "mcp"
+    priority: 50
+    required: false
+  - name: testing-tool-evaluator
+    role: domain-expert
+    source: "agency-agents:testing/testing-tool-evaluator.md"
+    source_sha: 3f8a9ff68fab761aa5a8f85528de01d7762c1cd4
+    display_name: "Tool Evaluator"
+    imported_at: 2026-05-05
+    modified: false
+    tech_stack: []
+    specialty: "library-evaluation"
+    priority: 50
+    required: false
+  - name: testing-performance-benchmarker
+    role: domain-expert
+    source: "agency-agents:testing/testing-performance-benchmarker.md"
+    source_sha: 4e90dac3ca0a69620f61a6ccb4faed738eace027
+    display_name: "Performance Benchmarker"
+    imported_at: 2026-05-05
+    modified: false
+    tech_stack: []
+    specialty: "performance"
+    priority: 50
+    required: false
 
 # --- Agent Libraries (BL-005 curation; see /ae:setup agents) ---
 agent_libraries:

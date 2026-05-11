@@ -1,7 +1,10 @@
 ---
 id: "001"
 title: "AI-native Second Brain — Product Vision"
-status: done
+status: superseded
+superseded_by: docs/roadmap.md
+superseded_on: 2026-05-08
+superseded_reason: "Founding product vision (4-layer architecture, team features, '3-15 person teams' target users) drifted out of scope as project pivoted to 1-person solo scope (v0.0.1 rebuild, 2026-04-27). F-004 closes that loop by formally superseding via the new engineering-blueprint roadmap."
 created: 2026-04-05
 pipeline:
   analyze: skipped
@@ -9,7 +12,7 @@ pipeline:
   plan: skipped
   work: skipped
 plan: ""
-tags: [product-vision, architecture, memory]
+tags: [product-vision, architecture, memory, superseded]
 ---
 
 # AI-native Second Brain — Product Vision

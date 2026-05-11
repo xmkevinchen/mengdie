@@ -1,12 +1,49 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{ffi::sqlite3_auto_extension, params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::schema::{compute_content_hash, run_migrations};
+
+/// Register sqlite-vec extension for all subsequent SQLite connections in
+/// this process. `sqlite3_auto_extension` is process-global; calling it
+/// twice is harmless but the OnceLock guards against unnecessary duplicate
+/// registration.
+///
+/// **Critical ordering**: `sqlite3_auto_extension` only injects vec0 into
+/// connections opened AFTER registration. Conns opened before are missing
+/// vec0 — they would error on `CREATE VIRTUAL TABLE … USING vec0(…)`.
+/// Always call this function BEFORE `Connection::open*()` for any conn
+/// that will run schema migrations or vec0 queries.
+///
+/// Public to crate so test code in `schema.rs` and elsewhere that opens
+/// raw `rusqlite::Connection` (bypassing `Db::open*`) can register the
+/// extension before opening. BL-026 Step 2 — adopted post PASS_STATIC
+/// spike outcome (`docs/spikes/sqlite-vec-distribution.md`, 2026-05-08).
+pub(crate) fn ensure_sqlite_vec_registered() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        // SAFETY: sqlite3_vec_init has the canonical sqlite3_extension entry
+        // shape; this transmute matches the pattern in sqlite-vec's own
+        // doc-test (`sqlite-vec-0.1.9/src/lib.rs`). The full target signature
+        // is the standard sqlite3 extension entry-point per sqlite3ext.h.
+        unsafe {
+            sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(
+                sqlite_vec::sqlite3_vec_init as *const ()
+            )));
+        }
+    });
+}
 
 /// Basic database statistics.
 pub struct DbStats {
@@ -15,6 +52,74 @@ pub struct DbStats {
     pub longterm: i64,
     pub recalled: i64,
 }
+
+/// Audit-pipeline health snapshot returned by `Db::audit_stats()`.
+///
+/// The six fields are consumed by the `mengdie audit-stats` CLI subcommand
+/// (F-005) so an operator can detect silent breakage of the F-002 audit hook
+/// without waiting for the A-MEM `≥5/30d` supersession trigger.
+pub struct AuditStats {
+    /// `COUNT(*)` of rows in `memory_search_audit`.
+    pub audit_count: i64,
+    /// `COUNT(*)` of rows in `audit_returned_facts`.
+    pub link_count: i64,
+    /// `MIN(searched_at)` of `memory_search_audit`. `None` on an empty table.
+    pub oldest_row: Option<String>,
+    /// `MAX(searched_at)` of `memory_search_audit`. `None` on an empty table.
+    pub newest_row: Option<String>,
+    /// Count of supersession events in the last 30 days; the bare-`COUNT(*)`
+    /// sister of `F002_SUPERSESSION_SQL` (no GROUP BY / HAVING).
+    pub supersession_count_30d: i64,
+    /// Persistent counter from the `metrics` table
+    /// (`METRIC_AUDIT_WRITE_FAILURES`); not session-local.
+    pub audit_write_failures: i64,
+}
+
+/// The verbatim F-002 supersession SQL — promoted from a `#[cfg(test)] const`
+/// to a crate-internal item, currently dead in production but reachable by
+/// AC4's `test_audit_stats_where_clause_shared` invariant. Returns one row
+/// per `(window_start, supersession_count)` pair where ≥5 superseded facts
+/// were returned by audited searches in the last 30 days.
+///
+/// **Honest rationale** (F-005 challenger #2): the `pub(crate)` promotion
+/// originally intended a future production caller (an A-MEM bucketed-trigger
+/// path) that did not materialize in F-005. Production audit-stats consumes
+/// only the bare-COUNT sister `AUDIT_STATS_SUPERSESSION_COUNT_SQL`. The
+/// promotion + `#[allow(dead_code)]` is therefore tracking-debt: a real
+/// caller is owed by the next feature that needs the bucketed form (BL-031
+/// captures the cross-layer test gap that would benefit from it). Until
+/// then, `#[allow(dead_code)]` silences a legitimate compiler signal so
+/// the const can stay reachable by the AC4 grep-invariant test.
+#[allow(dead_code)]
+pub(crate) const F002_SUPERSESSION_SQL: &str = "
+    SELECT
+        DATE(a.searched_at, 'start of day', '-30 days') AS window_start,
+        COUNT(*) AS supersession_count
+    FROM memory_search_audit a
+    JOIN audit_returned_facts arf ON arf.audit_id = a.id
+    JOIN memory_entries me ON me.id = arf.fact_id
+    WHERE me.valid_until IS NOT NULL
+      AND JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7
+      AND a.searched_at >= DATE('now', '-30 days')
+    GROUP BY window_start
+    HAVING supersession_count >= 5;
+";
+
+/// Sister query of `F002_SUPERSESSION_SQL` — same WHERE clause, but drops the
+/// GROUP BY / HAVING aggregation and returns a single `COUNT(*)` of all
+/// supersession events in the trailing 30-day window. Used by
+/// `Db::audit_stats()` to expose the raw event count (the F-002 query
+/// surfaces only buckets that already crossed the ≥5 trigger threshold,
+/// which is the wrong shape for a health-check display).
+pub(crate) const AUDIT_STATS_SUPERSESSION_COUNT_SQL: &str = "
+    SELECT COUNT(*)
+    FROM memory_search_audit a
+    JOIN audit_returned_facts arf ON arf.audit_id = a.id
+    JOIN memory_entries me ON me.id = arf.fact_id
+    WHERE me.valid_until IS NOT NULL
+      AND JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7
+      AND a.searched_at >= DATE('now', '-30 days');
+";
 
 /// Shared database handle, safe to clone across async tasks.
 #[derive(Clone)]
@@ -92,6 +197,7 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        ensure_sqlite_vec_registered();
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
         run_migrations(&conn)
@@ -103,6 +209,7 @@ impl Db {
 
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> anyhow::Result<Self> {
+        ensure_sqlite_vec_registered();
         let conn = Connection::open_in_memory()?;
         run_migrations(&conn)?;
         Ok(Self {
@@ -269,6 +376,87 @@ impl Db {
             params![relevance_score, now, id],
         )?;
         Ok(rows > 0)
+    }
+
+    /// Strict helper — write one `memory_search_audit` row plus N
+    /// `audit_returned_facts` link rows in a single transaction. Errors
+    /// propagate to the caller verbatim; this helper does NOT emit a
+    /// `tracing::warn!` line and does NOT touch the failure counter — those
+    /// are the wrapper's job (`record_search_audit_best_effort`).
+    ///
+    /// Empty `returned_fact_ids` is allowed (zero-result searches are still
+    /// meaningful to log): the audit row writes, no link rows are inserted.
+    /// `rank` on each link row is the 0-indexed position of `fact_id` in
+    /// `returned_fact_ids` and is reserved for downstream consumers (no
+    /// v0.0.1 query reads it).
+    ///
+    /// Returns the inserted `audit_id` (rowid alias on `memory_search_audit`).
+    ///
+    /// Plan F-002 Step 2 / discussion 029 R1.
+    pub fn record_search_audit(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        took_ms: i64,
+        returned_fact_ids: &[String],
+    ) -> anyhow::Result<i64> {
+        let searched_at = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![query, scope, took_ms, searched_at],
+        )?;
+        let audit_id = tx.last_insert_rowid();
+
+        for (rank, fact_id) in returned_fact_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO audit_returned_facts (audit_id, fact_id, rank)
+                 VALUES (?1, ?2, ?3)",
+                params![audit_id, fact_id, rank as i64],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(audit_id)
+    }
+
+    /// Best-effort wrapper around `record_search_audit`. Swallows errors
+    /// with a `tracing::warn!` line carrying the query text + a pre-call
+    /// timestamp, and bumps `METRIC_AUDIT_WRITE_FAILURES`. Returns `()`.
+    ///
+    /// Both Step 3 call sites (`mcp_tools::search` + `cli::cmd_search`)
+    /// invoke this wrapper, NOT the strict helper directly — audit-write
+    /// failures must NOT mutate the search response or propagate as
+    /// MCP/CLI errors.
+    ///
+    /// Plan F-002 Step 2 / discussion 029 Topic 2.
+    pub fn record_search_audit_best_effort(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        took_ms: i64,
+        returned_fact_ids: &[String],
+    ) {
+        // Capture timestamp BEFORE the strict-helper call. Under lock
+        // contention the Err return path can be arbitrarily later than the
+        // wrapper entry; the warn line's `searched_at` must localize the
+        // actual search time so post-restart audit-gap recovery (the F1
+        // stderr surface) bounds the missing-row window. Plan F-002
+        // Doodlestein-adversarial M6.
+        let warn_searched_at = Utc::now().to_rfc3339();
+        if let Err(e) = self.record_search_audit(query, scope, took_ms, returned_fact_ids) {
+            tracing::warn!(
+                query = %query,
+                searched_at = %warn_searched_at,
+                took_ms = took_ms,
+                error = %e,
+                "audit write failed"
+            );
+            let _ = self.increment_metric(super::metrics::METRIC_AUDIT_WRITE_FAILURES);
+        }
     }
 
     /// Bulk fetch memory rows by id, one lock acquisition.
@@ -569,6 +757,50 @@ impl Db {
             valid,
             longterm,
             recalled,
+        })
+    }
+
+    /// Audit-pipeline health snapshot — six numbers an operator can read at
+    /// a glance to detect silent breakage of the F-002 audit hook (F-005).
+    ///
+    /// All six queries run under a single `self.conn.lock()` guard so the
+    /// snapshot is a consistent view of the audit substrate; matches the
+    /// discipline of `Db::stats()`.
+    pub fn audit_stats(&self) -> anyhow::Result<AuditStats> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let audit_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_search_audit", [], |r| r.get(0))?;
+        let link_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM audit_returned_facts", [], |r| {
+                r.get(0)
+            })?;
+        let oldest_row: Option<String> = conn.query_row(
+            "SELECT MIN(searched_at) FROM memory_search_audit",
+            [],
+            |r| r.get(0),
+        )?;
+        let newest_row: Option<String> = conn.query_row(
+            "SELECT MAX(searched_at) FROM memory_search_audit",
+            [],
+            |r| r.get(0),
+        )?;
+        let supersession_count_30d: i64 =
+            conn.query_row(AUDIT_STATS_SUPERSESSION_COUNT_SQL, [], |r| r.get(0))?;
+        let audit_write_failures: i64 = conn
+            .query_row(
+                "SELECT value_int FROM metrics WHERE key = ?1",
+                params![super::metrics::METRIC_AUDIT_WRITE_FAILURES],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(AuditStats {
+            audit_count,
+            link_count,
+            oldest_row,
+            newest_row,
+            supersession_count_30d,
+            audit_write_failures,
         })
     }
 
@@ -1418,6 +1650,435 @@ mod tests {
         assert!(
             msg.contains("non-empty"),
             "error should explain the invariant, got: {msg}"
+        );
+    }
+
+    // ---- F-002 audit helper / wrapper / supersession-SQL tests ----------
+
+    use super::super::metrics::METRIC_AUDIT_WRITE_FAILURES;
+
+    /// AC2 — strict helper writes one audit row plus N link rows with rank
+    /// = 0-indexed position in input order.
+    #[test]
+    fn test_record_search_audit_writes_audit_and_links() {
+        let db = test_db();
+        let audit_id = db
+            .record_search_audit(
+                "q",
+                Some("proj-x"),
+                42,
+                &["f1".to_string(), "f2".to_string(), "f3".to_string()],
+            )
+            .unwrap();
+
+        let conn = db.lock_conn().unwrap();
+        let (q, scope, took_ms): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT query, scope, took_ms FROM memory_search_audit WHERE id = ?1",
+                rusqlite::params![audit_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(q, "q");
+        assert_eq!(scope, Some("proj-x".to_string()));
+        assert_eq!(took_ms, 42);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT fact_id, rank FROM audit_returned_facts \
+                 WHERE audit_id = ?1 ORDER BY rank ASC",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64)> = stmt
+            .query_map(rusqlite::params![audit_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], ("f1".to_string(), 0));
+        assert_eq!(rows[1], ("f2".to_string(), 1));
+        assert_eq!(rows[2], ("f3".to_string(), 2));
+    }
+
+    /// AC2 — empty `returned_fact_ids` writes the audit row only (zero
+    /// link rows).
+    #[test]
+    fn test_record_search_audit_empty_facts_writes_audit_only() {
+        let db = test_db();
+        let audit_id = db.record_search_audit("q", None, 7, &[]).unwrap();
+
+        let conn = db.lock_conn().unwrap();
+        let audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_search_audit WHERE id = ?1",
+                rusqlite::params![audit_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 1);
+
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_returned_facts WHERE audit_id = ?1",
+                rusqlite::params![audit_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(link_count, 0);
+    }
+
+    /// AC2 — strict helper returns `Err` when the link table is dropped
+    /// mid-test. Uses `lock_conn` (pub(crate)) for failure injection.
+    /// Drop-table is the right injection: invalid fact_id INSERTs would
+    /// NOT fail under PRAGMA foreign_keys = OFF.
+    #[test]
+    fn test_record_search_audit_returns_err_on_dropped_table() {
+        let db = test_db();
+        {
+            let conn = db.lock_conn().unwrap();
+            conn.execute("DROP TABLE audit_returned_facts;", [])
+                .unwrap();
+        }
+        let result = db.record_search_audit("q", None, 1, &["f1".to_string()]);
+        assert!(
+            result.is_err(),
+            "strict helper must return Err when audit_returned_facts is dropped"
+        );
+    }
+
+    /// AC2 — best-effort wrapper does NOT panic and DOES bump the failure
+    /// counter when the strict helper errors. This is the unit test that
+    /// satisfies AC2's counter-increment claim — the wrapper is the unit
+    /// under test, not the strict helper.
+    #[test]
+    fn test_record_search_audit_best_effort_increments_counter_on_failure() {
+        let db = test_db();
+        {
+            let conn = db.lock_conn().unwrap();
+            conn.execute("DROP TABLE audit_returned_facts;", [])
+                .unwrap();
+        }
+        // Wrapper returns () — no panic.
+        db.record_search_audit_best_effort("q", None, 1, &["f1".to_string()]);
+
+        let counter = db.get_metric(METRIC_AUDIT_WRITE_FAILURES).unwrap();
+        assert_eq!(counter, 1);
+    }
+
+    /// Helper for AC4 supersession-SQL tests: insert one memory_entries row
+    /// pre-tombstoned with `valid_until` and one audit row at `searched_at`,
+    /// linked together. Returns the inserted audit_id.
+    ///
+    /// `searched_at` and `valid_until` are caller-supplied so tests can seed
+    /// in-window or out-of-window scenarios without depending on `Utc::now`
+    /// at fixture construction time.
+    fn seed_supersession_pair(
+        conn: &Connection,
+        fact_id: &str,
+        searched_at: &str,
+        valid_until: &str,
+    ) -> i64 {
+        let hash = format!("hash-{fact_id}-{}", uuid::Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, valid_until,
+                 created_at, content_hash)
+             VALUES (?1, 'proj', 'f.md', 'conclusion', 'decisional',
+                     'title', 'content', '', ?2, ?3, ?2, ?4)",
+            rusqlite::params![fact_id, searched_at, valid_until, hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at)
+             VALUES ('q', 'proj', 1, ?1)",
+            rusqlite::params![searched_at],
+        )
+        .unwrap();
+        let aid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO audit_returned_facts (audit_id, fact_id, rank)
+             VALUES (?1, ?2, 0)",
+            rusqlite::params![aid, fact_id],
+        )
+        .unwrap();
+        aid
+    }
+
+    // The supersession SQL itself is now a crate-internal const at module
+    // scope (`super::F002_SUPERSESSION_SQL`) so production audit-stats code
+    // and these tests share one source of truth. Reachable here via the
+    // `use super::*;` at the top of this `mod tests` block.
+
+    /// AC4 — 5 supersession events on a single day produce ≥1 row with
+    /// `supersession_count >= 5`. Strategic-post Finding 1 schema-correctness
+    /// gate.
+    #[test]
+    fn test_supersession_sql_returns_expected_rows() {
+        let db = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let valid_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        {
+            let conn = db.lock_conn().unwrap();
+            for i in 0..5 {
+                let fact_id = format!("fact-{i}");
+                seed_supersession_pair(&conn, &fact_id, &now, &valid_until);
+            }
+        }
+
+        let conn = db.lock_conn().unwrap();
+        let mut stmt = conn.prepare(F002_SUPERSESSION_SQL).unwrap();
+        let counts: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, i64>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            !counts.is_empty(),
+            "expected at least one window with supersession_count >= 5"
+        );
+        let max_count = counts.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_count >= 5,
+            "expected at least one window with count >= 5, got max {max_count}"
+        );
+    }
+
+    /// AC4 — 1 audit row + 5 link rows + 5 superseded entries also produces
+    /// a row with `supersession_count >= 5`. Proves COUNT(*) counts joined
+    /// audit/link/memory triples, NOT distinct audit rows. Documents the
+    /// metric semantic for the downstream A-MEM trigger plan.
+    #[test]
+    fn test_supersession_sql_groups_by_joined_pairs() {
+        let db = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let valid_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        {
+            let conn = db.lock_conn().unwrap();
+            // One audit row.
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at)
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            let aid = conn.last_insert_rowid();
+            // Five facts, all linked to that single audit row.
+            for i in 0..5 {
+                let fact_id = format!("pair-fact-{i}");
+                let hash = format!("hash-{fact_id}-{}", uuid::Uuid::new_v4());
+                conn.execute(
+                    "INSERT INTO memory_entries
+                        (id, project_id, source_file, source_type, knowledge_type,
+                         title, content, entities, valid_from, valid_until,
+                         created_at, content_hash)
+                     VALUES (?1, 'proj', 'f.md', 'conclusion', 'decisional',
+                             'title', 'content', '', ?2, ?3, ?2, ?4)",
+                    rusqlite::params![fact_id, now, valid_until, hash],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO audit_returned_facts (audit_id, fact_id, rank)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![aid, fact_id, i as i64],
+                )
+                .unwrap();
+            }
+        }
+
+        let conn = db.lock_conn().unwrap();
+        let mut stmt = conn.prepare(F002_SUPERSESSION_SQL).unwrap();
+        let counts: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, i64>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            !counts.is_empty(),
+            "expected COUNT to count joined pairs, not distinct audit rows"
+        );
+        let max_count = counts.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_count >= 5,
+            "single audit row + 5 link rows must produce count >= 5, got {max_count}"
+        );
+    }
+
+    /// AC4 — supersession events outside the 30-day window OR with
+    /// valid_until > 7 days after searched_at must NOT appear in the output.
+    #[test]
+    fn test_supersession_sql_excludes_outside_window() {
+        let db = test_db();
+        // Case (a): searched_at 31 days ago — outside the 30-day window.
+        let old_searched = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        let old_valid_until = (chrono::Utc::now() - chrono::Duration::days(31)
+            + chrono::Duration::days(1))
+        .to_rfc3339();
+        // Case (b): valid_until 10 days after searched_at — outside 7-day diff.
+        let now = chrono::Utc::now().to_rfc3339();
+        let far_valid_until = (chrono::Utc::now() + chrono::Duration::days(10)).to_rfc3339();
+
+        {
+            let conn = db.lock_conn().unwrap();
+            for i in 0..5 {
+                let id = format!("old-{i}");
+                seed_supersession_pair(&conn, &id, &old_searched, &old_valid_until);
+            }
+            for i in 0..5 {
+                let id = format!("far-{i}");
+                seed_supersession_pair(&conn, &id, &now, &far_valid_until);
+            }
+        }
+
+        let conn = db.lock_conn().unwrap();
+        let mut stmt = conn.prepare(F002_SUPERSESSION_SQL).unwrap();
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            rows.is_empty(),
+            "out-of-window seeds must not satisfy HAVING supersession_count >= 5, got {rows:?}"
+        );
+    }
+
+    // ---- F-005 audit-stats accessor tests ---------------------------------
+
+    /// AC1 — fresh, freshly-migrated DB returns all-zeros snapshot with
+    /// `oldest_row` / `newest_row` `None` and `audit_write_failures` 0.
+    #[test]
+    fn test_audit_stats_empty_db() {
+        let db = test_db();
+        let s = db.audit_stats().unwrap();
+        assert_eq!(s.audit_count, 0);
+        assert_eq!(s.link_count, 0);
+        assert!(s.oldest_row.is_none());
+        assert!(s.newest_row.is_none());
+        assert_eq!(s.supersession_count_30d, 0);
+        assert_eq!(s.audit_write_failures, 0);
+    }
+
+    /// AC1 — seeded DB with 3 audit rows + 5 link rows + audit_write_failures=2
+    /// returns the expected six-field snapshot. Timestamps use a fixed RFC3339
+    /// trio so MIN/MAX assertions are deterministic (independent of `Utc::now`
+    /// at fixture construction time).
+    #[test]
+    fn test_audit_stats_populated() {
+        let db = test_db();
+        let t0 = "2026-05-01T00:00:00+00:00".to_string();
+        let t1 = "2026-05-04T12:00:00+00:00".to_string();
+        let t2 = "2026-05-08T08:00:00+00:00".to_string();
+        // Seed 3 audit rows + 5 link rows. We attach all 5 link rows to the
+        // first audit row (the audit/link cardinality is independent in this
+        // test, so a 3+5 split is the minimum that exercises the two
+        // independent counts).
+        let aid_first = {
+            let conn = db.lock_conn().unwrap();
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at) \
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![t0],
+            )
+            .unwrap();
+            let aid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at) \
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![t1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memory_search_audit (query, scope, took_ms, searched_at) \
+                 VALUES ('q', 'proj', 1, ?1)",
+                rusqlite::params![t2],
+            )
+            .unwrap();
+            // 5 fact rows (just memory_entries — no valid_until needed for
+            // the count-only assertions in this test) + 5 link rows.
+            for i in 0..5 {
+                let fact_id = format!("populated-fact-{i}");
+                let hash = format!("hash-{fact_id}-{}", uuid::Uuid::new_v4());
+                conn.execute(
+                    "INSERT INTO memory_entries \
+                        (id, project_id, source_file, source_type, knowledge_type, \
+                         title, content, entities, valid_from, created_at, content_hash) \
+                     VALUES (?1, 'proj', 'f.md', 'conclusion', 'decisional', \
+                             'title', 'content', '', ?2, ?2, ?3)",
+                    rusqlite::params![fact_id, t0, hash],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO audit_returned_facts (audit_id, fact_id, rank) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![aid, fact_id, i as i64],
+                )
+                .unwrap();
+            }
+            aid
+        };
+        let _ = aid_first; // suppress unused warning if test rewritten
+
+        // Bump audit_write_failures to 2.
+        db.increment_metric(METRIC_AUDIT_WRITE_FAILURES).unwrap();
+        db.increment_metric(METRIC_AUDIT_WRITE_FAILURES).unwrap();
+
+        let s = db.audit_stats().unwrap();
+        assert_eq!(s.audit_count, 3);
+        assert_eq!(s.link_count, 5);
+        assert_eq!(s.oldest_row.as_deref(), Some(t0.as_str()));
+        assert_eq!(s.newest_row.as_deref(), Some(t2.as_str()));
+        assert_eq!(s.audit_write_failures, 2);
+        // Locks in the AC1 fixture's 6th-field expectation: fact rows seeded
+        // without `valid_until` produce zero supersession events. AC4's
+        // `test_audit_stats_supersession_count` exercises the non-zero path.
+        assert_eq!(s.supersession_count_30d, 0);
+    }
+
+    /// AC1 + AC4 — seeding 5 supersession events on a single day produces
+    /// `supersession_count_30d == 5` from the new sister query (no
+    /// GROUP BY / HAVING — the bare COUNT*. Mirrors the seed shape of
+    /// `test_supersession_sql_returns_expected_rows` so the two queries can
+    /// be cross-checked against the same fixture if the test is ever
+    /// re-run side-by-side.
+    #[test]
+    fn test_audit_stats_supersession_count() {
+        let db = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let valid_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        {
+            let conn = db.lock_conn().unwrap();
+            for i in 0..5 {
+                let fact_id = format!("ssn-fact-{i}");
+                seed_supersession_pair(&conn, &fact_id, &now, &valid_until);
+            }
+        }
+        let s = db.audit_stats().unwrap();
+        assert_eq!(
+            s.supersession_count_30d, 5,
+            "5 in-window superseded facts should yield supersession_count_30d == 5"
+        );
+    }
+
+    /// AC4 — both supersession SQL consts must contain the exact shared
+    /// WHERE-clause fragment, so any future drift between them is caught
+    /// at compile-time test-pass-time. The literal text is the one piece
+    /// the F-005 plan AC4 calls out by name.
+    #[test]
+    fn test_audit_stats_where_clause_shared() {
+        const SHARED_WHERE_FRAGMENT: &str =
+            "JULIANDAY(me.valid_until) - JULIANDAY(a.searched_at) <= 7";
+        assert!(
+            super::F002_SUPERSESSION_SQL.contains(SHARED_WHERE_FRAGMENT),
+            "F002_SUPERSESSION_SQL must contain the shared WHERE fragment"
+        );
+        assert!(
+            super::AUDIT_STATS_SUPERSESSION_COUNT_SQL.contains(SHARED_WHERE_FRAGMENT),
+            "AUDIT_STATS_SUPERSESSION_COUNT_SQL must contain the shared WHERE fragment"
         );
     }
 }

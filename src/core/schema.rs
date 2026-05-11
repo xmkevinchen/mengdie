@@ -2,7 +2,17 @@ use anyhow::bail;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 5;
+/// Head schema version. Each migration block writes its OWN target version
+/// as a literal (per F-002 plan Step 1 Doodlestein-adversarial M7) rather
+/// than templating off this constant — so this binding is referenced only
+/// from `#[cfg(test)]` head-version assertions (e.g. AC1 idempotency check).
+#[allow(dead_code)]
+const SCHEMA_VERSION: i64 = 7;
+/// Embedding dimension required by the sqlite-vec `vec_memories` virtual
+/// table. Matches `fastembed-rs` all-MiniLM-L6-v2 output dimension. The
+/// column declaration `embedding float[384] distance_metric=cosine` is
+/// dim-fixed at table creation time per sqlite-vec semantics.
+const VEC_DIM: i64 = 384;
 
 /// Allowed `source_type` values. Enforced via BEFORE INSERT / BEFORE UPDATE
 /// triggers installed in the v5 migration (plan 017). SQLite does not
@@ -85,6 +95,14 @@ pub fn compute_synthesis_cluster_hash(source_ids: &[String]) -> String {
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+    // Plan F-002 / discussion 029 YAGNI 1: FK clauses are documentation-only
+    // project-wide. Make this explicit at the connection level so the
+    // assumption holds regardless of the SQLite build's FK default and
+    // regardless of whether a caller pre-enabled enforcement. Closes BL-015
+    // (filed at F-002 Step 1, triggered at Step 4 when the audit-helper unit
+    // tests hit FOREIGN KEY constraint errors on synthetic fact_ids that
+    // don't reference real memory_entries rows).
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
 
     let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
@@ -221,7 +239,12 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         // complete idempotently, but it emits confusing restart log noise).
         let migration_result = (|| -> anyhow::Result<()> {
             v5_migration(conn)?;
-            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            // Plan F-002 Doodlestein-adversarial M7: each migration block pins
+            // its OWN target version as a literal, NOT `{SCHEMA_VERSION}`. After
+            // a future v7 bumps the constant, the v5 block must still write 5,
+            // not the head version — otherwise a v6-crash-after-v5-commit
+            // produces a v5 schema reading user_version = head.
+            conn.execute_batch("PRAGMA user_version = 5;")?;
             Ok(())
         })();
         match migration_result {
@@ -229,6 +252,157 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             Err(e) => {
                 // Best-effort rollback. If ROLLBACK itself fails, surface the
                 // original error — the rollback failure is noise by comparison.
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+
+    // Migration v6: persisted domain audit (F-002 Wave 1, plan F-002 Step 1).
+    //
+    // Adds two tables and three indexes:
+    //   - `memory_search_audit` — one row per memory_search call (query, scope,
+    //     took_ms, searched_at).
+    //   - `audit_returned_facts` — link table (audit_id, fact_id, rank) with
+    //     unenforced FKs into both audit and memory_entries (PRAGMA
+    //     foreign_keys stays OFF project-wide; FK clauses are documentation
+    //     per 029 YAGNI 1).
+    //   - Three indexes covering the AC4 supersession SQL: composite on
+    //     (searched_at, id), reverse-FK covering on (fact_id, audit_id), and
+    //     a partial on memory_entries(valid_until, id) WHERE valid_until IS
+    //     NOT NULL.
+    //
+    // Atomicity rests on SQLite's transaction guarantee: the version write
+    // commits with the schema as one unit. `IF NOT EXISTS` clauses are
+    // belt-and-braces idempotence, not the primary safety mechanism.
+    if current_version < 6 {
+        conn.execute_batch("BEGIN TRANSACTION;")?;
+        let migration_result = (|| -> anyhow::Result<()> {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS memory_search_audit (
+                    id          INTEGER PRIMARY KEY,
+                    query       TEXT NOT NULL,
+                    scope       TEXT,
+                    took_ms     INTEGER NOT NULL,
+                    searched_at TEXT NOT NULL
+                 );
+
+                 CREATE TABLE IF NOT EXISTS audit_returned_facts (
+                    audit_id INTEGER NOT NULL,
+                    fact_id  TEXT NOT NULL,
+                    rank     INTEGER NOT NULL,
+                    PRIMARY KEY (audit_id, fact_id),
+                    FOREIGN KEY (audit_id) REFERENCES memory_search_audit(id),
+                    FOREIGN KEY (fact_id) REFERENCES memory_entries(id)
+                 );
+
+                 CREATE INDEX IF NOT EXISTS idx_memory_search_audit_searched_id
+                     ON memory_search_audit(searched_at, id);
+
+                 CREATE INDEX IF NOT EXISTS idx_audit_returned_facts_fact_audit
+                     ON audit_returned_facts(fact_id, audit_id);
+
+                 CREATE INDEX IF NOT EXISTS idx_memory_entries_valid_until_id
+                     ON memory_entries(valid_until, id)
+                     WHERE valid_until IS NOT NULL;
+
+                 PRAGMA user_version = 6;",
+            )?;
+            Ok(())
+        })();
+        match migration_result {
+            Ok(()) => conn.execute_batch("COMMIT;")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+
+    // Migration v7: sqlite-vec adoption (BL-026 Step 2).
+    //
+    // Adds `vec_memories` virtual table backed by sqlite-vec vec0 + triggers
+    // to keep it in sync with `memory_entries.embedding` automatically. The
+    // BLOB column on `memory_entries` remains the source of truth (data
+    // integrity); `vec_memories` is a derived index for ANN KNN queries that
+    // replaces the prior 264-LoC full-table-scan in `src/core/vector.rs`.
+    //
+    // **Trigger-based sync** (mirrors the existing `memory_fts_*` trigger
+    // pattern lines 137-155) means no Rust code-path changes in
+    // `insert_memory` / `store_embedding` — any memory write that lands an
+    // embedding of dim VEC_DIM (= 384) auto-propagates to `vec_memories`.
+    // Lower-dim test data and NULL embeddings skip the trigger via the
+    // `WHEN` clause.
+    //
+    // Per F-001 spike caveat (`docs/spikes/sqlite-vec-compat.md`) the column
+    // declaration MUST carry `distance_metric=cosine` to match mengdie's
+    // existing cosine-similarity semantics — default L2 would corrupt RRF
+    // score normalization.
+    if current_version < 7 {
+        conn.execute_batch("BEGIN;")?;
+        let migration_result: anyhow::Result<()> = (|| {
+            conn.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+                     memory_id text primary key,
+                     embedding float[{VEC_DIM}] distance_metric=cosine
+                 );"
+            ))?;
+            // Populate from existing 384-d embeddings (one-time backfill).
+            let mut select = conn.prepare(
+                "SELECT id, embedding
+                 FROM memory_entries
+                 WHERE embedding IS NOT NULL AND embedding_dim = ?1",
+            )?;
+            let rows: Vec<(String, Vec<u8>)> = select
+                .query_map(rusqlite::params![VEC_DIM], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(select);
+            let mut insert =
+                conn.prepare("INSERT INTO vec_memories (memory_id, embedding) VALUES (?1, ?2)")?;
+            for (id, blob) in rows {
+                insert.execute(rusqlite::params![id, blob])?;
+            }
+            drop(insert);
+
+            // Triggers: auto-sync vec_memories with memory_entries.embedding
+            // changes. Mirrors the FTS5 sync trigger pattern. WHEN clauses
+            // gate on embedding_dim = VEC_DIM so smaller test embeddings
+            // (e.g., 3-d sanity vectors in non-vector test files) skip
+            // safely.
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS vec_memories_insert
+                     AFTER INSERT ON memory_entries
+                     WHEN NEW.embedding IS NOT NULL AND NEW.embedding_dim = {VEC_DIM}
+                 BEGIN
+                     INSERT INTO vec_memories (memory_id, embedding)
+                     VALUES (NEW.id, NEW.embedding);
+                 END;
+
+                 CREATE TRIGGER IF NOT EXISTS vec_memories_update
+                     AFTER UPDATE OF embedding ON memory_entries
+                     WHEN NEW.embedding IS NOT NULL AND NEW.embedding_dim = {VEC_DIM}
+                 BEGIN
+                     DELETE FROM vec_memories WHERE memory_id = NEW.id;
+                     INSERT INTO vec_memories (memory_id, embedding)
+                     VALUES (NEW.id, NEW.embedding);
+                 END;
+
+                 CREATE TRIGGER IF NOT EXISTS vec_memories_delete
+                     AFTER DELETE ON memory_entries
+                 BEGIN
+                     DELETE FROM vec_memories WHERE memory_id = OLD.id;
+                 END;"
+            ))?;
+
+            conn.execute_batch("PRAGMA user_version = 7;")?;
+            Ok(())
+        })();
+        match migration_result {
+            Ok(()) => conn.execute_batch("COMMIT;")?,
+            Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(e);
             }
@@ -521,7 +695,10 @@ mod tests {
 
     #[test]
     fn test_migrations_idempotent() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         // Running again should not error
         run_migrations(&conn).unwrap();
@@ -529,7 +706,10 @@ mod tests {
 
     #[test]
     fn test_wal_mode_active() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -540,7 +720,10 @@ mod tests {
 
     #[test]
     fn test_fts5_table_exists() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         let count: i64 = conn
             .query_row(
@@ -553,25 +736,31 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_v5_on_fresh_db() {
-        let conn = Connection::open_in_memory().unwrap();
+    fn test_v6_migration_idempotent() {
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 7);
 
-        // Idempotent: re-running leaves version at 5.
+        // Idempotent: re-running leaves version at 6.
         run_migrations(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 7);
     }
 
     #[test]
     fn test_v4_synthesis_link_table_exists() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         let count: i64 = conn
             .query_row(
@@ -603,7 +792,10 @@ mod tests {
 
     #[test]
     fn test_migration_from_v3_preserves_data() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         // First put the DB into a v3 state by running migrations then setting user_version = 3.
         run_migrations(&conn).unwrap();
         conn.execute_batch("PRAGMA user_version = 3;").unwrap();
@@ -669,7 +861,10 @@ mod tests {
     /// `user_version = 4` and the full v4 schema in place (memory_entries +
     /// memory_synthesis_links). Used by the v5-upgrade tests below.
     fn seed_v4_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         // Production `Db::open` does not set PRAGMA foreign_keys. But
         // `rusqlite` with the `bundled` feature compiles SQLite with FK
         // enforcement ON by default in some builds. Disable explicitly so
@@ -780,7 +975,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Backfilled cluster_hash matches helper.
         let expected = compute_synthesis_cluster_hash(&["src-1".to_string(), "src-2".to_string()]);
@@ -922,7 +1117,10 @@ mod tests {
 
     #[test]
     fn test_trigger_rejects_invalid_source_type_on_insert() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         // Direct SQL insert with an invalid source_type should be aborted.
         let result = conn.execute(
@@ -943,7 +1141,10 @@ mod tests {
 
     #[test]
     fn test_trigger_rejects_invalid_source_type_on_update() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         conn.execute(
             "INSERT INTO memory_entries
@@ -970,7 +1171,10 @@ mod tests {
     /// that accidentally broadens trigger scope.
     #[test]
     fn test_trigger_allows_non_source_type_updates_on_synthesis_rows() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         // Insert a synthesis row directly (migration is complete; trigger active).
         // We bypass insert_synthesis_with_links here because we only need one row.
@@ -1098,7 +1302,10 @@ mod tests {
 
     #[test]
     fn test_idx_memory_content_hash_is_partial_after_v5() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         // Check the index definition via sqlite_master.
         let sql: String = conn
@@ -1116,7 +1323,10 @@ mod tests {
 
     #[test]
     fn test_idx_synthesis_cluster_is_partial_with_not_null_guard() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
         run_migrations(&conn).unwrap();
         let sql: String = conn
             .query_row(
@@ -1129,5 +1339,112 @@ mod tests {
             sql.contains("source_type = 'synthesis'") && sql.contains("IS NOT NULL"),
             "expected partial unique index with IS NOT NULL guard, got: {sql}"
         );
+    }
+
+    // ---- Plan F-002 (v6) tests ------------------------------------------
+
+    /// AC1 — fresh `Db::open_in_memory()` ends with both audit tables and
+    /// all three indexes from R7/R4.
+    #[test]
+    fn test_v6_creates_audit_tables_and_indexes() {
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
+        run_migrations(&conn).unwrap();
+
+        for table in ["memory_search_audit", "audit_returned_facts"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table {table} missing after v6 migration");
+        }
+
+        for idx in [
+            "idx_memory_search_audit_searched_id",
+            "idx_audit_returned_facts_fact_audit",
+            "idx_memory_entries_valid_until_id",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    rusqlite::params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "index {idx} missing after v6 migration");
+        }
+    }
+
+    /// AC1 — seed v5 state with one row, drop v6 objects, replay migration,
+    /// assert the row survives the v6 step. Modeled on
+    /// `test_migration_from_v3_preserves_data`.
+    #[test]
+    fn test_migration_v5_to_v6_preserves_data() {
+        let conn = {
+            crate::core::db::ensure_sqlite_vec_registered();
+            Connection::open_in_memory().unwrap()
+        };
+        run_migrations(&conn).unwrap();
+
+        let hash = compute_content_hash("v5 row content");
+        conn.execute(
+            "INSERT INTO memory_entries
+                (id, project_id, source_file, source_type, knowledge_type,
+                 title, content, entities, valid_from, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "row-v5",
+                "proj",
+                "f.md",
+                "conclusion",
+                "decisional",
+                "v5 row",
+                "v5 row content",
+                "tag",
+                "2026-04-28T00:00:00Z",
+                "2026-04-28T00:00:00Z",
+                hash,
+            ],
+        )
+        .unwrap();
+
+        // Force replay of the v6 step from a v5 snapshot.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS audit_returned_facts;
+             DROP TABLE IF EXISTS memory_search_audit;
+             DROP INDEX IF EXISTS idx_memory_entries_valid_until_id;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM memory_entries WHERE id = 'row-v5'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "v5 row");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_search_audit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "audit table must be re-created");
     }
 }

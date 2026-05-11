@@ -190,54 +190,114 @@ mark new BLs whose body says "not now" with that frontmatter field.
 
 ## Project Status
 
-Phase 1 complete, Phase 2 in progress. The intelligence layer (LLM synthesis
-built on a clustering + provider primitive) shipped mid-April 2026; first
-real `mengdie dream --synthesize` pass landed 13 syntheses against the
-production DB (empirical results in `docs/backlog/BL-clustering-validation.md`).
+**v0.0.1 cut 2026-05-10**: minimum-viable AE-brain shipped on
+`feature/v0.0.1-rebuild` (73 commits ahead of pre-rebuild `main`).
+Theme: narrow OSS adoption, keep working in-house code (per
+`docs/v0.0.1-rebuild-plan.md` thesis + `docs/discussions/026-rust-oss-
+survey/analysis.md` 14-library scorecard).
 
-**Completed plan cycles** (all reviewed PASS unless noted):
+**Phase 1 history** (kept for context — these are v0.x plans before
+the v0.0.1 rebuild branch existed; the code they describe is part of
+the "keep in-house" substrate):
 
 1. `docs/plans/001-mvp-phase1.md` — Core MVP (MCP server, search, ingest, dreaming, contradiction)
 2. `docs/plans/002-close-the-loop.md` — AE integration (knowledge capture, watcher library, ae:analyze injection)
-3. `docs/plans/003-phase-1.1.md` — API contract correctness + skill wiring (enums, Phase C capture)
+3. `docs/plans/003-phase-1.1.md` — API contract correctness + skill wiring
 4. `docs/plans/004-search-quality-fixes.md` — Dreaming threshold + FTS5 tokenization
-5. `docs/plans/005-project-naming.md` — Human-readable project_id (survives git remote changes)
-6. `docs/plans/007-llm-provider-claude-cli.md` (BL-005) — LlmProvider trait + ClaudeCliProvider (first of the Phase 2 intelligence primitives)
-7. `docs/plans/008-ci-pipeline-and-lint-debt.md` — Clippy cleanup + local pre-commit hooks + Forgejo CI (shipped as fmt-only; clippy+test deferred via `BL-ci-full-clippy-test`)
+5. `docs/plans/005-project-naming.md` — Human-readable project_id
+6. `docs/plans/007-llm-provider-claude-cli.md` (BL-005) — LlmProvider trait + ClaudeCliProvider
+7. `docs/plans/008-ci-pipeline-and-lint-debt.md` — Clippy cleanup + Forgejo CI
 8. `docs/plans/009-embedding-clustering.md` (BL-006) — Seed-neighborhood cosine clustering
-9. `docs/plans/010-dream-synthesis.md` (BL-007) — `mengdie dream --synthesize`, the first caller of BL-005 + BL-006; first real run produced 13 syntheses
+9. `docs/plans/010-dream-synthesis.md` (BL-007) — `mengdie dream --synthesize`
 
-Plan 006 (dream MVP) was superseded by the 007/009/010 split and is `status: cancelled`.
+Plan 006 (dream MVP) was superseded by 007/009/010 split (`status: cancelled`).
 
-**Next step (current — 2026-04-27)**: **v0.x frozen at v0.8.0; v1.0
-rebuild planning**. v0.8.5 sprint cancelled (all 4 items archived);
-all 13 BLs archived to `.ae/backlog/closed/v0.x-superseded-by-v1/`.
+**v0.0.1 ship contents** (feature dirs, all `status: done`):
 
-Strategic reframe (chat 2026-04-27): mengdie's v0.x is reinventing
-mature Rust infrastructure (swiftide / rig / Qdrant / LanceDB) and
-solving "production data is precious" problems that don't apply
-(data is reproducible from `docs/`). New thesis: mengdie = AE 的大脑
-(serves AE plugin first, post-v1 generic), AE plugin handles
-in-session LLM-driven processing (Karpathy LLM-wiki style), mengdie
-receives AE-distilled propositional facts as ingest input + does
-retrieval + does on-demand reflection ("自成长" via meta-fact
-abstraction).
+| Feature | Scope |
+|---|---|
+| F-001 | sqlite-vec compatibility spike (BL-026 prereq) |
+| F-002 | Persisted domain audit + link tables (`memory_search_audit`, `audit_returned_facts`) |
+| F-003 | Retrieval & ingest layer consolidation (free-fn refactor; `memory_search_audited` orchestrator) |
+| F-004 | Project doc structure overhaul |
+| F-005 | `mengdie audit-stats` CLI subcommand (shipped as `audit-stats` not `doctor`) |
+| F-006 | sqlite-vec adoption replaces `vector.rs` brute-force |
+| Plan 019 | synthesis CLI `--json-schema` adoption (BL-027 Path B) |
 
-**Phase 0 research items** (do BEFORE filing v1 BLs, see
-`docs/v1-rebuild-plan.md`):
-1. Survey open-source Rust libraries (swiftide, rig, Qdrant, LanceDB,
-   sqlite-vec, Tantivy) — what each does, what mengdie reimplements.
-2. Per-library role + integration strategy.
-3. mengdie ↔ AE integration design (push pattern A vs B).
-4. Reflection mechanism (depends on item 2).
+**v0.0.1 thesis** (carried from operator clarification 2026-05-05):
 
-Three deferred open questions: reflection trigger, meta-fact
-confidence, single-table vs split-table.
+> v0.0.1 的目标就是要有个最小可能用的，但避免以后自己重复造轮子的 AE 大脑.
+> *(Minimum-viable AE-brain that avoids re-inventing wheels in future.)*
 
-`feature/v1-rebuild` branch exists but empty. Will resume when Phase 0
-research completes and Phase 1 BLs filed. Until then: no code changes
-to `src/`. v0.8.0 continues to run for operator use; receives no new
-development.
+OSS adoption outcomes (per 026 analysis verdicts):
+
+- **Kept all working in-house code** as planned (fastembed-rs / FTS5 /
+  db.rs / schema.rs / ingest.rs / mcp_tools.rs / parser.rs /
+  dreaming.rs / clustering.rs / synthesis.rs main pipeline /
+  contradiction.rs / llm.rs::ClaudeCliProvider / F-002 audit
+  substrate). Karpathy "don't refactor things that aren't broken"
+  honored.
+- **OSS adopted**: `sqlite-vec` v0.1.9 (F-006); `synthesis.rs` JSON
+  parser replaced with **claude-CLI `--json-schema`** (Path B) — NOT
+  `rig::Extractor` (Path A spike failed 2026-05-08, post-spike
+  re-investigation found CLI-native flags worked). `rig::Extractor`
+  re-evaluation deferred to BL-039 with code-artifact tripwire.
+- **Rejected (026 analysis)**: swiftide / Qdrant / candle / arroy /
+  duckdb-rs / mistral.rs / ollama-rs / community Anthropic clients.
+- **Deferred-with-trigger** (post-v0.0.1): LanceDB (corpus >100k OR
+  p95 vector latency >50ms), Tantivy (multilingual F1 <0.7 OR corpus
+  >5M tokens), `rig::Extractor` re-evaluation (BL-039 — fires on
+  second `LlmProvider` impl or non-claude LLM SDK dep landing).
+
+**Cargo.toml net delta**: +1 line (`sqlite-vec = "0.1.9"`). Within
+the +1~+3 budget set at plan time. BL-027 Path B added 0 deps (CLI
+flags only, no rig adoption).
+
+**Plan 019 retrospective findings** (recorded in
+`docs/reviews/019-synthesis-cli-json-schema.md`):
+
+- **R1**: plan-review must run actual API probes for provider-specific
+  schema assumptions (`oneOf`/`anyOf`/`allOf`/`const`/
+  `additionalProperties:false`/conditional required/wrapper shape/
+  error-shape). Citation alone OK only for plain object schemas. The
+  9-reviewer panel missing Anthropic's input_schema subset on Plan
+  019 cost 6 commits + ~400 LoC before mid-execution schema
+  redesign. Future plan-reviews should fold this as a gate.
+- **R2**: reject path-out-of-scope arguments framed by phantom metered
+  cost when operator runs on flat-fee subscription (Claude Code Pro).
+- **R3**: anchor deferred-decision BL triggers to code artifacts
+  (build_provider arm count / impl LlmProvider count / Cargo.toml
+  deps), not vague human-readable external events.
+
+mengdie's role unchanged: **AE 的大脑** (serves AE plugin first;
+post-v1 generic). AE plugin handles in-session LLM-driven processing
+(Karpathy LLM-wiki style); mengdie receives AE-distilled propositional
+facts + does retrieval + does on-demand reflection ("自成长" via
+meta-fact abstraction).
+
+**Phase 0 research closed** (per `docs/v0.0.1-rebuild-plan.md` — kept
+for audit trail of decisions feeding v0.0.1 ship):
+
+| Item | Outcome |
+|------|---------|
+| 1. OSS library survey (14 candidates) | `docs/discussions/026-rust-oss-survey/analysis.md` scorecard. ADOPT × 2 (sqlite-vec, --json-schema-via-CLI). DEFER × 3 (LanceDB, Tantivy, rig::Extractor). SKIP × 9. |
+| 2. mengdie ↔ AE integration | `docs/discussions/027-industry-state-2026/conclusion.md` — push-primary, watcher.rs as opt-in library, `cmd_import` for cold-start. |
+| 3. Reflection mechanism | `027 T2` — on-demand default + `ReflectionTrigger` trait; salience/composite/debounced filed as deferred BL-024. |
+| 4. Storage shape for facts + meta-facts | `028 conclusion` — split-table (F-002 link table shipped). |
+
+**Branch state at v0.0.1 ship**:
+- 73 commits ahead of pre-rebuild `main` (2026-04-30 → 2026-05-10).
+- `src/` net ~2-3K LoC across 7 features (sqlite-vec replaces ~264
+  LoC brute-force; F-002 audit ~600 LoC new; F-005 audit-stats CLI
+  ~400 LoC; plan 019 ~400 LoC LLM provider + schema; doc/test the
+  rest).
+- 13 deferred BLs (`docs/backlog/unscheduled/BL-029 ~ BL-041`), all
+  trigger-annotated.
+
+**Pending Step F operator action** (not done automatically):
+- `git tag v0.0.1` at the close-out commit.
+- Rename old `main` → `archive/v0.x`; `feature/v0.0.1-rebuild` →
+  new `main`. Requires GitHub default-branch update (operator hands).
 
 **Advisory rule for closing plans**: when `/ae:work` completes all plan
 checkboxes, the completion commit must also update the parent discussion's

@@ -1,3 +1,24 @@
+---
+title: "PRD: AE Plugin Integration for Second Brain"
+type: prd
+status: archived
+archived_on: 2026-05-08
+archived_reason: "Pre-rebuild PRD; predates blueprint.md v0.2 + 027 T1-T5 decisions (push-primary AE↔mengdie integration, on-demand reflection trigger, ReflectionTrigger trait). Superseded by blueprint.md §13 per-milestone PRD convention + §14 doc-stack roles. Body preserved as historical context."
+superseded_by: docs/blueprint.md
+created: 2026-04
+---
+
+> **⚠️ ARCHIVED 2026-05-08** — This pre-rebuild PRD predates blueprint.md
+> v0.2 + discussion 027 T1-T5 decisions. Under the new doc stack
+> (per F-004), AE-plugin integration scope lives under the per-milestone
+> PRD convention (`docs/blueprint.md` §13) — specifically, in
+> `docs/milestones/v0.0.1.prd.md` (filed as F-004 follow-up work).
+>
+> Body preserved below as historical context. Do not implement against
+> this document.
+
+---
+
 # PRD: AE Plugin Integration for Second Brain
 
 ## Why

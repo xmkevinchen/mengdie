@@ -60,15 +60,38 @@ impl Embedder {
     }
 
     /// Generate an embedding for raw text.
+    ///
+    /// Asserts the output is unit-normalized (L2 norm within `1.0 ± 1e-3`)
+    /// at the embedder boundary — see F-006 review challenger #2/#3 +
+    /// cross-family Codex/Gemma. The `vector.rs::search_vector`
+    /// distance-to-similarity formula `score = 1.0 - distance / 2.0`
+    /// assumes this; if fastembed ever stops normalizing (model swap,
+    /// upstream regression), the formula silently produces out-of-range
+    /// scores. This runtime check fires in every build profile (NOT
+    /// `debug_assert!`), so the assumption is verified on every embed
+    /// call in production — not only when an operator runs the
+    /// `#[ignore]` integration test in `tests/embeddings.rs`.
     pub fn embed_text(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
         let embeddings = self
             .model
             .embed(vec![text.to_string()], None)
             .context("embedding generation failed")?;
-        embeddings
+        let embedding = embeddings
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("no embedding returned"))
+            .ok_or_else(|| anyhow::anyhow!("no embedding returned"))?;
+        let norm_sq: f32 = embedding.iter().map(|x| x * x).sum();
+        let norm = norm_sq.sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "fastembed must produce unit-normalized vectors (norm ≈ 1.0); \
+             got norm = {norm} (norm² = {norm_sq}). The vector.rs \
+             similarity formula `1.0 - distance / 2.0` assumes this; \
+             if fastembed has changed normalization behavior, either \
+             re-normalize at this boundary or rewrite the formula in \
+             vector.rs to match the actual output range."
+        );
+        Ok(embedding)
     }
 
     /// Generate an embedding with metadata-in-chunk encoding.

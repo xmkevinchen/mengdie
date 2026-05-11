@@ -7,6 +7,7 @@ use super::decay;
 use super::llm::LlmProvider;
 use super::synthesis::{
     build_synthesis_prompt, parse_synthesis_response, SynthesisInput, SynthesisOutcome,
+    SYNTHESIS_OUTPUT_SCHEMA,
 };
 
 // -- Default thresholds --
@@ -490,7 +491,10 @@ pub async fn run_synthesis_pass(
             continue;
         }
 
-        let raw = match provider.complete(&system, &user).await {
+        let raw = match provider
+            .complete_structured(&system, &user, SYNTHESIS_OUTPUT_SCHEMA)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -709,6 +713,18 @@ mod tests {
             let payload = self.payload.clone();
             Box::pin(async move { Ok(payload) })
         }
+        // Plan 019 Step 3: dreaming.rs now invokes complete_structured.
+        // Mock delegates to the same canned payload — schema is ignored
+        // (the mock's `payload` is already a JSON string mimicking what
+        // claude-CLI's `.structured_output` field would carry).
+        fn complete_structured<'a>(
+            &'a self,
+            system: &'a str,
+            prompt: &'a str,
+            _schema: &'a str,
+        ) -> LlmFuture<'a> {
+            self.complete(system, prompt)
+        }
         fn model(&self) -> &str {
             "stub-fixed"
         }
@@ -718,6 +734,16 @@ mod tests {
     impl LlmProvider for PanicProvider {
         fn complete<'a>(&'a self, _system: &'a str, _prompt: &'a str) -> LlmFuture<'a> {
             Box::pin(async { panic!("PanicProvider::complete must not be called in dry_run") })
+        }
+        fn complete_structured<'a>(
+            &'a self,
+            _system: &'a str,
+            _prompt: &'a str,
+            _schema: &'a str,
+        ) -> LlmFuture<'a> {
+            Box::pin(async {
+                panic!("PanicProvider::complete_structured must not be called in dry_run")
+            })
         }
         fn model(&self) -> &str {
             "stub-panic"
@@ -739,6 +765,14 @@ mod tests {
                     Ok(payload)
                 }
             })
+        }
+        fn complete_structured<'a>(
+            &'a self,
+            system: &'a str,
+            prompt: &'a str,
+            _schema: &'a str,
+        ) -> LlmFuture<'a> {
+            self.complete(system, prompt)
         }
         fn model(&self) -> &str {
             "stub-timeout-first"
@@ -1017,6 +1051,14 @@ mod tests {
                 OK_JSON.to_string()
             };
             Box::pin(async move { Ok(payload) })
+        }
+        fn complete_structured<'a>(
+            &'a self,
+            system: &'a str,
+            prompt: &'a str,
+            _schema: &'a str,
+        ) -> LlmFuture<'a> {
+            self.complete(system, prompt)
         }
         fn model(&self) -> &str {
             "stub-cluster-size-aware"
