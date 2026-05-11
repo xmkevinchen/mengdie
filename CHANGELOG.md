@@ -6,8 +6,54 @@ this project follows [semantic versioning](https://semver.org/).
 
 ## Unreleased
 
+(nothing scheduled — next sprint not started)
+
+---
+
+## v0.0.1 — 2026-05-10 (rebuild branch ship)
+
+**Branch**: `feature/v0.0.1-rebuild` (73 commits 2026-04-30 → 2026-05-10,
+including this CHANGELOG entry).
+**Theme**: minimum-viable AE-brain that avoids re-inventing wheels —
+narrow OSS adoption, keep working in-house code (per
+`docs/v0.0.1-rebuild-plan.md` thesis and `docs/discussions/026-rust-
+oss-survey/analysis.md` 14-library scorecard).
+
 ### Added
 
+- **F-006 (BL-026): sqlite-vec adoption.** Replaces the 264 LoC
+  full-table-scan brute-force cosine similarity in `src/core/vector.rs`
+  with `sqlite-vec` v0.1.9's `vec0` virtual table + triggers for the
+  vector index. Loads via `rusqlite` extension API at DB-open time.
+  fastembed-rs unit-vector invariant asserted at the embedder boundary
+  (`assert!`, not `debug_assert!`) so the similarity formula's
+  unit-norm assumption can never silently drift. **Cargo.toml net
+  change: +1 line** (`sqlite-vec = "0.1.9"`).
+- **F-005 (BL-014): `mengdie audit-stats` CLI subcommand.** Reads
+  `audit_count`, `link_count`, `oldest_row`, `newest_row`,
+  `supersession_count_30d`, `audit_write_failures` from the F-002
+  audit tables. Emits human table + script-facing JSON via
+  `--format {table,json}`. Health enum: `ok` / `not_yet_triggered` /
+  `degraded` with actionable hint. Note: shipped as `audit-stats`,
+  not `doctor` (working name in `docs/v0.0.1-rebuild-plan.md`) —
+  operator convention favored aligning with the underlying
+  audit-table feature.
+- **Plan 019 (BL-027 Path B): synthesis CLI structured-output.**
+  Replaces ~30 LoC brace-depth scanner in `src/core/synthesis.rs` with
+  claude-CLI's native `--json-schema` + `--output-format json` flags.
+  Schema lives in `resources/synthesis-output-schema.json` (embedded
+  via `include_str!`), **flat-shape with `skip:bool` discriminator**
+  (the originally-planned `oneOf` was rejected mid-execution —
+  Anthropic API does not accept top-level `oneOf`/`allOf`/`anyOf` in
+  tool `input_schema`; see `docs/spikes/019-rate-limit-measurement.md`
+  schema-shape post-mortem). `LlmProvider::complete_structured` added
+  as a sibling trait method with default impl returning
+  `UnknownProvider`. New error variants `StructuredOutputMissing` +
+  `StructuredOutputWrapperInvalid` both carry "(verify claude >=
+  2.1.138 supports --json-schema)" diagnostic suffix. Production run
+  on personal KB: 5/5 syntheses, 0 errors, ~$0.40 USD-equivalent,
+  ~275K tokens (Pro flat-fee actual: $0). **Cargo.toml net change: 0
+  lines** (CLI flags, no new deps).
 - **F-002 (BL-006): persisted domain audit table + link table.** Two new
   SQLite tables (`memory_search_audit`, `audit_returned_facts`) plus 3
   indexes ship via the v6 schema migration. Every `memory_search` call
@@ -78,6 +124,59 @@ this project follows [semantic versioning](https://semver.org/).
   changed to be runtime-asserted at every connection-open. Closes
   BL-015 (filed at F-002 Step 1, triggered when bundled-rusqlite's
   default tripped F-002 Step 4 unit tests with FK constraint errors).
+- **Plan 019: brace-depth scanner deleted from `src/core/synthesis.rs`**.
+  `extract_first_json_object` (~30 LoC byte-scanner with string-state
+  tracking) replaced by direct `serde_json::from_str` against
+  claude-CLI's `--json-schema` structured-output payload. 7 obsolete
+  unit tests removed (preamble/postamble/markdown-fence/escape-quote/
+  inner-brace cases — all structurally impossible under token-decode
+  constraint); 1 test repurposed with audit-trail comment preserving
+  the original design-intent name.
+
+### Retrospective (v0.0.1 cycle close)
+
+Plan 019 final review captured three process-level findings worth
+recording at the version boundary:
+
+1. **Plan-review must run actual API probes for provider-specific
+   schema assumptions.** The 9-reviewer plan-review for BL-027 endorsed
+   a `oneOf` schema design that Anthropic API later rejected at runtime;
+   no reviewer had probed the actual API subset. Citation alone is
+   sufficient for plain object schemas; **probe required for
+   `oneOf`/`anyOf`/`allOf`/`const`/`additionalProperties:false`/
+   conditional required/wrapper shape/error-shape assumptions**. Costs
+   ~5 min upfront; saved hours mid-execution would-have-been.
+2. **Reject path-out-of-scope arguments framed by phantom metered cost
+   when the operator runs on flat-fee subscription.** Plan 019's "Out
+   of scope" rejected Path C (direct Anthropic HTTP API) citing
+   per-token cost — irrelevant under Claude Code Pro. Correct
+   rejection rationale would have been "preserves credential-delegation
+   privacy posture" (architectural), not "$0.24 per call" (false under
+   the deployment target).
+3. **Anchor BL triggers to code artifacts, not external events.**
+   BL-039 originally specified "when second LLM provider lands" — a
+   vague human-readable event. Sharpened at v0.0.1 ship to three
+   concrete code-artifact tripwires (second `build_provider` match arm
+   / second `impl LlmProvider for X` / Cargo.toml non-claude LLM dep)
+   plus an inline NOTE comment at the `build_provider` site itself —
+   the comment IS the operational tripwire, no external review cadence
+   needed.
+
+These findings live in `docs/reviews/019-synthesis-cli-json-schema.md`
+"Retrospective findings" + Mengdie memory (3 captures, IDs in the same
+review file). Forward sprints should consult them.
+
+### Branch state at v0.0.1 cut
+
+- 73 commits ahead of pre-rebuild `main` (2026-04-30 → 2026-05-10).
+- 6 features done (F-001 spike + F-002 audit substrate + F-003
+  retrieval/ingest consolidation + F-004 doc structure + F-005
+  audit-stats CLI + F-006 sqlite-vec adoption) + plan 019 (BL-027
+  Path B synthesis structured-output).
+- Cargo.toml net delta: +1 line (`sqlite-vec = "0.1.9"`).
+  Within the +1~+3 budget set by `docs/v0.0.1-rebuild-plan.md`.
+- 13 deferred BLs filed under `docs/backlog/unscheduled/` (BL-029 ~
+  BL-041); all carry trigger conditions and are explicit defer-not-now.
 
 ## v0.8.0 — 2026-04-24
 
