@@ -13,6 +13,7 @@ use common::Harness;
 use mengdie::core::db::NewMemory;
 use mengdie::core::mcp_tools::{
     GetParams, IngestParams, InvalidateParams, KnowledgeType, SearchParams, SourceType,
+    StatusParams,
 };
 
 /// Build a minimal NewMemory (for direct `Db::insert_memory_with_id` calls).
@@ -444,5 +445,110 @@ async fn get_bumps_recall_count_only_not_avg_relevance() {
     assert_eq!(
         after.avg_relevance, pre_avg,
         "avg_relevance MUST NOT change — direct lookup has no relevance signal"
+    );
+}
+
+// =====================================================================
+// F-011: memory_status MCP tool
+// =====================================================================
+
+#[tokio::test]
+async fn status_empty_db_returns_zero_counts() {
+    let h = Harness::new();
+    let out = h
+        .status(StatusParams {
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.error.is_none());
+    assert_eq!(out.total_entries, 0);
+    assert_eq!(out.longterm_count, 0);
+    assert_eq!(out.synthesis_count, 0);
+    assert!(out.by_source_type.is_empty());
+    assert!(out.last_ingest_at.is_none());
+    assert_eq!(out.project_id, "test-project");
+}
+
+#[tokio::test]
+async fn status_populated_db_returns_correct_breakdown() {
+    let h = Harness::new();
+    // Ingest 3 facts via raw db (direct insert; no embedding cost per fact).
+    h.db.insert_memory(sample_new_memory("test-project", "A", "C-A"))
+        .unwrap();
+    h.db.insert_memory(sample_new_memory("test-project", "B", "C-B"))
+        .unwrap();
+    h.db.insert_memory(sample_new_memory("test-project", "C", "C-C"))
+        .unwrap();
+
+    let out = h
+        .status(StatusParams {
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.error.is_none());
+    assert_eq!(out.total_entries, 3);
+    assert_eq!(out.by_source_type.get("conclusion").copied(), Some(3));
+    assert!(out.last_ingest_at.is_some(), "expected MAX(created_at) set");
+}
+
+#[tokio::test]
+async fn status_scope_global_aggregates_across_projects() {
+    let h = Harness::new();
+    h.db.insert_memory(sample_new_memory("test-project", "A", "C-A"))
+        .unwrap();
+    h.db.insert_memory(sample_new_memory("other-project", "B", "C-B"))
+        .unwrap();
+    h.db.insert_memory(sample_new_memory("third-project", "C", "C-C"))
+        .unwrap();
+
+    // Default scope (current project) sees only 1.
+    let scoped = h
+        .status(StatusParams {
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert_eq!(scoped.total_entries, 1);
+    assert_eq!(scoped.project_id, "test-project");
+
+    // scope=global aggregates all 3.
+    let global = h
+        .status(StatusParams {
+            project_id: None,
+            scope: Some("global".to_string()),
+        })
+        .await;
+    assert_eq!(global.total_entries, 3);
+    assert_eq!(global.project_id, "<global>");
+}
+
+#[tokio::test]
+async fn status_is_read_only_does_not_bump_counters() {
+    let h = Harness::new();
+    let id =
+        h.db.insert_memory(sample_new_memory("test-project", "A", "C-A"))
+            .unwrap();
+    let before = h.db.get_memory(&id).unwrap().unwrap();
+
+    // Call status 3x.
+    for _ in 0..3 {
+        let _ = h
+            .status(StatusParams {
+                project_id: None,
+                scope: None,
+            })
+            .await;
+    }
+
+    let after = h.db.get_memory(&id).unwrap().unwrap();
+    assert_eq!(
+        after.recall_count, before.recall_count,
+        "memory_status MUST NOT bump recall_count (read-only)"
+    );
+    assert_eq!(
+        after.avg_relevance, before.avg_relevance,
+        "memory_status MUST NOT touch avg_relevance"
     );
 }

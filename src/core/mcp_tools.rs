@@ -10,7 +10,7 @@ use super::embeddings::Embedder;
 use super::metrics;
 use std::sync::{Arc, Mutex};
 
-/// MCP server with 4 tools: memory_search, memory_ingest, memory_get, memory_invalidate.
+/// MCP server with 5 tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status.
 pub struct MengdieServer {
     tool_router: ToolRouter<Self>,
     db: Db,
@@ -107,6 +107,14 @@ pub struct GetParams {
     /// Override project_id (default: inferred from cwd at server startup).
     pub project_id: Option<String>,
     /// Search scope: omit for current project, "global" for all projects.
+    pub scope: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct StatusParams {
+    /// Override project_id (default: inferred from cwd at server startup).
+    pub project_id: Option<String>,
+    /// Scope: omit for current project, "global" for cross-project totals.
     pub scope: Option<String>,
 }
 
@@ -248,6 +256,49 @@ pub struct InvalidateOutput {
     /// ambiguous prefix (collision), or DB error. Caller should inspect
     /// this before treating `success: false` as a generic failure.
     /// F-009.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Audit-pipeline view nested into `StatusOutput` (F-011). Mirrors
+/// `db::AuditStats` field shape with RFC3339 strings for timestamps.
+#[derive(Serialize, schemars::JsonSchema, Default)]
+pub struct AuditView {
+    pub audit_count: i64,
+    pub link_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_row: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_row: Option<String>,
+    pub supersession_count_30d: i64,
+    pub audit_write_failures: i64,
+}
+
+/// DB-health response for `memory_status` (F-011). Scoped to the
+/// requested project (or "global" via scope param).
+#[derive(Serialize, schemars::JsonSchema, Default)]
+pub struct StatusOutput {
+    /// Project context for this snapshot. `"<global>"` when caller passed
+    /// `scope: "global"`; otherwise the resolved project_id.
+    pub project_id: String,
+    pub total_entries: i64,
+    pub longterm_count: i64,
+    pub synthesis_count: i64,
+    /// Per-source_type entry counts (conclusion / review / plan / analysis
+    /// / retrospect / synthesis). Missing keys = 0.
+    pub by_source_type: std::collections::BTreeMap<String, i64>,
+    /// `MAX(created_at)` across scope; `None` when DB is empty in scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ingest_at: Option<String>,
+    /// Persistent counters from the metrics table — search_count /
+    /// search_nonempty_count / ingest_count / conflict_count /
+    /// audit_write_failures and any future additions. Always global
+    /// (not project-scoped) since metrics counters are process-wide.
+    pub metrics: std::collections::BTreeMap<String, i64>,
+    /// Audit-pipeline nested snapshot (always global; audit table itself
+    /// is not project-scoped at the row level today).
+    pub audit: AuditView,
+    /// Non-empty when status could not be assembled (DB error).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -586,6 +637,75 @@ impl MengdieServer {
     }
 
     #[tool(
+        name = "memory_status",
+        description = "Snapshot of mengdie DB health: entry counts (total / longterm / synthesis / per-source-type), last ingest timestamp, operational counters (search/ingest/conflict/audit-failure), and audit-pipeline stats. Read-only. Scoped to current project by default; pass scope='global' for cross-project totals. Use this to distinguish 'DB is empty' from 'query missed' when memory_search returns nothing, or to verify F-002 audit pipeline is healthy."
+    )]
+    pub async fn status(&self, Parameters(params): Parameters<StatusParams>) -> Json<StatusOutput> {
+        // F-011: project scope resolution mirrors memory_search / memory_get.
+        let pid_owned = params
+            .project_id
+            .clone()
+            .unwrap_or_else(|| self.default_project_id.clone());
+        let scope_for_lookup: Option<&str> = match params.scope.as_deref() {
+            Some("global") => None,
+            _ => Some(pid_owned.as_str()),
+        };
+        let project_id_label: String = match scope_for_lookup {
+            Some(p) => p.to_string(),
+            None => "<global>".to_string(),
+        };
+
+        // Breakdown — scoped to project (or global)
+        let breakdown = match self.db.status_breakdown(scope_for_lookup) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(error = %e, "status_breakdown failed");
+                return Json(StatusOutput {
+                    project_id: project_id_label,
+                    error: Some(format!("DB error during status breakdown: {e}")),
+                    ..Default::default()
+                });
+            }
+        };
+
+        // Metrics — always global; counters are process-wide, not project-scoped
+        let metrics: std::collections::BTreeMap<String, i64> = self
+            .db
+            .list_metrics()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        // Audit nested — always global at row level (audit table not scoped)
+        let audit_view: AuditView = match self.db.audit_stats() {
+            Ok(s) => AuditView {
+                audit_count: s.audit_count,
+                link_count: s.link_count,
+                oldest_row: s.oldest_row,
+                newest_row: s.newest_row,
+                supersession_count_30d: s.supersession_count_30d,
+                audit_write_failures: s.audit_write_failures,
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "audit_stats failed in memory_status; returning empty audit view");
+                AuditView::default()
+            }
+        };
+
+        Json(StatusOutput {
+            project_id: project_id_label,
+            total_entries: breakdown.total,
+            longterm_count: breakdown.longterm_count,
+            synthesis_count: breakdown.synthesis_count,
+            by_source_type: breakdown.by_source_type,
+            last_ingest_at: breakdown.last_ingest_at,
+            metrics,
+            audit: audit_view,
+            error: None,
+        })
+    }
+
+    #[tool(
         name = "memory_invalidate",
         description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit. Accepts either a full UUID (36 chars) or an 8+ char prefix; collision returns an error listing matches."
     )]
@@ -708,8 +828,8 @@ impl MengdieServer {
 impl ServerHandler for MengdieServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_get, memory_invalidate. \
-Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output, (3) get full content of a cited fact via memory_get when search snippet is insufficient. \
+            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status. \
+Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output, (3) get full content of a cited fact via memory_get when search snippet is insufficient, (4) memory_status to check DB health when results seem off. \
 Conflict resolution: memory_ingest returns detected conflicts. For 'evolution candidate' conflicts (high similarity, same entity tags), call memory_invalidate with superseded_by=new_entry_id to link old→new. For 'recent conflict', surface to the user before resolving. \
 For atomic resolution, pass resolves=[old_id, ...] to memory_ingest to insert and invalidate in one transaction. \
 ID shape: memory_search returns short_id (8-char UUID prefix) alongside full id; memory_get and memory_invalidate accept either form (≥8 chars).")

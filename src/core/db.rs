@@ -53,6 +53,26 @@ pub struct DbStats {
     pub recalled: i64,
 }
 
+/// Status breakdown returned by `Db::status_breakdown()` — F-011 input
+/// to the `memory_status` MCP tool. Scoped to a project_id (or global
+/// when None at call time). Companion to `DbStats` (which is global +
+/// computes total/valid/longterm/recalled but is not project-scoped).
+#[derive(Debug, Clone)]
+pub struct StatusBreakdown {
+    /// Total entries in scope.
+    pub total: i64,
+    /// Entries with `is_longterm = 1` in scope.
+    pub longterm_count: i64,
+    /// Entries with `source_type = 'synthesis'` in scope (also present
+    /// in `by_source_type`; pulled out for direct access since it's the
+    /// primary indicator of "dreaming has run").
+    pub synthesis_count: i64,
+    /// Per-source_type entry counts in scope.
+    pub by_source_type: std::collections::BTreeMap<String, i64>,
+    /// `MAX(created_at)` of entries in scope; `None` on empty table.
+    pub last_ingest_at: Option<String>,
+}
+
 /// Audit-pipeline health snapshot returned by `Db::audit_stats()`.
 ///
 /// The six fields are consumed by the `mengdie audit-stats` CLI subcommand
@@ -841,6 +861,94 @@ impl Db {
             valid,
             longterm,
             recalled,
+        })
+    }
+
+    /// Status breakdown for the `memory_status` MCP tool (F-011): aggregate
+    /// counts + last-ingest timestamp scoped to a given project_id (or
+    /// global when `project_id` is `None`). Single connection lock so the
+    /// snapshot is consistent. Pairs with `audit_stats()` + `list_metrics()`
+    /// to compose the full status response in `mcp_tools::status`.
+    pub fn status_breakdown(&self, project_id: Option<&str>) -> anyhow::Result<StatusBreakdown> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+
+        // total entries (scoped or global)
+        let total: i64 = match project_id {
+            Some(pid) => conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |r| r.get(0))?,
+        };
+
+        let longterm_count: i64 = match project_id {
+            Some(pid) => conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries
+                 WHERE is_longterm = 1 AND project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE is_longterm = 1",
+                [],
+                |r| r.get(0),
+            )?,
+        };
+
+        // by_source_type breakdown — fixed enum set, so an empty count is
+        // genuine information (e.g., synthesis_count = 0 means no dreaming
+        // synthesis run yet for this project).
+        let mut by_source_type: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
+        {
+            let sql = match project_id {
+                Some(_) => {
+                    "SELECT source_type, COUNT(*) FROM memory_entries
+                            WHERE project_id = ?1 GROUP BY source_type"
+                }
+                None => {
+                    "SELECT source_type, COUNT(*) FROM memory_entries
+                         GROUP BY source_type"
+                }
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows = match project_id {
+                Some(pid) => stmt
+                    .query_map(params![pid], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+                None => stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            };
+            for (st, cnt) in rows {
+                by_source_type.insert(st, cnt);
+            }
+        }
+
+        let synthesis_count: i64 = by_source_type.get("synthesis").copied().unwrap_or(0);
+
+        let last_ingest_at: Option<String> = match project_id {
+            Some(pid) => conn.query_row(
+                "SELECT MAX(created_at) FROM memory_entries WHERE project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row("SELECT MAX(created_at) FROM memory_entries", [], |r| {
+                r.get(0)
+            })?,
+        };
+
+        Ok(StatusBreakdown {
+            total,
+            longterm_count,
+            synthesis_count,
+            by_source_type,
+            last_ingest_at,
         })
     }
 

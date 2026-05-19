@@ -34,7 +34,7 @@ use mengdie::core::db::Db;
 use mengdie::core::embeddings::Embedder;
 use mengdie::core::mcp_tools::{
     GetOutput, GetParams, IngestOutput, IngestParams, InvalidateOutput, InvalidateParams,
-    MengdieServer, SearchOutput, SearchParams,
+    MengdieServer, SearchOutput, SearchParams, StatusOutput, StatusParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 
@@ -129,6 +129,10 @@ impl Harness {
 
     pub async fn invalidate(&self, params: InvalidateParams) -> InvalidateOutput {
         self.server.invalidate(Parameters(params)).await.0
+    }
+
+    pub async fn status(&self, params: StatusParams) -> StatusOutput {
+        self.server.status(Parameters(params)).await.0
     }
 }
 
