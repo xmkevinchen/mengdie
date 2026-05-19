@@ -294,11 +294,6 @@ for audit trail of decisions feeding v0.0.1 ship):
 - 13 deferred BLs (`docs/backlog/unscheduled/BL-029 ~ BL-041`), all
   trigger-annotated.
 
-**Pending Step F operator action** (not done automatically):
-- `git tag v0.0.1` at the close-out commit.
-- Rename old `main` → `archive/v0.x`; `feature/v0.0.1-rebuild` →
-  new `main`. Requires GitHub default-branch update (operator hands).
-
 **Advisory rule for closing plans**: when `/ae:work` completes all plan
 checkboxes, the completion commit must also update the parent discussion's
 `status:` and `pipeline.work:` frontmatter — otherwise the dashboard and
