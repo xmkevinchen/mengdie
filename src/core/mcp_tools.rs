@@ -266,7 +266,7 @@ impl MengdieServer {
         name = "memory_search",
         description = "Search Mengdie memories by query. Returns ranked results with title, snippet (first 200 characters of content, not full text), score, and provenance. Results are ranked by hybrid FTS5 + vector similarity merged via Reciprocal Rank Fusion. Use min_score to filter low-relevance results. Use scope='global' to search across all projects (default: current project only)."
     )]
-    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
+    pub async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Json<SearchOutput> {
         if params.query.len() > MAX_QUERY_LEN {
             return Json(SearchOutput {
                 results: vec![],
@@ -372,7 +372,7 @@ impl MengdieServer {
         name = "memory_ingest",
         description = "Ingest a new memory into Mengdie. Returns entry_id and any detected conflicts (evolution candidates or recent conflicts with existing memories sharing entity tags). Pass resolves=[id, ...] to atomically insert this memory and invalidate the listed memories in one transaction. See server instructions for the full conflict resolution workflow."
     )]
-    async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
+    pub async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Json<IngestOutput> {
         if params.content.len() > MAX_CONTENT_LEN {
             return Json(IngestOutput {
                 entry_id: String::new(),
@@ -467,7 +467,7 @@ impl MengdieServer {
         name = "memory_get",
         description = "Fetch the full content of a single memory by ID. Returns the complete fact (not a 200-char snippet) plus provenance, validity, supersession, and recall stats. Side effect: increments recall_count + last_recalled (avg_relevance is NOT touched — direct lookup has no meaningful relevance score). Accepts either a full UUID (36 chars) or an 8+ char prefix; prefix is scoped to the current project unless scope='global'. Use after memory_search to expand a cited fact."
     )]
-    async fn get(&self, Parameters(params): Parameters<GetParams>) -> Json<GetOutput> {
+    pub async fn get(&self, Parameters(params): Parameters<GetParams>) -> Json<GetOutput> {
         // F-010: project scope resolution mirrors memory_search.
         let pid_owned = params
             .project_id
@@ -576,7 +576,7 @@ impl MengdieServer {
         name = "memory_invalidate",
         description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit. Accepts either a full UUID (36 chars) or an 8+ char prefix; collision returns an error listing matches."
     )]
-    async fn invalidate(
+    pub async fn invalidate(
         &self,
         Parameters(params): Parameters<InvalidateParams>,
     ) -> Json<InvalidateOutput> {
