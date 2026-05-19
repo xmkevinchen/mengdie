@@ -10,7 +10,7 @@ use super::embeddings::Embedder;
 use super::metrics;
 use std::sync::{Arc, Mutex};
 
-/// MCP server with 5 tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status.
+/// MCP server with 6 tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status, memory_entity_facts.
 pub struct MengdieServer {
     tool_router: ToolRouter<Self>,
     db: Db,
@@ -115,6 +115,18 @@ pub struct StatusParams {
     /// Override project_id (default: inferred from cwd at server startup).
     pub project_id: Option<String>,
     /// Scope: omit for current project, "global" for cross-project totals.
+    pub scope: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct EntityFactsParams {
+    /// Entity name to look up. Matches the canonical lowercased form
+    /// stored in the `entities` table — ingest.rs:77 lowercases at
+    /// ingest time, so callers should pass the lowercased term.
+    pub entity_name: String,
+    /// Override project_id (default: inferred from cwd at server startup).
+    pub project_id: Option<String>,
+    /// Scope: omit for current project, "global" for cross-project search.
     pub scope: Option<String>,
 }
 
@@ -299,6 +311,18 @@ pub struct StatusOutput {
     /// is not project-scoped at the row level today).
     pub audit: AuditView,
     /// Non-empty when status could not be assembled (DB error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// F-007 entity_facts response: facts tagged with a given entity name.
+/// Item shape mirrors SearchResultItem so callers can re-use existing
+/// rendering / parsing paths.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct EntityFactsOutput {
+    pub entity_name: String,
+    pub facts: Vec<SearchResultItem>,
+    /// Non-empty on DB error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -706,6 +730,96 @@ impl MengdieServer {
     }
 
     #[tool(
+        name = "memory_entity_facts",
+        description = "List all VALID (non-invalidated, non-superseded) facts tagged with a given entity name. Returns SearchResultItem shape, BUT score field is `recall_count` (i64 cast to f64), NOT a 0.0-1.0 similarity score — entity-tag lookup has no relevance signal. Results ordered by recall_count desc (most-consulted facts surface first). Use this for 'show me everything related to <X>' queries when memory_search's semantic match isn't specific enough. Scoped to current project unless scope='global'."
+    )]
+    pub async fn entity_facts(
+        &self,
+        Parameters(params): Parameters<EntityFactsParams>,
+    ) -> Json<EntityFactsOutput> {
+        // F-007: project scope resolution mirrors memory_search.
+        let pid_owned = params
+            .project_id
+            .clone()
+            .unwrap_or_else(|| self.default_project_id.clone());
+        let scope_for_lookup: Option<&str> = match params.scope.as_deref() {
+            Some("global") => None,
+            _ => Some(pid_owned.as_str()),
+        };
+
+        let fact_ids = match self
+            .db
+            .facts_with_entity(&params.entity_name, scope_for_lookup)
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!(error = %e, entity = %params.entity_name, "facts_with_entity failed");
+                return Json(EntityFactsOutput {
+                    entity_name: params.entity_name,
+                    facts: vec![],
+                    error: Some(format!("DB error: {e}")),
+                });
+            }
+        };
+
+        // Hydrate each fact + map to SearchResultItem shape.
+        // F-007 review fixup (challenger #3): filter out invalidated /
+        // superseded facts (`valid_until IS NOT NULL`). Pre-fixup the
+        // tool silently returned stale facts, which is misleading for
+        // "show me current knowledge about X" queries. Callers needing
+        // the historical view can grep memory_entries directly.
+        let mut items: Vec<SearchResultItem> = Vec::with_capacity(fact_ids.len());
+        for fid in &fact_ids {
+            match self.db.get_memory(fid) {
+                Ok(Some(e)) => {
+                    if e.valid_until.is_some() {
+                        // Skip invalidated/superseded entries — they're
+                        // historical, not current state.
+                        continue;
+                    }
+                    let snippet = e.content.chars().take(200).collect::<String>();
+                    let short_id = e.id.chars().take(8).collect::<String>();
+                    items.push(SearchResultItem {
+                        id: e.id,
+                        short_id,
+                        title: e.title,
+                        source_file: e.source_file,
+                        source_type: e.source_type,
+                        knowledge_type: e.knowledge_type,
+                        entities: e.entities,
+                        // No relevance score in entity-tag lookup; use
+                        // recall_count as a proxy ordering signal —
+                        // facts more frequently consulted bubble up.
+                        score: e.recall_count as f64,
+                        valid_from: e.valid_from,
+                        snippet,
+                    });
+                }
+                Ok(None) => {
+                    // fact_entity row references a deleted memory_entries.id —
+                    // orphan; will surface in F-008 Memory Lint Check 1.
+                    tracing::warn!(fact_id = %fid, "fact_entity row references missing memory_entries; orphan");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, fact_id = %fid, "get_memory failed for fact_entity hit; skipping");
+                }
+            }
+        }
+        // Order by recall_count desc (score field), so most-consulted facts surface first.
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Json(EntityFactsOutput {
+            entity_name: params.entity_name,
+            facts: items,
+            error: None,
+        })
+    }
+
+    #[tool(
         name = "memory_invalidate",
         description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit. Accepts either a full UUID (36 chars) or an 8+ char prefix; collision returns an error listing matches."
     )]
@@ -828,8 +942,8 @@ impl MengdieServer {
 impl ServerHandler for MengdieServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status. \
-Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output, (3) get full content of a cited fact via memory_get when search snippet is insufficient, (4) memory_status to check DB health when results seem off. \
+            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status, memory_entity_facts. \
+Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output, (3) get full content of a cited fact via memory_get when search snippet is insufficient, (4) memory_status to check DB health, (5) memory_entity_facts to list all facts tagged with a specific entity name (e.g., 'sqlite-vec'). \
 Conflict resolution: memory_ingest returns detected conflicts. For 'evolution candidate' conflicts (high similarity, same entity tags), call memory_invalidate with superseded_by=new_entry_id to link old→new. For 'recent conflict', surface to the user before resolving. \
 For atomic resolution, pass resolves=[old_id, ...] to memory_ingest to insert and invalidate in one transaction. \
 ID shape: memory_search returns short_id (8-char UUID prefix) alongside full id; memory_get and memory_invalidate accept either form (≥8 chars).")

@@ -33,8 +33,9 @@ use std::sync::OnceLock;
 use mengdie::core::db::Db;
 use mengdie::core::embeddings::Embedder;
 use mengdie::core::mcp_tools::{
-    GetOutput, GetParams, IngestOutput, IngestParams, InvalidateOutput, InvalidateParams,
-    MengdieServer, SearchOutput, SearchParams, StatusOutput, StatusParams,
+    EntityFactsOutput, EntityFactsParams, GetOutput, GetParams, IngestOutput, IngestParams,
+    InvalidateOutput, InvalidateParams, MengdieServer, SearchOutput, SearchParams, StatusOutput,
+    StatusParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 
@@ -133,6 +134,10 @@ impl Harness {
 
     pub async fn status(&self, params: StatusParams) -> StatusOutput {
         self.server.status(Parameters(params)).await.0
+    }
+
+    pub async fn entity_facts(&self, params: EntityFactsParams) -> EntityFactsOutput {
+        self.server.entity_facts(Parameters(params)).await.0
     }
 }
 

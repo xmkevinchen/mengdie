@@ -138,6 +138,9 @@ pub fn ingest_text(
     project_id: &str,
 ) -> anyhow::Result<IngestResult> {
     let (mem, conflicts) = prepare_memory(db, embedder, content, &metadata, project_id)?;
+    // F-007 dual-write happens atomically inside db::insert_memory_inner
+    // (under the same connection lock as the memory_entries INSERT) —
+    // no separate materialization needed here.
     let entry_id = db.insert_memory(mem)?;
     Ok(IngestResult {
         entry_id,
@@ -168,6 +171,9 @@ pub fn ingest_text_with_resolves(
     resolves: &[String],
 ) -> anyhow::Result<IngestResult> {
     let (mem, conflicts) = prepare_memory(db, embedder, content, &metadata, project_id)?;
+    // F-007 dual-write happens atomically inside
+    // db::insert_memory_resolving (under the same transaction as the
+    // INSERT + supersession UPDATEs).
     let entry_id = db.insert_memory_resolving(mem, resolves)?;
     Ok(IngestResult {
         entry_id,

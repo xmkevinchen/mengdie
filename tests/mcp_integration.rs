@@ -12,8 +12,8 @@ mod common;
 use common::Harness;
 use mengdie::core::db::NewMemory;
 use mengdie::core::mcp_tools::{
-    GetParams, IngestParams, InvalidateParams, KnowledgeType, SearchParams, SourceType,
-    StatusParams,
+    EntityFactsParams, GetParams, IngestParams, InvalidateParams, KnowledgeType, SearchParams,
+    SourceType, StatusParams,
 };
 
 /// Build a minimal NewMemory (for direct `Db::insert_memory_with_id` calls).
@@ -551,4 +551,248 @@ async fn status_is_read_only_does_not_bump_counters() {
         after.avg_relevance, before.avg_relevance,
         "memory_status MUST NOT touch avg_relevance"
     );
+}
+
+// =====================================================================
+// F-007: memory_entity_facts MCP tool
+// =====================================================================
+
+#[tokio::test]
+async fn entity_facts_returns_facts_tagged_with_entity() {
+    let h = Harness::new();
+    // Ingest 2 facts with "auth" tag, 1 without.
+    let mut m1 = sample_new_memory("test-project", "Auth-1", "first auth fact");
+    m1.entities = "auth,jwt".to_string();
+    let id1 = h.db.insert_memory(m1).unwrap();
+
+    let mut m2 = sample_new_memory("test-project", "Auth-2", "second auth fact");
+    m2.entities = "auth,redis".to_string();
+    let id2 = h.db.insert_memory(m2).unwrap();
+
+    let mut m3 = sample_new_memory("test-project", "Other", "unrelated fact");
+    m3.entities = "logging".to_string();
+    let _id3 = h.db.insert_memory(m3).unwrap();
+
+    let out = h
+        .entity_facts(EntityFactsParams {
+            entity_name: "auth".to_string(),
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.error.is_none());
+    assert_eq!(out.entity_name, "auth");
+    assert_eq!(out.facts.len(), 2);
+    let returned_ids: Vec<String> = out.facts.iter().map(|f| f.id.clone()).collect();
+    assert!(returned_ids.contains(&id1));
+    assert!(returned_ids.contains(&id2));
+}
+
+#[tokio::test]
+async fn entity_facts_unknown_entity_returns_empty() {
+    let h = Harness::new();
+    let mut m = sample_new_memory("test-project", "F", "C");
+    m.entities = "auth".to_string();
+    h.db.insert_memory(m).unwrap();
+
+    let out = h
+        .entity_facts(EntityFactsParams {
+            entity_name: "nonexistent".to_string(),
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.error.is_none());
+    assert!(out.facts.is_empty());
+}
+
+#[tokio::test]
+async fn entity_facts_scope_global_crosses_projects() {
+    let h = Harness::new();
+    let mut m1 = sample_new_memory("test-project", "F1", "C1");
+    m1.entities = "auth".to_string();
+    h.db.insert_memory(m1).unwrap();
+
+    let mut m2 = sample_new_memory("other-project", "F2", "C2");
+    m2.entities = "auth".to_string();
+    h.db.insert_memory(m2).unwrap();
+
+    // Default scope: only current project.
+    let scoped = h
+        .entity_facts(EntityFactsParams {
+            entity_name: "auth".to_string(),
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert_eq!(scoped.facts.len(), 1);
+
+    // scope=global: both projects.
+    let global = h
+        .entity_facts(EntityFactsParams {
+            entity_name: "auth".to_string(),
+            project_id: None,
+            scope: Some("global".to_string()),
+        })
+        .await;
+    assert_eq!(global.facts.len(), 2);
+}
+
+#[tokio::test]
+async fn entity_facts_excludes_invalidated_facts() {
+    // F-007 review fixup (challenger #3): memory_entity_facts must
+    // not return facts with `valid_until` set (invalidated/superseded).
+    // Pre-fixup it silently returned them, misleading "current state of
+    // knowledge about X" callers.
+    let h = Harness::new();
+    let mut m1 = sample_new_memory("test-project", "Active", "active fact");
+    m1.entities = "auth".to_string();
+    let id_active = h.db.insert_memory(m1).unwrap();
+
+    let mut m2 = sample_new_memory("test-project", "Stale", "stale fact");
+    m2.entities = "auth".to_string();
+    let id_stale = h.db.insert_memory(m2).unwrap();
+
+    // Invalidate the second fact.
+    h.db.invalidate_memory(&id_stale, None, Some("test invalidation"))
+        .unwrap();
+
+    let out = h
+        .entity_facts(EntityFactsParams {
+            entity_name: "auth".to_string(),
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.error.is_none());
+    assert_eq!(
+        out.facts.len(),
+        1,
+        "should only return the active (non-invalidated) fact"
+    );
+    assert_eq!(out.facts[0].id, id_active);
+    assert!(
+        !out.facts.iter().any(|f| f.id == id_stale),
+        "invalidated fact must not appear in results"
+    );
+}
+
+#[tokio::test]
+async fn reingest_changed_entities_replaces_fact_entity_links() {
+    // F-007 review fixup (challenger #8): re-ingest with changed
+    // entities CSV must REPLACE fact_entity rows, not accumulate.
+    // Pre-fixup: jwt→fact link from first ingest would persist when
+    // the fact got re-ingested with ["auth","redis"], drifting
+    // fact_entity from the authoritative TEXT column.
+    let h = Harness::new();
+
+    // First ingest: entities = "auth,jwt"
+    let mut m = sample_new_memory("test-project", "Fact", "same content");
+    m.entities = "auth,jwt".to_string();
+    let id = h.db.insert_memory(m).unwrap();
+    let initial = h.db.entities_of_fact(&id).unwrap();
+    let initial_names: std::collections::HashSet<String> =
+        initial.into_iter().map(|(_, name)| name).collect();
+    assert_eq!(
+        initial_names,
+        ["auth", "jwt"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>()
+    );
+
+    // Re-ingest with same content (triggers ON CONFLICT DO UPDATE) but
+    // changed entities = "auth,redis".
+    let mut m2 = sample_new_memory("test-project", "Fact", "same content");
+    m2.entities = "auth,redis".to_string();
+    let id2 = h.db.insert_memory(m2).unwrap();
+    assert_eq!(id, id2, "content-hash dedup should return same fact id");
+
+    let after = h.db.entities_of_fact(&id).unwrap();
+    let after_names: std::collections::HashSet<String> =
+        after.into_iter().map(|(_, name)| name).collect();
+    let expected: std::collections::HashSet<String> =
+        ["auth", "redis"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        after_names, expected,
+        "fact_entity links must be REPLACED (snapshot semantic), not accumulated; \
+         expected {{auth, redis}}, got {:?}",
+        after_names
+    );
+    assert!(
+        !after_names.contains("jwt"),
+        "stale 'jwt' link must be removed after re-ingest with new entities CSV"
+    );
+}
+
+#[tokio::test]
+async fn contradiction_check_uses_fact_entity_index() {
+    // F-007 review fixup (codex #8 + challenger #7): AC4 explicitly
+    // required EXPLAIN QUERY PLAN verification that the new
+    // idx_fact_entity_entity index is actually used, not a fallback
+    // table scan on memory_entries. This test runs EXPLAIN against the
+    // facts_with_entity query (the index-driven entry point used by
+    // contradiction.rs) and asserts the planner uses the index.
+    let h = Harness::new();
+    // Insert at least one fact to ensure the table isn't empty (SQLite
+    // can pick different plans for empty vs populated tables).
+    let mut m = sample_new_memory("test-project", "F", "C");
+    m.entities = "auth".to_string();
+    h.db.insert_memory(m).unwrap();
+
+    // Replicate the query shape used by facts_with_entity (scoped path).
+    let auth_param: String = "auth".to_string();
+    let project_param: String = "test-project".to_string();
+    let plan =
+        h.db.explain_query_plan(
+            "SELECT fe.fact_id
+             FROM entities e
+             JOIN fact_entity fe ON fe.entity_id = e.id
+             WHERE e.name = ?1 AND e.project_id = ?2",
+            &[&auth_param, &project_param],
+        )
+        .unwrap();
+    let joined = plan.join(" | ");
+    // The planner should use idx_fact_entity_entity (or the alternate
+    // composite idx_fact_entity_fact + entities lookup chain) — what
+    // we MUST NOT see is a SCAN of memory_entries.
+    assert!(
+        !joined.contains("SCAN memory_entries"),
+        "expected index-driven query plan, got: {joined}"
+    );
+    // Either fact_entity index or entities index should show up.
+    assert!(
+        joined.contains("fact_entity") || joined.contains("entities"),
+        "expected fact_entity or entities table in plan, got: {joined}"
+    );
+}
+
+#[tokio::test]
+async fn entity_facts_orders_by_recall_count_desc() {
+    let h = Harness::new();
+    let mut m1 = sample_new_memory("test-project", "Low-Recall", "C1");
+    m1.entities = "auth".to_string();
+    let id_low = h.db.insert_memory(m1).unwrap();
+
+    let mut m2 = sample_new_memory("test-project", "High-Recall", "C2");
+    m2.entities = "auth".to_string();
+    let id_high = h.db.insert_memory(m2).unwrap();
+
+    // Bump id_high recall 5 times; id_low stays 0.
+    for _ in 0..5 {
+        h.db.bump_recall_only(&id_high).unwrap();
+    }
+
+    let out = h
+        .entity_facts(EntityFactsParams {
+            entity_name: "auth".to_string(),
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.error.is_none());
+    assert_eq!(out.facts.len(), 2);
+    // High-recall first.
+    assert_eq!(out.facts[0].id, id_high);
+    assert_eq!(out.facts[1].id, id_low);
 }

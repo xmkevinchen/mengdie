@@ -243,6 +243,29 @@ impl Db {
         home.join(".mengdie").join("db.sqlite")
     }
 
+    /// Test helper: run `EXPLAIN QUERY PLAN <sql>` and return the
+    /// "detail" column as a Vec<String>. Used by F-007 AC4 verification
+    /// to assert the index-driven query path. `#[doc(hidden)]` for the
+    /// same reason `insert_memory_with_id` is — `#[cfg(test)]` doesn't
+    /// reach `tests/` integration tests.
+    #[doc(hidden)]
+    pub fn explain_query_plan(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> anyhow::Result<Vec<String>> {
+        let full_sql = format!("EXPLAIN QUERY PLAN {sql}");
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let mut stmt = conn.prepare(&full_sql)?;
+        // EXPLAIN QUERY PLAN returns 4 cols: id, parent, notused, detail.
+        // The detail column (index 3) is the human-readable plan step.
+        let rows = stmt
+            .query_map(params, |row| row.get::<_, String>(3))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// Test helper: insert a memory with a caller-provided ID instead of
     /// a freshly-generated UUID v4. Useful for tests that need to construct
     /// scenarios where two facts share a known ID prefix (e.g., F-013
@@ -272,9 +295,16 @@ impl Db {
     fn insert_memory_inner(&self, id: String, mem: NewMemory) -> anyhow::Result<String> {
         let now = Utc::now().to_rfc3339();
         let content_hash = compute_content_hash(&mem.content);
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        // F-007 review fixup (codex #5): wrap INSERT + materialize in an
+        // EXPLICIT transaction. Pre-fixup, the INSERT auto-committed in
+        // SQLite autocommit mode before materialize ran; if materialize
+        // failed, the memory_entries row was orphaned (no entity links).
+        // The explicit transaction mirrors `insert_memory_resolving`'s
+        // atomicity contract — all-or-nothing.
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
 
-        let returned_id: String = conn.query_row(
+        let returned_id: String = tx.query_row(
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
                  title, content, entities, valid_from, embedding, embedding_dim,
@@ -308,6 +338,14 @@ impl Db {
             ],
             |row| row.get(0),
         )?;
+
+        // F-007 dual-write: materialize entities + fact_entity under the
+        // same transaction as the INSERT so the snapshot is consistent
+        // (no observer can see memory_entries row without its entity
+        // links, AND a failure here rolls back the INSERT too).
+        materialize_entities_under_lock(&tx, &returned_id, &mem.entities, &mem.project_id, &now)?;
+
+        tx.commit()?;
         Ok(returned_id)
     }
 
@@ -433,6 +471,11 @@ impl Db {
             |row| row.get(0),
         )?;
 
+        // F-007 dual-write under same transaction as the INSERT +
+        // supersession UPDATEs. Atomic — if any materialization fails
+        // the whole insert+resolve+materialize block rolls back.
+        materialize_entities_under_lock(&tx, &returned_id, &mem.entities, &project_id, &now)?;
+
         for old_id in resolves {
             tx.execute(
                 "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2, invalidation_reason = 'superseded' WHERE id = ?3 AND project_id = ?4",
@@ -442,6 +485,91 @@ impl Db {
 
         tx.commit()?;
         Ok(returned_id)
+    }
+
+    /// Upsert an entity row (F-007), returning the entity_id (UUID v4).
+    /// Idempotent via the (project_id, name) UNIQUE constraint.
+    pub fn upsert_entity(
+        &self,
+        name: &str,
+        project_id: &str,
+        first_seen: &str,
+    ) -> anyhow::Result<String> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let entity_uuid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO entities (id, name, project_id, first_seen)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (project_id, name) DO NOTHING",
+            params![entity_uuid, name, project_id, first_seen],
+        )?;
+        let id: String = conn.query_row(
+            "SELECT id FROM entities WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Link a fact to an entity (F-007). Idempotent via primary-key conflict.
+    pub fn link_fact_entity(&self, fact_id: &str, entity_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        conn.execute(
+            "INSERT INTO fact_entity (fact_id, entity_id) VALUES (?1, ?2)
+             ON CONFLICT (fact_id, entity_id) DO NOTHING",
+            params![fact_id, entity_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return the (entity_id, name) pairs linked to a fact (F-007).
+    pub fn entities_of_fact(&self, fact_id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.name
+             FROM fact_entity fe
+             JOIN entities e ON e.id = fe.entity_id
+             WHERE fe.fact_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![fact_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Return fact_ids tagged with a given entity name (F-007).
+    /// Scoped to a project_id when provided.
+    pub fn facts_with_entity(
+        &self,
+        name: &str,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let rows: Vec<String> = match project_id {
+            Some(pid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT fe.fact_id
+                     FROM entities e
+                     JOIN fact_entity fe ON fe.entity_id = e.id
+                     WHERE e.name = ?1 AND e.project_id = ?2",
+                )?;
+                let mapped = stmt.query_map(params![name, pid], |r| r.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT fe.fact_id
+                     FROM entities e
+                     JOIN fact_entity fe ON fe.entity_id = e.id
+                     WHERE e.name = ?1",
+                )?;
+                let mapped = stmt.query_map(params![name], |r| r.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
     }
 
     /// Bump recall_count + last_recalled without touching avg_relevance.
@@ -1126,6 +1254,67 @@ impl Db {
     }
 }
 
+/// F-007 entity materialization helper: writes entities + fact_entity
+/// rows from a comma-separated CSV string under an existing connection
+/// or transaction lock. Used by `insert_memory_inner` (plain connection)
+/// and `insert_memory_resolving` (transaction). Both insert paths get
+/// atomic dual-write — the materialization runs INSIDE the same lock /
+/// tx as the main memory_entries INSERT, so observers never see the row
+/// without its entity links.
+///
+/// `executor` is anything that exposes `prepare` + `execute` + `query_row`
+/// — `Connection`, `Transaction`, etc. The rusqlite trait pseudo-bound is
+/// satisfied by both `&Connection` and `&Transaction` via Deref.
+fn materialize_entities_under_lock(
+    executor: &rusqlite::Connection,
+    fact_id: &str,
+    entities_csv: &str,
+    project_id: &str,
+    first_seen: &str,
+) -> rusqlite::Result<()> {
+    // F-007 review fixup (challenger #8): DELETE existing fact_entity
+    // links for this fact_id BEFORE re-inserting. Without this, ON
+    // CONFLICT DO UPDATE re-ingests (same content_hash, changed
+    // entities CSV) accumulate stale links — a fact tagged
+    // ["auth","jwt"] re-ingested as ["auth","redis"] would keep the
+    // jwt→fact link, drifting fact_entity from the authoritative TEXT
+    // column. Snapshot-replace semantic matches what memory_entries
+    // already does (ON CONFLICT DO UPDATE replaces entities TEXT
+    // wholesale). For first-time inserts, the DELETE is a no-op.
+    {
+        let mut delete_old =
+            executor.prepare_cached("DELETE FROM fact_entity WHERE fact_id = ?1")?;
+        delete_old.execute(params![fact_id])?;
+    }
+    if entities_csv.is_empty() {
+        return Ok(());
+    }
+    let mut upsert_entity = executor.prepare_cached(
+        "INSERT INTO entities (id, name, project_id, first_seen)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (project_id, name) DO NOTHING",
+    )?;
+    let mut select_entity_id =
+        executor.prepare_cached("SELECT id FROM entities WHERE project_id = ?1 AND name = ?2")?;
+    let mut link = executor.prepare_cached(
+        "INSERT INTO fact_entity (fact_id, entity_id) VALUES (?1, ?2)
+         ON CONFLICT (fact_id, entity_id) DO NOTHING",
+    )?;
+
+    for name_raw in entities_csv.split(',') {
+        let name = name_raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let entity_uuid = uuid::Uuid::new_v4().to_string();
+        upsert_entity.execute(params![entity_uuid, name, project_id, first_seen])?;
+        let entity_id: String =
+            select_entity_id.query_row(params![project_id, name], |r| r.get(0))?;
+        link.execute(params![fact_id, entity_id])?;
+    }
+    Ok(())
+}
+
 fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<MemoryEntry> {
     Ok(MemoryEntry {
         id: row.get(0)?,
@@ -1253,6 +1442,94 @@ mod tests {
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert!(entry.valid_until.is_some());
         assert_eq!(entry.superseded_by.as_deref(), Some("new-id"));
+    }
+
+    // ----- F-007 entity materialization tests -----
+
+    #[test]
+    fn test_upsert_entity_returns_same_id_on_dup() {
+        let db = test_db();
+        let id_a = db
+            .upsert_entity("auth", "test-project", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let id_b = db
+            .upsert_entity("auth", "test-project", "2026-02-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(id_a, id_b, "upsert should be idempotent on (project, name)");
+    }
+
+    #[test]
+    fn test_upsert_entity_distinct_per_project() {
+        let db = test_db();
+        let id_a = db
+            .upsert_entity("auth", "project-a", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let id_b = db
+            .upsert_entity("auth", "project-b", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_ne!(
+            id_a, id_b,
+            "same entity name in different projects yields distinct ids"
+        );
+    }
+
+    #[test]
+    fn test_link_fact_entity_idempotent() {
+        let db = test_db();
+        // Use a fact with empty entities so auto-materialization doesn't
+        // populate fact_entity behind our back (sample_memory has
+        // "auth,middleware,jwt" which would auto-link 3 entities).
+        let mut mem = sample_memory("test-project");
+        mem.entities = String::new();
+        let fact_id = db.insert_memory(mem).unwrap();
+        let entity_id = db
+            .upsert_entity("auth", "test-project", "2026-01-01T00:00:00Z")
+            .unwrap();
+        db.link_fact_entity(&fact_id, &entity_id).unwrap();
+        db.link_fact_entity(&fact_id, &entity_id).unwrap(); // dup is no-op
+        let pairs = db.entities_of_fact(&fact_id).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].1, "auth");
+    }
+
+    #[test]
+    fn test_facts_with_entity_returns_linked_facts() {
+        let db = test_db();
+        let f1 = db.insert_memory(sample_memory("test-project")).unwrap();
+        let f2 = db.insert_memory(sample_memory("test-project")).unwrap();
+        let e = db
+            .upsert_entity("auth", "test-project", "2026-01-01T00:00:00Z")
+            .unwrap();
+        db.link_fact_entity(&f1, &e).unwrap();
+        db.link_fact_entity(&f2, &e).unwrap();
+        let mut facts = db.facts_with_entity("auth", Some("test-project")).unwrap();
+        facts.sort();
+        let mut expected = vec![f1, f2];
+        expected.sort();
+        assert_eq!(facts, expected);
+    }
+
+    #[test]
+    fn test_facts_with_entity_project_scope() {
+        let db = test_db();
+        let f1 = db.insert_memory(sample_memory("project-a")).unwrap();
+        let f2 = db.insert_memory(sample_memory("project-b")).unwrap();
+        let e_a = db
+            .upsert_entity("auth", "project-a", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let e_b = db
+            .upsert_entity("auth", "project-b", "2026-01-01T00:00:00Z")
+            .unwrap();
+        db.link_fact_entity(&f1, &e_a).unwrap();
+        db.link_fact_entity(&f2, &e_b).unwrap();
+
+        let scoped = db.facts_with_entity("auth", Some("project-a")).unwrap();
+        assert_eq!(scoped, vec![f1.clone()]);
+
+        let global = db.facts_with_entity("auth", None).unwrap();
+        assert_eq!(global.len(), 2);
+        assert!(global.contains(&f1));
+        assert!(global.contains(&f2));
     }
 
     #[test]
