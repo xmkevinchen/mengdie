@@ -44,11 +44,23 @@ use rmcp::handler::server::wrapper::Parameters;
 /// in-memory ONNX session-load cost (~100-200ms post-download), not the
 /// ~90MB download cost.
 ///
+/// Parallel-test caveat (F-013 review F2): `OnceLock::get_or_init` allows
+/// multiple concurrent first-callers to all execute the init closure; only
+/// the first to finish wins, the rest are discarded. Under cargo's default
+/// parallel test execution, N concurrent `Harness::new()` calls on a
+/// cold-cache system will each run `Embedder::new()` in parallel. This is
+/// NOT a correctness bug — the download step inside fastembed is
+/// filesystem-cache-safe — but the "first test pays the load, rest are
+/// free" framing only strictly holds under serial execution. In parallel
+/// runs, the first BATCH of concurrent tests share the redundant load
+/// cost; later tests (after the first batch completes) get the warm path.
+///
 /// We can NOT share a single Embedder instance across harness instances
 /// because `MengdieServer::new` consumes `Embedder` by value (moves into
 /// `Arc<Mutex<Embedder>>` internally). A test-only constructor accepting
-/// a pre-wrapped `Arc<Mutex<Embedder>>` could enable sharing — filed
-/// as out-of-scope follow-up if per-test load cost becomes painful.
+/// a pre-wrapped `Arc<Mutex<Embedder>>` would fix both this caveat AND the
+/// per-Harness load cost — filed as BL-051 (trigger: mengdie published
+/// as library OR per-test load becomes painful).
 fn ensure_embedder_warm() {
     static WARM: OnceLock<()> = OnceLock::new();
     WARM.get_or_init(|| {

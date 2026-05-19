@@ -68,7 +68,7 @@ async fn smoke_ingest_then_search() {
 
     // Search for it.
     let search = h
-        .search(mengdie::core::mcp_tools::SearchParams {
+        .search(SearchParams {
             query: "JWT authentication".to_string(),
             scope: None,
             project_id: None,
@@ -446,10 +446,3 @@ async fn get_bumps_recall_count_only_not_avg_relevance() {
         "avg_relevance MUST NOT change — direct lookup has no relevance signal"
     );
 }
-
-// Silence the unused-imports warning for the SearchParams import — it's
-// used by the smoke test above via fully-qualified path; the `use` brings
-// it into scope for future tests that want to reference SearchParams
-// directly when F-013 step 5 (search-path tests) are added.
-#[allow(dead_code)]
-fn _search_params_import_is_used(_: SearchParams) {}
