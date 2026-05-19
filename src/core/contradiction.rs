@@ -1,5 +1,3 @@
-use rusqlite::params;
-
 use super::db::Db;
 use super::embeddings::{blob_to_embedding, cosine_similarity};
 
@@ -56,20 +54,63 @@ impl Db {
             return Ok(vec![]);
         }
 
-        let conn = self.lock_conn()?;
         let now = chrono::Utc::now();
 
-        // Find existing memories with overlapping entities in the same project
-        // that are still valid (not invalidated)
-        let mut stmt = conn.prepare(
+        // F-007 refactor: candidate-finding uses the fact_entity index
+        // instead of scanning all valid memory_entries with non-empty
+        // entities text and doing set intersection in Rust. For each
+        // new entity, ask the index for fact_ids tagged with it; union
+        // the result into a HashSet to dedup facts that share multiple
+        // entities.
+        //
+        // Pre-F-007 scan was O(N_valid_facts_in_project) × O(split_text);
+        // F-007 path is O(|new_entities|) × O(facts_per_entity_index_lookup).
+        // The fact_entity index lookup uses `idx_fact_entity_entity` —
+        // sub-millisecond at any realistic scale.
+        let mut candidate_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for entity_name in new_entities {
+            // facts_with_entity acquires + releases its own conn lock;
+            // each entity is one indexed JOIN. We can't hold a conn lock
+            // across these calls because the helper re-locks.
+            match self.facts_with_entity(entity_name, Some(project_id)) {
+                Ok(ids) => candidate_ids.extend(ids),
+                Err(e) => {
+                    tracing::warn!(error = %e, entity = %entity_name,
+                                   "facts_with_entity failed in contradiction check; skipping this entity");
+                }
+            }
+        }
+        if candidate_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let conn = self.lock_conn()?;
+
+        // Fetch only the rows for candidate fact_ids. Build the IN clause
+        // with positional placeholders since rusqlite doesn't support
+        // array binding natively.
+        //
+        // F-007 review fixup (codex #6): sort the IDs so the placeholder
+        // count + bind order is deterministic across runs. HashSet
+        // iteration order varies; while SQLite's IN clause doesn't
+        // depend on order semantically, deterministic SQL text makes
+        // EXPLAIN QUERY PLAN reproducible for future plan-stability tests.
+        let mut ids_vec: Vec<String> = candidate_ids.into_iter().collect();
+        ids_vec.sort();
+        let placeholders: String = (1..=ids_vec.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
             "SELECT id, title, entities, knowledge_type, embedding, created_at
              FROM memory_entries
-             WHERE project_id = ?1
-             AND valid_until IS NULL
-             AND entities != ''",
-        )?;
-
-        let rows = stmt.query_map(params![project_id], |row| {
+             WHERE id IN ({placeholders})
+             AND valid_until IS NULL"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_owned: Vec<&dyn rusqlite::ToSql> =
+            ids_vec.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_owned.as_slice(), |row| {
             Ok((
                 row.get::<_, String>(0)?,          // id
                 row.get::<_, String>(1)?,          // title
@@ -83,21 +124,13 @@ impl Db {
         let mut conflicts = Vec::new();
 
         for row in rows {
-            let (id, title, entities_str, knowledge_type, embedding_blob, created_at) = row?;
+            let (id, title, _entities_str, knowledge_type, embedding_blob, created_at) = row?;
 
-            // Check entity overlap: ≥1 shared tag
-            let existing_entities: Vec<&str> = entities_str
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let has_overlap = new_entities
-                .iter()
-                .any(|e| existing_entities.contains(&e.as_str()));
-
-            if !has_overlap {
-                continue;
-            }
+            // No need for the Rust-side overlap re-check: candidate IDs
+            // came from fact_entity JOIN by definition. Defensive note:
+            // a stale fact_entity row (deleted memory_entries.id with
+            // foreign_keys=OFF) would surface as a missing row in the IN
+            // clause result, NOT as a false-positive overlap.
 
             // Check 1: Evolution candidate
             // Entity overlap + high semantic similarity + both decisional

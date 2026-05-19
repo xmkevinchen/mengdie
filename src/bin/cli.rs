@@ -555,8 +555,10 @@ fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
         let items: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
+                let short_id: String = e.id.chars().take(8).collect();
                 serde_json::json!({
                     "id": e.id,
+                    "short_id": short_id,
                     "project_id": e.project_id,
                     "title": e.title,
                     "knowledge_type": e.knowledge_type,
@@ -570,14 +572,15 @@ fn cmd_list(db: &Db, global: bool, format: &str) -> anyhow::Result<()> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
     } else {
-        // Table format
+        // Table format — "ID" column shows F-009 short_id (first 8 hex chars).
         println!(
             "{:<8} {:<40} {:<12} {:<12} {:>6} {:<4} Source",
             "ID", "Title", "Knowledge", "Origin", "Recall", "LT"
         );
         println!("{}", "-".repeat(100));
         for e in &entries {
-            let short_id = if e.id.len() > 8 { &e.id[..8] } else { &e.id };
+            // Use chars().take(8) for parity with mcp_tools SearchResultItem.
+            let short_id: String = e.id.chars().take(8).collect();
             let title = if e.title.len() > 40 {
                 format!("{}...", &e.title[..37])
             } else {

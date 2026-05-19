@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 /// than templating off this constant — so this binding is referenced only
 /// from `#[cfg(test)]` head-version assertions (e.g. AC1 idempotency check).
 #[allow(dead_code)]
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 /// Embedding dimension required by the sqlite-vec `vec_memories` virtual
 /// table. Matches `fastembed-rs` all-MiniLM-L6-v2 output dimension. The
 /// column declaration `embedding float[384] distance_metric=cosine` is
@@ -409,6 +409,114 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
     }
 
+    // v8 — F-007 entity materialization. Promote the comma-separated
+    // `memory_entries.entities` TEXT field into a normalized `entities`
+    // table + `fact_entity` many-to-many link table. The TEXT column is
+    // PRESERVED on memory_entries for backwards-compat (FTS5 indexes it;
+    // removal is a follow-up BL after one release-cycle grace period).
+    //
+    // Idempotency: `CREATE TABLE IF NOT EXISTS`, `INSERT ... ON CONFLICT
+    // DO NOTHING` on both tables — re-runs produce identical state.
+    if current_version < 8 {
+        conn.execute_batch("BEGIN;")?;
+        let migration_result: anyhow::Result<()> = (|| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS entities (
+                     id           TEXT PRIMARY KEY,
+                     name         TEXT NOT NULL,
+                     project_id   TEXT NOT NULL,
+                     first_seen   TEXT NOT NULL,
+                     recall_count INTEGER NOT NULL DEFAULT 0,
+                     UNIQUE (project_id, name)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_entities_project_name
+                     ON entities(project_id, name);
+
+                 CREATE TABLE IF NOT EXISTS fact_entity (
+                     fact_id   TEXT NOT NULL,
+                     entity_id TEXT NOT NULL,
+                     PRIMARY KEY (fact_id, entity_id),
+                     FOREIGN KEY (fact_id)   REFERENCES memory_entries(id),
+                     FOREIGN KEY (entity_id) REFERENCES entities(id)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_fact_entity_entity ON fact_entity(entity_id);
+                 CREATE INDEX IF NOT EXISTS idx_fact_entity_fact   ON fact_entity(fact_id);",
+            )?;
+
+            // Backfill: parse each fact's comma-separated entities TEXT
+            // into normalized rows. Idempotent via ON CONFLICT DO NOTHING
+            // on both UPSERTs.
+            let mut select = conn.prepare(
+                "SELECT id, project_id, entities, created_at
+                 FROM memory_entries
+                 WHERE entities != ''",
+            )?;
+            let rows: Vec<(String, String, String, String)> = select
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(select);
+
+            let mut upsert_entity = conn.prepare(
+                "INSERT INTO entities (id, name, project_id, first_seen)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (project_id, name) DO NOTHING",
+            )?;
+            let mut select_entity_id =
+                conn.prepare("SELECT id FROM entities WHERE project_id = ?1 AND name = ?2")?;
+            let mut link = conn.prepare(
+                "INSERT INTO fact_entity (fact_id, entity_id) VALUES (?1, ?2)
+                 ON CONFLICT (fact_id, entity_id) DO NOTHING",
+            )?;
+
+            for (fact_id, project_id, entities_text, created_at) in rows {
+                for name_raw in entities_text.split(',') {
+                    let name = name_raw.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    // Per F-007 archaeology + review fixup (challenger #6):
+                    // production ingest lowercases entities at ingest.rs:77
+                    // (`map(|e| e.trim().to_lowercase())`), NOT parser.rs.
+                    // For DBs predating that normalization, backfill may
+                    // see mixed-case entries — F-008 Memory Lint will
+                    // surface drift. Greenfield v0.0.2 deployments are
+                    // unaffected.
+                    let entity_uuid = uuid::Uuid::new_v4().to_string();
+                    upsert_entity.execute(rusqlite::params![
+                        entity_uuid,
+                        name,
+                        project_id,
+                        created_at
+                    ])?;
+                    let entity_id: String = select_entity_id
+                        .query_row(rusqlite::params![project_id, name], |r| r.get(0))?;
+                    link.execute(rusqlite::params![fact_id, entity_id])?;
+                }
+            }
+            drop(upsert_entity);
+            drop(select_entity_id);
+            drop(link);
+
+            conn.execute_batch("PRAGMA user_version = 8;")?;
+            Ok(())
+        })();
+        match migration_result {
+            Ok(()) => conn.execute_batch("COMMIT;")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -745,14 +853,14 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Idempotent: re-running leaves version at 6.
         run_migrations(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -1427,7 +1535,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, SCHEMA_VERSION);
 
         let title: String = conn
             .query_row(

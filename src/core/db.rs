@@ -53,6 +53,26 @@ pub struct DbStats {
     pub recalled: i64,
 }
 
+/// Status breakdown returned by `Db::status_breakdown()` — F-011 input
+/// to the `memory_status` MCP tool. Scoped to a project_id (or global
+/// when None at call time). Companion to `DbStats` (which is global +
+/// computes total/valid/longterm/recalled but is not project-scoped).
+#[derive(Debug, Clone)]
+pub struct StatusBreakdown {
+    /// Total entries in scope.
+    pub total: i64,
+    /// Entries with `is_longterm = 1` in scope.
+    pub longterm_count: i64,
+    /// Entries with `source_type = 'synthesis'` in scope (also present
+    /// in `by_source_type`; pulled out for direct access since it's the
+    /// primary indicator of "dreaming has run").
+    pub synthesis_count: i64,
+    /// Per-source_type entry counts in scope.
+    pub by_source_type: std::collections::BTreeMap<String, i64>,
+    /// `MAX(created_at)` of entries in scope; `None` on empty table.
+    pub last_ingest_at: Option<String>,
+}
+
 /// Audit-pipeline health snapshot returned by `Db::audit_stats()`.
 ///
 /// The six fields are consumed by the `mengdie audit-stats` CLI subcommand
@@ -223,16 +243,68 @@ impl Db {
         home.join(".mengdie").join("db.sqlite")
     }
 
+    /// Test helper: run `EXPLAIN QUERY PLAN <sql>` and return the
+    /// "detail" column as a Vec<String>. Used by F-007 AC4 verification
+    /// to assert the index-driven query path. `#[doc(hidden)]` for the
+    /// same reason `insert_memory_with_id` is — `#[cfg(test)]` doesn't
+    /// reach `tests/` integration tests.
+    #[doc(hidden)]
+    pub fn explain_query_plan(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> anyhow::Result<Vec<String>> {
+        let full_sql = format!("EXPLAIN QUERY PLAN {sql}");
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let mut stmt = conn.prepare(&full_sql)?;
+        // EXPLAIN QUERY PLAN returns 4 cols: id, parent, notused, detail.
+        // The detail column (index 3) is the human-readable plan step.
+        let rows = stmt
+            .query_map(params, |row| row.get::<_, String>(3))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Test helper: insert a memory with a caller-provided ID instead of
+    /// a freshly-generated UUID v4. Useful for tests that need to construct
+    /// scenarios where two facts share a known ID prefix (e.g., F-013
+    /// collision-path coverage for memory_invalidate / memory_get).
+    ///
+    /// Exposed as `pub` (not `#[cfg(test)]`) because integration tests
+    /// under `tests/` cannot reach `#[cfg(test)]` items in `src/`. Marked
+    /// `#[doc(hidden)]` to discourage production use — `insert_memory`
+    /// is the canonical ingest path.
+    #[doc(hidden)]
+    pub fn insert_memory_with_id(&self, id: &str, mem: NewMemory) -> anyhow::Result<String> {
+        self.insert_memory_inner(id.to_string(), mem)
+    }
+
     /// Insert or update a memory, returning its ID.
     /// On conflict (same project_id + content_hash), updates metadata but preserves
     /// recall stats, timestamps, and ID. Atomic via ON CONFLICT DO UPDATE.
     pub fn insert_memory(&self, mem: NewMemory) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
+        self.insert_memory_inner(id, mem)
+    }
+
+    /// Shared body for `insert_memory` and `insert_memory_with_id`.
+    /// Holds the SQL + parameter binding; the only diff between the two
+    /// public entry points is whether the ID is caller-provided or freshly
+    /// UUID v4-generated.
+    fn insert_memory_inner(&self, id: String, mem: NewMemory) -> anyhow::Result<String> {
         let now = Utc::now().to_rfc3339();
         let content_hash = compute_content_hash(&mem.content);
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        // F-007 review fixup (codex #5): wrap INSERT + materialize in an
+        // EXPLICIT transaction. Pre-fixup, the INSERT auto-committed in
+        // SQLite autocommit mode before materialize ran; if materialize
+        // failed, the memory_entries row was orphaned (no entity links).
+        // The explicit transaction mirrors `insert_memory_resolving`'s
+        // atomicity contract — all-or-nothing.
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let tx = conn.transaction()?;
 
-        let returned_id: String = conn.query_row(
+        let returned_id: String = tx.query_row(
             "INSERT INTO memory_entries
                 (id, project_id, source_file, source_type, knowledge_type,
                  title, content, entities, valid_from, embedding, embedding_dim,
@@ -266,6 +338,14 @@ impl Db {
             ],
             |row| row.get(0),
         )?;
+
+        // F-007 dual-write: materialize entities + fact_entity under the
+        // same transaction as the INSERT so the snapshot is consistent
+        // (no observer can see memory_entries row without its entity
+        // links, AND a failure here rolls back the INSERT too).
+        materialize_entities_under_lock(&tx, &returned_id, &mem.entities, &mem.project_id, &now)?;
+
+        tx.commit()?;
         Ok(returned_id)
     }
 
@@ -284,6 +364,46 @@ impl Db {
             )
             .optional()?;
         Ok(entry)
+    }
+
+    /// Resolve a UUID prefix to matching memory_entries IDs.
+    ///
+    /// Returns at most 2 matches — callers only need to distinguish
+    /// 0 / 1 / ≥2 (collision detection); full enumeration of N collisions
+    /// is not useful. Uses `WHERE id LIKE 'prefix%'`, which is sargable
+    /// against the `memory_entries(id)` primary-key index.
+    ///
+    /// Caller must pass a prefix of at least 8 hex chars (UUID v4 has
+    /// ~1 in 4 billion collision probability at 8 chars for a personal
+    /// corpus). This is enforced at MCP/CLI boundary, not in db.rs.
+    pub fn find_by_id_prefix(
+        &self,
+        prefix: &str,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<String>> {
+        let pattern = format!("{prefix}%");
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let rows: Vec<String> = match project_id {
+            Some(pid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memory_entries
+                     WHERE id LIKE ?1 AND project_id = ?2
+                     LIMIT 2",
+                )?;
+                let mapped =
+                    stmt.query_map(params![pattern, pid], |row| row.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memory_entries
+                     WHERE id LIKE ?1 LIMIT 2",
+                )?;
+                let mapped = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
     }
 
     /// Mark a memory as invalid (set valid_until, optionally superseded_by and invalidation_reason).
@@ -351,6 +471,11 @@ impl Db {
             |row| row.get(0),
         )?;
 
+        // F-007 dual-write under same transaction as the INSERT +
+        // supersession UPDATEs. Atomic — if any materialization fails
+        // the whole insert+resolve+materialize block rolls back.
+        materialize_entities_under_lock(&tx, &returned_id, &mem.entities, &project_id, &now)?;
+
         for old_id in resolves {
             tx.execute(
                 "UPDATE memory_entries SET valid_until = ?1, superseded_by = ?2, invalidation_reason = 'superseded' WHERE id = ?3 AND project_id = ?4",
@@ -360,6 +485,113 @@ impl Db {
 
         tx.commit()?;
         Ok(returned_id)
+    }
+
+    /// Upsert an entity row (F-007), returning the entity_id (UUID v4).
+    /// Idempotent via the (project_id, name) UNIQUE constraint.
+    pub fn upsert_entity(
+        &self,
+        name: &str,
+        project_id: &str,
+        first_seen: &str,
+    ) -> anyhow::Result<String> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let entity_uuid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO entities (id, name, project_id, first_seen)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (project_id, name) DO NOTHING",
+            params![entity_uuid, name, project_id, first_seen],
+        )?;
+        let id: String = conn.query_row(
+            "SELECT id FROM entities WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Link a fact to an entity (F-007). Idempotent via primary-key conflict.
+    pub fn link_fact_entity(&self, fact_id: &str, entity_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        conn.execute(
+            "INSERT INTO fact_entity (fact_id, entity_id) VALUES (?1, ?2)
+             ON CONFLICT (fact_id, entity_id) DO NOTHING",
+            params![fact_id, entity_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return the (entity_id, name) pairs linked to a fact (F-007).
+    pub fn entities_of_fact(&self, fact_id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.name
+             FROM fact_entity fe
+             JOIN entities e ON e.id = fe.entity_id
+             WHERE fe.fact_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![fact_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Return fact_ids tagged with a given entity name (F-007).
+    /// Scoped to a project_id when provided.
+    pub fn facts_with_entity(
+        &self,
+        name: &str,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let rows: Vec<String> = match project_id {
+            Some(pid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT fe.fact_id
+                     FROM entities e
+                     JOIN fact_entity fe ON fe.entity_id = e.id
+                     WHERE e.name = ?1 AND e.project_id = ?2",
+                )?;
+                let mapped = stmt.query_map(params![name, pid], |r| r.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT fe.fact_id
+                     FROM entities e
+                     JOIN fact_entity fe ON fe.entity_id = e.id
+                     WHERE e.name = ?1",
+                )?;
+                let mapped = stmt.query_map(params![name], |r| r.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Bump recall_count + last_recalled without touching avg_relevance.
+    ///
+    /// Used by `memory_get` (F-010): a direct fact lookup is a "consult"
+    /// signal but has no meaningful relevance score (caller explicitly
+    /// chose this fact, not the ranker). Mixing 0.0 or 1.0 into the EMA
+    /// would corrupt the running average — recall_count alone is the
+    /// right channel for "this fact was consulted".
+    ///
+    /// Returns false if ID not found.
+    pub fn bump_recall_only(&self, id: &str) -> anyhow::Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let rows = conn.execute(
+            "UPDATE memory_entries SET
+                recall_count = recall_count + 1,
+                last_recalled = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(rows > 0)
     }
 
     /// Update recall statistics after a search hit. Returns false if ID not found.
@@ -760,6 +992,94 @@ impl Db {
         })
     }
 
+    /// Status breakdown for the `memory_status` MCP tool (F-011): aggregate
+    /// counts + last-ingest timestamp scoped to a given project_id (or
+    /// global when `project_id` is `None`). Single connection lock so the
+    /// snapshot is consistent. Pairs with `audit_stats()` + `list_metrics()`
+    /// to compose the full status response in `mcp_tools::status`.
+    pub fn status_breakdown(&self, project_id: Option<&str>) -> anyhow::Result<StatusBreakdown> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+
+        // total entries (scoped or global)
+        let total: i64 = match project_id {
+            Some(pid) => conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |r| r.get(0))?,
+        };
+
+        let longterm_count: i64 = match project_id {
+            Some(pid) => conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries
+                 WHERE is_longterm = 1 AND project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row(
+                "SELECT COUNT(*) FROM memory_entries WHERE is_longterm = 1",
+                [],
+                |r| r.get(0),
+            )?,
+        };
+
+        // by_source_type breakdown — fixed enum set, so an empty count is
+        // genuine information (e.g., synthesis_count = 0 means no dreaming
+        // synthesis run yet for this project).
+        let mut by_source_type: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
+        {
+            let sql = match project_id {
+                Some(_) => {
+                    "SELECT source_type, COUNT(*) FROM memory_entries
+                            WHERE project_id = ?1 GROUP BY source_type"
+                }
+                None => {
+                    "SELECT source_type, COUNT(*) FROM memory_entries
+                         GROUP BY source_type"
+                }
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows = match project_id {
+                Some(pid) => stmt
+                    .query_map(params![pid], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+                None => stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            };
+            for (st, cnt) in rows {
+                by_source_type.insert(st, cnt);
+            }
+        }
+
+        let synthesis_count: i64 = by_source_type.get("synthesis").copied().unwrap_or(0);
+
+        let last_ingest_at: Option<String> = match project_id {
+            Some(pid) => conn.query_row(
+                "SELECT MAX(created_at) FROM memory_entries WHERE project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row("SELECT MAX(created_at) FROM memory_entries", [], |r| {
+                r.get(0)
+            })?,
+        };
+
+        Ok(StatusBreakdown {
+            total,
+            longterm_count,
+            synthesis_count,
+            by_source_type,
+            last_ingest_at,
+        })
+    }
+
     /// Audit-pipeline health snapshot — six numbers an operator can read at
     /// a glance to detect silent breakage of the F-002 audit hook (F-005).
     ///
@@ -934,6 +1254,67 @@ impl Db {
     }
 }
 
+/// F-007 entity materialization helper: writes entities + fact_entity
+/// rows from a comma-separated CSV string under an existing connection
+/// or transaction lock. Used by `insert_memory_inner` (plain connection)
+/// and `insert_memory_resolving` (transaction). Both insert paths get
+/// atomic dual-write — the materialization runs INSIDE the same lock /
+/// tx as the main memory_entries INSERT, so observers never see the row
+/// without its entity links.
+///
+/// `executor` is anything that exposes `prepare` + `execute` + `query_row`
+/// — `Connection`, `Transaction`, etc. The rusqlite trait pseudo-bound is
+/// satisfied by both `&Connection` and `&Transaction` via Deref.
+fn materialize_entities_under_lock(
+    executor: &rusqlite::Connection,
+    fact_id: &str,
+    entities_csv: &str,
+    project_id: &str,
+    first_seen: &str,
+) -> rusqlite::Result<()> {
+    // F-007 review fixup (challenger #8): DELETE existing fact_entity
+    // links for this fact_id BEFORE re-inserting. Without this, ON
+    // CONFLICT DO UPDATE re-ingests (same content_hash, changed
+    // entities CSV) accumulate stale links — a fact tagged
+    // ["auth","jwt"] re-ingested as ["auth","redis"] would keep the
+    // jwt→fact link, drifting fact_entity from the authoritative TEXT
+    // column. Snapshot-replace semantic matches what memory_entries
+    // already does (ON CONFLICT DO UPDATE replaces entities TEXT
+    // wholesale). For first-time inserts, the DELETE is a no-op.
+    {
+        let mut delete_old =
+            executor.prepare_cached("DELETE FROM fact_entity WHERE fact_id = ?1")?;
+        delete_old.execute(params![fact_id])?;
+    }
+    if entities_csv.is_empty() {
+        return Ok(());
+    }
+    let mut upsert_entity = executor.prepare_cached(
+        "INSERT INTO entities (id, name, project_id, first_seen)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (project_id, name) DO NOTHING",
+    )?;
+    let mut select_entity_id =
+        executor.prepare_cached("SELECT id FROM entities WHERE project_id = ?1 AND name = ?2")?;
+    let mut link = executor.prepare_cached(
+        "INSERT INTO fact_entity (fact_id, entity_id) VALUES (?1, ?2)
+         ON CONFLICT (fact_id, entity_id) DO NOTHING",
+    )?;
+
+    for name_raw in entities_csv.split(',') {
+        let name = name_raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let entity_uuid = uuid::Uuid::new_v4().to_string();
+        upsert_entity.execute(params![entity_uuid, name, project_id, first_seen])?;
+        let entity_id: String =
+            select_entity_id.query_row(params![project_id, name], |r| r.get(0))?;
+        link.execute(params![fact_id, entity_id])?;
+    }
+    Ok(())
+}
+
 fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<MemoryEntry> {
     Ok(MemoryEntry {
         id: row.get(0)?,
@@ -1001,6 +1382,56 @@ mod tests {
     }
 
     #[test]
+    fn test_find_by_id_prefix_full_uuid() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("test-project")).unwrap();
+        let matches = db.find_by_id_prefix(&id, None).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], id);
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_unique_short() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("test-project")).unwrap();
+        let prefix = &id[..8];
+        let matches = db.find_by_id_prefix(prefix, None).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], id);
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_no_match() {
+        let db = test_db();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        // "zz" is not a valid hex prefix; no UUID can start with it
+        let matches = db.find_by_id_prefix("zz", None).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_caps_at_two() {
+        let db = test_db();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        // empty prefix matches all 3 rows via LIKE '%'; LIMIT 2 caps the result
+        // so callers see "≥2" as the collision signal without enumerating all
+        let matches = db.find_by_id_prefix("", None).unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_respects_project_id() {
+        let db = test_db();
+        let id_a = db.insert_memory(sample_memory("project-a")).unwrap();
+        let _id_b = db.insert_memory(sample_memory("project-b")).unwrap();
+        let matches = db.find_by_id_prefix("", Some("project-a")).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], id_a);
+    }
+
+    #[test]
     fn test_invalidate() {
         let db = test_db();
         let id = db.insert_memory(sample_memory("test-project")).unwrap();
@@ -1011,6 +1442,122 @@ mod tests {
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert!(entry.valid_until.is_some());
         assert_eq!(entry.superseded_by.as_deref(), Some("new-id"));
+    }
+
+    // ----- F-007 entity materialization tests -----
+
+    #[test]
+    fn test_upsert_entity_returns_same_id_on_dup() {
+        let db = test_db();
+        let id_a = db
+            .upsert_entity("auth", "test-project", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let id_b = db
+            .upsert_entity("auth", "test-project", "2026-02-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(id_a, id_b, "upsert should be idempotent on (project, name)");
+    }
+
+    #[test]
+    fn test_upsert_entity_distinct_per_project() {
+        let db = test_db();
+        let id_a = db
+            .upsert_entity("auth", "project-a", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let id_b = db
+            .upsert_entity("auth", "project-b", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_ne!(
+            id_a, id_b,
+            "same entity name in different projects yields distinct ids"
+        );
+    }
+
+    #[test]
+    fn test_link_fact_entity_idempotent() {
+        let db = test_db();
+        // Use a fact with empty entities so auto-materialization doesn't
+        // populate fact_entity behind our back (sample_memory has
+        // "auth,middleware,jwt" which would auto-link 3 entities).
+        let mut mem = sample_memory("test-project");
+        mem.entities = String::new();
+        let fact_id = db.insert_memory(mem).unwrap();
+        let entity_id = db
+            .upsert_entity("auth", "test-project", "2026-01-01T00:00:00Z")
+            .unwrap();
+        db.link_fact_entity(&fact_id, &entity_id).unwrap();
+        db.link_fact_entity(&fact_id, &entity_id).unwrap(); // dup is no-op
+        let pairs = db.entities_of_fact(&fact_id).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].1, "auth");
+    }
+
+    #[test]
+    fn test_facts_with_entity_returns_linked_facts() {
+        let db = test_db();
+        let f1 = db.insert_memory(sample_memory("test-project")).unwrap();
+        let f2 = db.insert_memory(sample_memory("test-project")).unwrap();
+        let e = db
+            .upsert_entity("auth", "test-project", "2026-01-01T00:00:00Z")
+            .unwrap();
+        db.link_fact_entity(&f1, &e).unwrap();
+        db.link_fact_entity(&f2, &e).unwrap();
+        let mut facts = db.facts_with_entity("auth", Some("test-project")).unwrap();
+        facts.sort();
+        let mut expected = vec![f1, f2];
+        expected.sort();
+        assert_eq!(facts, expected);
+    }
+
+    #[test]
+    fn test_facts_with_entity_project_scope() {
+        let db = test_db();
+        let f1 = db.insert_memory(sample_memory("project-a")).unwrap();
+        let f2 = db.insert_memory(sample_memory("project-b")).unwrap();
+        let e_a = db
+            .upsert_entity("auth", "project-a", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let e_b = db
+            .upsert_entity("auth", "project-b", "2026-01-01T00:00:00Z")
+            .unwrap();
+        db.link_fact_entity(&f1, &e_a).unwrap();
+        db.link_fact_entity(&f2, &e_b).unwrap();
+
+        let scoped = db.facts_with_entity("auth", Some("project-a")).unwrap();
+        assert_eq!(scoped, vec![f1.clone()]);
+
+        let global = db.facts_with_entity("auth", None).unwrap();
+        assert_eq!(global.len(), 2);
+        assert!(global.contains(&f1));
+        assert!(global.contains(&f2));
+    }
+
+    #[test]
+    fn test_bump_recall_only_increments_count_and_last_recalled() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("test-project")).unwrap();
+        let before = db.get_memory(&id).unwrap().unwrap();
+        assert_eq!(before.recall_count, 0);
+        assert!(before.last_recalled.is_none());
+        let pre_avg = before.avg_relevance;
+
+        let bumped = db.bump_recall_only(&id).unwrap();
+        assert!(bumped);
+
+        let after = db.get_memory(&id).unwrap().unwrap();
+        assert_eq!(after.recall_count, 1);
+        assert!(after.last_recalled.is_some());
+        // avg_relevance MUST NOT change — that's the whole point of having a
+        // separate helper. record_recall mixes the score into the EMA;
+        // bump_recall_only does not.
+        assert_eq!(after.avg_relevance, pre_avg);
+    }
+
+    #[test]
+    fn test_bump_recall_only_returns_false_for_unknown_id() {
+        let db = test_db();
+        let bumped = db.bump_recall_only("nonexistent-id").unwrap();
+        assert!(!bumped);
     }
 
     #[test]
