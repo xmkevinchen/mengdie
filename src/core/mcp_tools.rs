@@ -500,8 +500,13 @@ impl MengdieServer {
                     return Json(GetOutput {
                         entry: None,
                         error: Some(match scope_for_lookup {
+                            // Fixup (F-010 review): mention scope=global as a
+                            // remediation when the scoped prefix lookup misses —
+                            // matches the full-UUID cross-project guard's hint
+                            // pattern so LLM callers see consistent escape hatches
+                            // regardless of which path produced the miss.
                             Some(p) => format!(
-                                "No memory matches prefix '{}' in project '{}'",
+                                "No memory matches prefix '{}' in project '{}'; pass scope='global' to search across projects",
                                 params.memory_id, p
                             ),
                             None => format!(
@@ -564,7 +569,15 @@ impl MengdieServer {
 
         // Bump recall (count-only — no EMA contribution; direct lookup
         // has no meaningful relevance score).
-        let _ = self.db.bump_recall_only(&resolved_id);
+        //
+        // Fixup (F-010 review): warn on err instead of fully silent swallow.
+        // record_recall failures in memory_search log via tracing; parity
+        // here makes ops debugging consistent. We still return success —
+        // recall_count is a soft signal; corruption of one bump is not
+        // worth failing the whole get.
+        if let Err(e) = self.db.bump_recall_only(&resolved_id) {
+            tracing::warn!(error = %e, id = %resolved_id, "bump_recall_only failed in memory_get; returning entry anyway");
+        }
 
         Json(GetOutput {
             entry: Some(entry.into()),

@@ -344,6 +344,49 @@ async fn get_cross_project_blocked_by_default() {
         err.contains("No memory matches prefix"),
         "scoped prefix lookup should report no-match within current project, got: {err}"
     );
+    // F-010 review fixup: prefix-path no-match should hint at scope=global
+    // for parity with full-UUID cross-project guard's remediation hint.
+    assert!(
+        err.contains("scope='global'"),
+        "no-match error should suggest scope=global remediation, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn get_full_uuid_cross_project_blocked_by_default() {
+    // F-010 review fixup: AC5 had a test gap — only the prefix path was
+    // exercised for cross-project blocking; the full-UUID path's
+    // "belongs to project X, not Y" guard had zero coverage. A future
+    // refactor that moved get_memory inside the resolved-id branch could
+    // silently break it.
+    let h = Harness::new();
+    let id =
+        h.db.insert_memory(sample_new_memory("other-project", "X", "Y"))
+            .unwrap();
+
+    // Full 36-char UUID takes the fast path, skipping prefix lookup;
+    // the cross-project guard fires AFTER db::get_memory returns the row.
+    let out = h
+        .get(GetParams {
+            memory_id: id.clone(),
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(out.entry.is_none());
+    let err = out.error.expect("expected belongs-to-other-project error");
+    assert!(
+        err.contains("belongs to project 'other-project'"),
+        "full-UUID guard should name the offending project, got: {err}"
+    );
+    assert!(
+        err.contains("not 'test-project'"),
+        "full-UUID guard should name the requested project, got: {err}"
+    );
+    assert!(
+        err.contains("scope='global'"),
+        "full-UUID guard should suggest scope=global remediation, got: {err}"
+    );
 }
 
 #[tokio::test]
