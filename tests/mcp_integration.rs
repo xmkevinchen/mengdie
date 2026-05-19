@@ -12,8 +12,8 @@ mod common;
 use common::Harness;
 use mengdie::core::db::NewMemory;
 use mengdie::core::mcp_tools::{
-    EntityFactsParams, GetParams, IngestParams, InvalidateParams, KnowledgeType, SearchParams,
-    SourceType, StatusParams,
+    EntityFactsParams, GetParams, IngestParams, InvalidateParams, KnowledgeType, LintParams,
+    SearchParams, SourceType, StatusParams,
 };
 
 /// Build a minimal NewMemory (for direct `Db::insert_memory_with_id` calls).
@@ -795,4 +795,73 @@ async fn entity_facts_orders_by_recall_count_desc() {
     // High-recall first.
     assert_eq!(out.facts[0].id, id_high);
     assert_eq!(out.facts[1].id, id_low);
+}
+
+// =====================================================================
+// F-008: memory_lint MCP tool
+// =====================================================================
+
+#[tokio::test]
+async fn lint_empty_db_all_zero() {
+    let h = Harness::new();
+    let report = h
+        .lint(LintParams {
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert!(!report.generated_at.is_empty());
+    assert_eq!(report.orphan_gc.superseded_by_dangling_count, 0);
+    assert_eq!(report.unresolved_contradictions.half_v_only_count, 0);
+    assert_eq!(report.embedding_drift.embedding_null_non_synthesis_count, 0);
+    assert_eq!(report.embedding_drift.synthesis_null_embedding_count, 0);
+}
+
+#[tokio::test]
+async fn lint_detects_bl_022_synthesis_null_embedding() {
+    // F-008 plan AC5: first run on dogfood DB predicted 5 synthesis-
+    // null-embedding hits per BL-022. Construct that scenario via test
+    // fixture + assert detection.
+    let h = Harness::new();
+    let mut m = sample_new_memory("test-project", "Syn", "synthesis body");
+    m.source_type = "synthesis".to_string();
+    m.knowledge_type = "factual".to_string();
+    m.embedding = None;
+    m.embedding_dim = None;
+    let id = h.db.insert_memory(m).unwrap();
+
+    let report = h
+        .lint(LintParams {
+            project_id: None,
+            scope: None,
+        })
+        .await;
+    assert_eq!(report.embedding_drift.synthesis_null_embedding_count, 1);
+    assert_eq!(report.embedding_drift.synthesis_null_embedding[0], id);
+    // And NOT in 3a (filters source_type != synthesis).
+    assert_eq!(report.embedding_drift.embedding_null_non_synthesis_count, 0);
+}
+
+#[tokio::test]
+async fn lint_is_read_only_via_mcp() {
+    let h = Harness::new();
+    let id =
+        h.db.insert_memory(sample_new_memory("test-project", "T", "C"))
+            .unwrap();
+    let before = h.db.get_memory(&id).unwrap().unwrap();
+
+    // Call lint 2x.
+    for _ in 0..2 {
+        let _ = h
+            .lint(LintParams {
+                project_id: None,
+                scope: None,
+            })
+            .await;
+    }
+
+    let after = h.db.get_memory(&id).unwrap().unwrap();
+    assert_eq!(after.recall_count, before.recall_count);
+    assert_eq!(after.avg_relevance, before.avg_relevance);
+    assert_eq!(after.last_recalled, before.last_recalled);
 }

@@ -10,7 +10,7 @@ use super::embeddings::Embedder;
 use super::metrics;
 use std::sync::{Arc, Mutex};
 
-/// MCP server with 6 tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status, memory_entity_facts.
+/// MCP server with 7 tools: memory_search, memory_ingest, memory_get, memory_invalidate, memory_status, memory_entity_facts, memory_lint.
 pub struct MengdieServer {
     tool_router: ToolRouter<Self>,
     db: Db,
@@ -115,6 +115,14 @@ pub struct StatusParams {
     /// Override project_id (default: inferred from cwd at server startup).
     pub project_id: Option<String>,
     /// Scope: omit for current project, "global" for cross-project totals.
+    pub scope: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct LintParams {
+    /// Override project_id (default: inferred from cwd at server startup).
+    pub project_id: Option<String>,
+    /// Scope: omit for current project, "global" for cross-project scan.
     pub scope: Option<String>,
 }
 
@@ -727,6 +735,36 @@ impl MengdieServer {
             audit: audit_view,
             error: None,
         })
+    }
+
+    #[tool(
+        name = "memory_lint",
+        description = "Run F-008 Memory Lint deterministic health checks: orphan GC (dangling references in superseded_by / synthesis_links / audit_returned_facts), unresolved contradictions (half-resolved supersession state + size-2 cycles + high-entity-overlap unsuperseded pairs), embedding drift (NULL on non-synthesis + dim mismatch + BL-022 surface). Read-only, idempotent (same DB → same findings except generated_at). Scoped to current project unless scope='global'."
+    )]
+    pub async fn lint(
+        &self,
+        Parameters(params): Parameters<LintParams>,
+    ) -> Json<super::lint::LintReport> {
+        let pid_owned = params
+            .project_id
+            .clone()
+            .unwrap_or_else(|| self.default_project_id.clone());
+        let scope_for_lookup: Option<&str> = match params.scope.as_deref() {
+            Some("global") => None,
+            _ => Some(pid_owned.as_str()),
+        };
+        match self.db.run_lint(scope_for_lookup) {
+            Ok(r) => Json(r),
+            Err(e) => {
+                tracing::error!(error = %e, "run_lint failed");
+                Json(super::lint::LintReport {
+                    generated_at: chrono::Utc::now().to_rfc3339(),
+                    orphan_gc: Default::default(),
+                    unresolved_contradictions: Default::default(),
+                    embedding_drift: Default::default(),
+                })
+            }
+        }
     }
 
     #[tool(

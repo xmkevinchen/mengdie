@@ -7,6 +7,7 @@ pub mod dreaming;
 
 pub mod embeddings;
 pub mod ingest;
+pub mod lint;
 pub mod llm;
 pub mod mcp_tools;
 pub mod metrics;
