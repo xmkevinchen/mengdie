@@ -64,9 +64,14 @@ fn ensure_embedder_warm() {
 /// (read-only inference; no mutable state per call).
 pub struct Harness {
     server: MengdieServer,
+    /// Clone of the same `Db` handle (`Arc<Mutex<Connection>>`) that the
+    /// server holds — exposes raw DB access for tests that need to set
+    /// up scenarios `MengdieServer`'s tool surface can't construct
+    /// (e.g., F-009 collision path needs 2 facts with shared ID prefix,
+    /// achievable only via `Db::insert_memory_with_id`).
+    pub db: Db,
     /// Default project_id the server was constructed with. Exposed so
-    /// tests can ingest into other projects for cross-project tests
-    /// (used by F-010 cross-project guard test, not by smoke test).
+    /// tests can ingest into other projects for cross-project tests.
     #[allow(dead_code)]
     pub default_project_id: String,
 }
@@ -82,10 +87,12 @@ impl Harness {
     pub fn with_project_id(project_id: &str) -> Self {
         ensure_embedder_warm();
         let db = Db::open_in_memory().expect("Db::open_in_memory failed");
+        let db_for_server = db.clone(); // Arc<Mutex<Connection>> share
         let embedder = Embedder::new().expect("Embedder::new failed in Harness");
-        let server = MengdieServer::new(db, embedder, project_id.to_string());
+        let server = MengdieServer::new(db_for_server, embedder, project_id.to_string());
         Self {
             server,
+            db,
             default_project_id: project_id.to_string(),
         }
     }

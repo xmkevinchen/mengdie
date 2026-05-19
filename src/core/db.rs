@@ -223,11 +223,33 @@ impl Db {
         home.join(".mengdie").join("db.sqlite")
     }
 
+    /// Test helper: insert a memory with a caller-provided ID instead of
+    /// a freshly-generated UUID v4. Useful for tests that need to construct
+    /// scenarios where two facts share a known ID prefix (e.g., F-013
+    /// collision-path coverage for memory_invalidate / memory_get).
+    ///
+    /// Exposed as `pub` (not `#[cfg(test)]`) because integration tests
+    /// under `tests/` cannot reach `#[cfg(test)]` items in `src/`. Marked
+    /// `#[doc(hidden)]` to discourage production use — `insert_memory`
+    /// is the canonical ingest path.
+    #[doc(hidden)]
+    pub fn insert_memory_with_id(&self, id: &str, mem: NewMemory) -> anyhow::Result<String> {
+        self.insert_memory_inner(id.to_string(), mem)
+    }
+
     /// Insert or update a memory, returning its ID.
     /// On conflict (same project_id + content_hash), updates metadata but preserves
     /// recall stats, timestamps, and ID. Atomic via ON CONFLICT DO UPDATE.
     pub fn insert_memory(&self, mem: NewMemory) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
+        self.insert_memory_inner(id, mem)
+    }
+
+    /// Shared body for `insert_memory` and `insert_memory_with_id`.
+    /// Holds the SQL + parameter binding; the only diff between the two
+    /// public entry points is whether the ID is caller-provided or freshly
+    /// UUID v4-generated.
+    fn insert_memory_inner(&self, id: String, mem: NewMemory) -> anyhow::Result<String> {
         let now = Utc::now().to_rfc3339();
         let content_hash = compute_content_hash(&mem.content);
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
