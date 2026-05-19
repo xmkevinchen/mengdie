@@ -163,6 +163,12 @@ pub struct InvalidateOutput {
     /// The ID of the memory that supersedes this one, if provided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// Non-empty when invalidation could not be performed: unknown ID,
+    /// ambiguous prefix (collision), or DB error. Caller should inspect
+    /// this before treating `success: false` as a generic failure.
+    /// F-009.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // -- Input validation --
@@ -378,29 +384,106 @@ impl MengdieServer {
 
     #[tool(
         name = "memory_invalidate",
-        description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit."
+        description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit. Accepts either a full UUID (36 chars) or an 8+ char prefix; collision returns an error listing matches."
     )]
     async fn invalidate(
         &self,
         Parameters(params): Parameters<InvalidateParams>,
     ) -> Json<InvalidateOutput> {
         let superseded_by = params.superseded_by.clone();
+
+        // F-009 step 3: resolve UUID prefix when caller passes < 36 chars.
+        // Full-UUID input (36 chars) takes the fast path with no prefix
+        // lookup; pre-F-009 callers are unaffected.
+        //
+        // Fixup (review): enforce 8-char minimum so a 1-char prefix doesn't
+        // silently match thousands of UUIDs and surface as a misleading
+        // "collision" error. Boundary check belongs here (MCP layer); db
+        // layer remains permissive for future callers with different rules.
+        let resolved_id = if params.entry_id.len() == 36 {
+            params.entry_id.clone()
+        } else if params.entry_id.len() < 8 {
+            return Json(InvalidateOutput {
+                success: false,
+                entry_id: params.entry_id.clone(),
+                superseded_by: None,
+                error: Some(format!(
+                    "Prefix '{}' is too short (need ≥ 8 chars, or pass a full 36-char UUID)",
+                    params.entry_id
+                )),
+            });
+        } else {
+            // Fixup (review): scope prefix lookup to the server's default
+            // project_id (matches plan Step 3 pseudocode `Some(&project_id)`).
+            // Unscoped lookup caused false-positive collisions in multi-project
+            // DBs when a prefix unique within the current project shared its
+            // first 8 chars with an entry in a different project.
+            let scope = self.default_project_id.as_str();
+            match self.db.find_by_id_prefix(&params.entry_id, Some(scope)) {
+                Ok(matches) if matches.len() == 1 => matches.into_iter().next().unwrap(),
+                Ok(matches) if matches.is_empty() => {
+                    return Json(InvalidateOutput {
+                        success: false,
+                        entry_id: params.entry_id.clone(),
+                        superseded_by: None,
+                        error: Some(format!(
+                            "No memory matches prefix '{}' in project '{}'",
+                            params.entry_id, scope
+                        )),
+                    });
+                }
+                Ok(matches) => {
+                    // Fixup (review): drop misleading "(N+)" count from
+                    // collision wording. find_by_id_prefix caps at LIMIT 2,
+                    // so matches.len() is always 2 here — the displayed list
+                    // IS the at-least signal; no separate count needed.
+                    return Json(InvalidateOutput {
+                        success: false,
+                        entry_id: params.entry_id.clone(),
+                        superseded_by: None,
+                        error: Some(format!(
+                            "Prefix '{}' is ambiguous; matches at least: {}; extend prefix to disambiguate",
+                            params.entry_id,
+                            matches.join(", ")
+                        )),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "find_by_id_prefix failed in memory_invalidate");
+                    return Json(InvalidateOutput {
+                        success: false,
+                        entry_id: params.entry_id.clone(),
+                        superseded_by: None,
+                        error: Some(format!("DB error during prefix lookup: {e}")),
+                    });
+                }
+            }
+        };
+
         match self.db.invalidate_memory(
-            &params.entry_id,
+            &resolved_id,
             params.superseded_by.as_deref(),
             Some(&params.reason),
         ) {
-            Ok(updated) => Json(InvalidateOutput {
-                success: updated,
-                entry_id: params.entry_id,
+            Ok(true) => Json(InvalidateOutput {
+                success: true,
+                entry_id: resolved_id,
                 superseded_by,
+                error: None,
+            }),
+            Ok(false) => Json(InvalidateOutput {
+                success: false,
+                entry_id: resolved_id.clone(),
+                superseded_by: None,
+                error: Some(format!("No memory found with id '{resolved_id}'")),
             }),
             Err(e) => {
                 tracing::error!(error = %e, "memory_invalidate failed");
                 Json(InvalidateOutput {
                     success: false,
-                    entry_id: params.entry_id,
+                    entry_id: resolved_id,
                     superseded_by: None,
+                    error: Some(format!("DB error: {e}")),
                 })
             }
         }
