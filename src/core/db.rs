@@ -286,6 +286,46 @@ impl Db {
         Ok(entry)
     }
 
+    /// Resolve a UUID prefix to matching memory_entries IDs.
+    ///
+    /// Returns at most 2 matches — callers only need to distinguish
+    /// 0 / 1 / ≥2 (collision detection); full enumeration of N collisions
+    /// is not useful. Uses `WHERE id LIKE 'prefix%'`, which is sargable
+    /// against the `memory_entries(id)` primary-key index.
+    ///
+    /// Caller must pass a prefix of at least 8 hex chars (UUID v4 has
+    /// ~1 in 4 billion collision probability at 8 chars for a personal
+    /// corpus). This is enforced at MCP/CLI boundary, not in db.rs.
+    pub fn find_by_id_prefix(
+        &self,
+        prefix: &str,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<String>> {
+        let pattern = format!("{prefix}%");
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let rows: Vec<String> = match project_id {
+            Some(pid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memory_entries
+                     WHERE id LIKE ?1 AND project_id = ?2
+                     LIMIT 2",
+                )?;
+                let mapped =
+                    stmt.query_map(params![pattern, pid], |row| row.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memory_entries
+                     WHERE id LIKE ?1 LIMIT 2",
+                )?;
+                let mapped = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
     /// Mark a memory as invalid (set valid_until, optionally superseded_by and invalidation_reason).
     pub fn invalidate_memory(
         &self,
@@ -998,6 +1038,56 @@ mod tests {
         let db = test_db();
         let entry = db.get_memory("nonexistent").unwrap();
         assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_full_uuid() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("test-project")).unwrap();
+        let matches = db.find_by_id_prefix(&id, None).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], id);
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_unique_short() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("test-project")).unwrap();
+        let prefix = &id[..8];
+        let matches = db.find_by_id_prefix(prefix, None).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], id);
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_no_match() {
+        let db = test_db();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        // "zz" is not a valid hex prefix; no UUID can start with it
+        let matches = db.find_by_id_prefix("zz", None).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_caps_at_two() {
+        let db = test_db();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        db.insert_memory(sample_memory("test-project")).unwrap();
+        // empty prefix matches all 3 rows via LIKE '%'; LIMIT 2 caps the result
+        // so callers see "≥2" as the collision signal without enumerating all
+        let matches = db.find_by_id_prefix("", None).unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_find_by_id_prefix_respects_project_id() {
+        let db = test_db();
+        let id_a = db.insert_memory(sample_memory("project-a")).unwrap();
+        let _id_b = db.insert_memory(sample_memory("project-b")).unwrap();
+        let matches = db.find_by_id_prefix("", Some("project-a")).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], id_a);
     }
 
     #[test]
