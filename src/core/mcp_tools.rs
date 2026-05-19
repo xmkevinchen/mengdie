@@ -121,6 +121,10 @@ pub struct SearchOutput {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SearchResultItem {
     pub id: String,
+    /// First 8 hex chars of `id` — a citable short form for LLM output.
+    /// Use with `memory_invalidate` (and future `memory_get`) prefix
+    /// lookup. F-009.
+    pub short_id: String,
     pub title: String,
     pub source_file: String,
     /// One of: conclusion | review | plan | retrospect | synthesis.
@@ -247,8 +251,10 @@ impl MengdieServer {
             .into_iter()
             .map(|r| {
                 let snippet = r.entry.content.chars().take(200).collect::<String>();
+                let short_id = r.entry.id.chars().take(8).collect::<String>();
                 SearchResultItem {
                     id: r.entry.id,
+                    short_id,
                     title: r.entry.title,
                     source_file: r.entry.source_file,
                     source_type: r.entry.source_type,
@@ -481,6 +487,29 @@ mod tests {
     #[test]
     fn test_source_type_synthesis_display() {
         assert_eq!(SourceType::Synthesis.to_string(), "synthesis");
+    }
+
+    #[test]
+    fn test_search_result_short_id_derivation() {
+        // F-009 contract: SearchResultItem::short_id is the first 8
+        // chars of `id` — see construction site in McpServer::search.
+        // This test pins the derivation rule (chars().take(8)) so any
+        // future refactor that changes the prefix length or source
+        // field has to update both the struct doc + this assertion.
+        let item = SearchResultItem {
+            id: "88a93a9b-3c32-47ba-a1b0-d6789abcdef0".to_string(),
+            short_id: "88a93a9b".to_string(),
+            title: "t".to_string(),
+            source_file: "f".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            entities: "e".to_string(),
+            score: 0.0,
+            valid_from: "2026-01-01T00:00:00Z".to_string(),
+            snippet: "s".to_string(),
+        };
+        assert_eq!(item.short_id, item.id.chars().take(8).collect::<String>());
+        assert_eq!(item.short_id.len(), 8);
     }
 
     #[test]
