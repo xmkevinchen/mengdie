@@ -402,6 +402,28 @@ impl Db {
         Ok(returned_id)
     }
 
+    /// Bump recall_count + last_recalled without touching avg_relevance.
+    ///
+    /// Used by `memory_get` (F-010): a direct fact lookup is a "consult"
+    /// signal but has no meaningful relevance score (caller explicitly
+    /// chose this fact, not the ranker). Mixing 0.0 or 1.0 into the EMA
+    /// would corrupt the running average — recall_count alone is the
+    /// right channel for "this fact was consulted".
+    ///
+    /// Returns false if ID not found.
+    pub fn bump_recall_only(&self, id: &str) -> anyhow::Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let rows = conn.execute(
+            "UPDATE memory_entries SET
+                recall_count = recall_count + 1,
+                last_recalled = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Update recall statistics after a search hit. Returns false if ID not found.
     pub fn record_recall(&self, id: &str, relevance_score: f64) -> anyhow::Result<bool> {
         let now = Utc::now().to_rfc3339();
@@ -1101,6 +1123,34 @@ mod tests {
         let entry = db.get_memory(&id).unwrap().unwrap();
         assert!(entry.valid_until.is_some());
         assert_eq!(entry.superseded_by.as_deref(), Some("new-id"));
+    }
+
+    #[test]
+    fn test_bump_recall_only_increments_count_and_last_recalled() {
+        let db = test_db();
+        let id = db.insert_memory(sample_memory("test-project")).unwrap();
+        let before = db.get_memory(&id).unwrap().unwrap();
+        assert_eq!(before.recall_count, 0);
+        assert!(before.last_recalled.is_none());
+        let pre_avg = before.avg_relevance;
+
+        let bumped = db.bump_recall_only(&id).unwrap();
+        assert!(bumped);
+
+        let after = db.get_memory(&id).unwrap().unwrap();
+        assert_eq!(after.recall_count, 1);
+        assert!(after.last_recalled.is_some());
+        // avg_relevance MUST NOT change — that's the whole point of having a
+        // separate helper. record_recall mixes the score into the EMA;
+        // bump_recall_only does not.
+        assert_eq!(after.avg_relevance, pre_avg);
+    }
+
+    #[test]
+    fn test_bump_recall_only_returns_false_for_unknown_id() {
+        let db = test_db();
+        let bumped = db.bump_recall_only("nonexistent-id").unwrap();
+        assert!(!bumped);
     }
 
     #[test]
