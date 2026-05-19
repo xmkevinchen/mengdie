@@ -10,7 +10,7 @@ use super::embeddings::Embedder;
 use super::metrics;
 use std::sync::{Arc, Mutex};
 
-/// MCP server with 3 tools: memory_search, memory_ingest, memory_invalidate.
+/// MCP server with 4 tools: memory_search, memory_ingest, memory_get, memory_invalidate.
 pub struct MengdieServer {
     tool_router: ToolRouter<Self>,
     db: Db,
@@ -99,6 +99,18 @@ pub struct IngestParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct GetParams {
+    /// Full UUID (36 chars) OR ≥ 8-char prefix of a memory_entries.id.
+    /// Prefix lookup is scoped to the current project unless `project_id`
+    /// or `scope: "global"` overrides it.
+    pub memory_id: String,
+    /// Override project_id (default: inferred from cwd at server startup).
+    pub project_id: Option<String>,
+    /// Search scope: omit for current project, "global" for all projects.
+    pub scope: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct InvalidateParams {
     /// ID of the memory entry to invalidate.
     pub entry_id: String,
@@ -154,6 +166,75 @@ pub struct ConflictItem {
     pub id: String,
     pub title: String,
     pub reason: String,
+}
+
+/// Full fact shape returned by `memory_get` — mirrors `MemoryEntry` minus
+/// the `embedding` BLOB (~1.5KB f32 per fact; not useful over MCP wire).
+/// `embedding_dim` retained for diagnostic purposes (e.g., F-008 Memory
+/// Lint Check 3 surfacing).
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryEntryView {
+    pub id: String,
+    /// First 8 hex chars of `id` — citable short form (F-009 contract).
+    pub short_id: String,
+    pub project_id: String,
+    pub source_file: String,
+    pub source_type: String,
+    pub knowledge_type: String,
+    pub title: String,
+    /// Full content of the memory, NOT a 200-char snippet. The whole
+    /// point of memory_get is to expand a cited fact.
+    pub content: String,
+    pub entities: String,
+    pub valid_from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    pub recall_count: i64,
+    pub avg_relevance: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recalled: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_dim: Option<i64>,
+    pub is_longterm: bool,
+    pub created_at: String,
+}
+
+impl From<super::db::MemoryEntry> for MemoryEntryView {
+    fn from(e: super::db::MemoryEntry) -> Self {
+        let short_id = e.id.chars().take(8).collect();
+        Self {
+            id: e.id,
+            short_id,
+            project_id: e.project_id,
+            source_file: e.source_file,
+            source_type: e.source_type,
+            knowledge_type: e.knowledge_type,
+            title: e.title,
+            content: e.content,
+            entities: e.entities,
+            valid_from: e.valid_from,
+            valid_until: e.valid_until,
+            superseded_by: e.superseded_by,
+            recall_count: e.recall_count,
+            avg_relevance: e.avg_relevance,
+            last_recalled: e.last_recalled,
+            embedding_dim: e.embedding_dim,
+            is_longterm: e.is_longterm,
+            created_at: e.created_at,
+        }
+    }
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct GetOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<MemoryEntryView>,
+    /// Non-empty when get failed (unknown id, ambiguous prefix, cross-
+    /// project mismatch, prefix too short, DB error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -383,6 +464,115 @@ impl MengdieServer {
     }
 
     #[tool(
+        name = "memory_get",
+        description = "Fetch the full content of a single memory by ID. Returns the complete fact (not a 200-char snippet) plus provenance, validity, supersession, and recall stats. Side effect: increments recall_count + last_recalled (avg_relevance is NOT touched — direct lookup has no meaningful relevance score). Accepts either a full UUID (36 chars) or an 8+ char prefix; prefix is scoped to the current project unless scope='global'. Use after memory_search to expand a cited fact."
+    )]
+    async fn get(&self, Parameters(params): Parameters<GetParams>) -> Json<GetOutput> {
+        // F-010: project scope resolution mirrors memory_search.
+        let pid_owned = params
+            .project_id
+            .clone()
+            .unwrap_or_else(|| self.default_project_id.clone());
+        let scope_for_lookup: Option<&str> = match params.scope.as_deref() {
+            Some("global") => None,
+            _ => Some(pid_owned.as_str()),
+        };
+
+        // Resolve memory_id: full 36-char UUID → fast path; ≥ 8-char prefix
+        // → scoped lookup; < 8-char → reject (F-009 boundary).
+        let resolved_id = if params.memory_id.len() == 36 {
+            params.memory_id.clone()
+        } else if params.memory_id.len() < 8 {
+            return Json(GetOutput {
+                entry: None,
+                error: Some(format!(
+                    "Prefix '{}' is too short (need ≥ 8 chars, or pass a full 36-char UUID)",
+                    params.memory_id
+                )),
+            });
+        } else {
+            match self
+                .db
+                .find_by_id_prefix(&params.memory_id, scope_for_lookup)
+            {
+                Ok(matches) if matches.len() == 1 => matches.into_iter().next().unwrap(),
+                Ok(matches) if matches.is_empty() => {
+                    return Json(GetOutput {
+                        entry: None,
+                        error: Some(match scope_for_lookup {
+                            Some(p) => format!(
+                                "No memory matches prefix '{}' in project '{}'",
+                                params.memory_id, p
+                            ),
+                            None => format!(
+                                "No memory matches prefix '{}' (global scope)",
+                                params.memory_id
+                            ),
+                        }),
+                    });
+                }
+                Ok(matches) => {
+                    return Json(GetOutput {
+                        entry: None,
+                        error: Some(format!(
+                            "Prefix '{}' is ambiguous; matches at least: {}; extend prefix to disambiguate",
+                            params.memory_id,
+                            matches.join(", ")
+                        )),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "find_by_id_prefix failed in memory_get");
+                    return Json(GetOutput {
+                        entry: None,
+                        error: Some(format!("DB error during prefix lookup: {e}")),
+                    });
+                }
+            }
+        };
+
+        // Fetch the fact.
+        let entry = match self.db.get_memory(&resolved_id) {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                return Json(GetOutput {
+                    entry: None,
+                    error: Some(format!("No memory found with id '{resolved_id}'")),
+                });
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "get_memory failed");
+                return Json(GetOutput {
+                    entry: None,
+                    error: Some(format!("DB error: {e}")),
+                });
+            }
+        };
+
+        // Cross-project guard (unless caller asked for global scope).
+        if let Some(p) = scope_for_lookup {
+            if entry.project_id != p {
+                return Json(GetOutput {
+                    entry: None,
+                    error: Some(format!(
+                        "Memory '{}' belongs to project '{}', not '{}'; pass scope='global' or set project_id explicitly",
+                        resolved_id, entry.project_id, p
+                    )),
+                });
+            }
+        }
+
+        // Bump recall (count-only — no EMA contribution; direct lookup
+        // has no meaningful relevance score).
+        let _ = self.db.bump_recall_only(&resolved_id);
+
+        Json(GetOutput {
+            entry: Some(entry.into()),
+            error: None,
+        })
+    }
+
+    #[tool(
         name = "memory_invalidate",
         description = "Mark a memory as no longer valid. Set superseded_by when a newer memory replaces it — links the records for traceability. The reason field is persisted for audit. Accepts either a full UUID (36 chars) or an 8+ char prefix; collision returns an error listing matches."
     )]
@@ -505,10 +695,11 @@ impl MengdieServer {
 impl ServerHandler for MengdieServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_invalidate. \
-Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output. \
+            .with_instructions("AI-native Mengdie — knowledge management for AI development workflows. Tools: memory_search, memory_ingest, memory_get, memory_invalidate. \
+Workflow: (1) search for prior context before making decisions, (2) ingest new knowledge after producing durable output, (3) get full content of a cited fact via memory_get when search snippet is insufficient. \
 Conflict resolution: memory_ingest returns detected conflicts. For 'evolution candidate' conflicts (high similarity, same entity tags), call memory_invalidate with superseded_by=new_entry_id to link old→new. For 'recent conflict', surface to the user before resolving. \
-For atomic resolution, pass resolves=[old_id, ...] to memory_ingest to insert and invalidate in one transaction.")
+For atomic resolution, pass resolves=[old_id, ...] to memory_ingest to insert and invalidate in one transaction. \
+ID shape: memory_search returns short_id (8-char UUID prefix) alongside full id; memory_get and memory_invalidate accept either form (≥8 chars).")
     }
 }
 
@@ -593,6 +784,44 @@ mod tests {
         };
         assert_eq!(item.short_id, item.id.chars().take(8).collect::<String>());
         assert_eq!(item.short_id.len(), 8);
+    }
+
+    #[test]
+    fn test_memory_entry_view_from_preserves_fields() {
+        // F-010 contract: From<MemoryEntry> for MemoryEntryView preserves
+        // every non-embedding field. Embedding BLOB is dropped (wire cost);
+        // short_id is derived from id (F-009 contract).
+        use crate::core::db::MemoryEntry;
+        let entry = MemoryEntry {
+            id: "88a93a9b-3c32-47ba-a1b0-d6789abcdef0".to_string(),
+            project_id: "p".to_string(),
+            source_file: "f.md".to_string(),
+            source_type: "conclusion".to_string(),
+            knowledge_type: "decisional".to_string(),
+            title: "T".to_string(),
+            content: "C".repeat(500), // > snippet boundary
+            entities: "a,b".to_string(),
+            valid_from: "2026-01-01T00:00:00Z".to_string(),
+            valid_until: Some("2026-02-01T00:00:00Z".to_string()),
+            superseded_by: Some("other-id".to_string()),
+            recall_count: 7,
+            avg_relevance: 0.42,
+            last_recalled: Some("2026-01-15T00:00:00Z".to_string()),
+            embedding: Some(vec![0u8; 1536]), // dropped by view
+            embedding_dim: Some(384),
+            is_longterm: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let view: MemoryEntryView = entry.into();
+        assert_eq!(view.id, "88a93a9b-3c32-47ba-a1b0-d6789abcdef0");
+        assert_eq!(view.short_id, "88a93a9b");
+        assert_eq!(view.content.len(), 500); // full content, NOT snippet
+        assert_eq!(view.recall_count, 7);
+        assert_eq!(view.avg_relevance, 0.42);
+        assert!(view.is_longterm);
+        assert_eq!(view.embedding_dim, Some(384));
+        assert_eq!(view.valid_until.as_deref(), Some("2026-02-01T00:00:00Z"));
+        assert_eq!(view.superseded_by.as_deref(), Some("other-id"));
     }
 
     #[test]
