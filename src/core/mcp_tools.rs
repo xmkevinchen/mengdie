@@ -318,6 +318,17 @@ pub struct StatusOutput {
     /// Audit-pipeline nested snapshot (always global; audit table itself
     /// is not project-scoped at the row level today).
     pub audit: AuditView,
+    /// Embedding model name used by this mengdie instance. F-011 review
+    /// fixup (codex P1 + challenger P1): operators / LLM callers
+    /// debugging "search feels off" need to know which model the corpus
+    /// was embedded with. Hardcoded to "all-MiniLM-L6-v2" (v0.0.1 ship
+    /// model); future model swaps will source from `MengdieConfig`.
+    pub embedding_model: String,
+    /// Canonical embedding dimension this mengdie expects. Mirrors
+    /// schema.rs VEC_DIM (384 for all-MiniLM-L6-v2). Surfaces config
+    /// drift to callers without forcing a separate dim-discovery
+    /// round trip.
+    pub embedding_dim: i64,
     /// Non-empty when status could not be assembled (DB error).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -733,6 +744,12 @@ impl MengdieServer {
             last_ingest_at: breakdown.last_ingest_at,
             metrics,
             audit: audit_view,
+            // F-011 review fixup: hardcoded for v0.0.1's single
+            // embedding model (all-MiniLM-L6-v2 384d via fastembed-rs
+            // — see embeddings.rs:55). Future model swaps will source
+            // from MengdieConfig + propagate through StatusOutput.
+            embedding_model: "all-MiniLM-L6-v2".to_string(),
+            embedding_dim: 384,
             error: None,
         })
     }
@@ -762,6 +779,10 @@ impl MengdieServer {
                     orphan_gc: Default::default(),
                     unresolved_contradictions: Default::default(),
                     embedding_drift: Default::default(),
+                    // F-008 review fixup (challenger P6): populate
+                    // error field so callers can distinguish "all
+                    // clean" from "lint pass aborted partway".
+                    error: Some(format!("run_lint failed: {e}")),
                 })
             }
         }

@@ -42,6 +42,12 @@ pub struct LintReport {
     pub orphan_gc: OrphanCheck,
     pub unresolved_contradictions: ContradictionCheck,
     pub embedding_drift: EmbeddingDriftCheck,
+    /// Non-empty when run_lint failed (lock poisoned, schema mismatch,
+    /// SQL error). All-zero counts in the absence of `error` means the
+    /// DB is genuinely clean; all-zero counts WITH `error` set means
+    /// the lint pass aborted partway. F-008 review fixup (challenger P6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema, Default)]
@@ -113,6 +119,7 @@ impl Db {
             orphan_gc,
             unresolved_contradictions,
             embedding_drift,
+            error: None,
         })
     }
 
