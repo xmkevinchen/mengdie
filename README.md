@@ -65,7 +65,7 @@ That's it. Three tools appear in Claude Code:
 
 ### In Claude Code (automatic)
 
-Once registered, Claude Code can call `mengdie_search` / `mengdie_ingest` / `mengdie_invalidate` in any conversation. AI tools that support MCP (like the [AE plugin](https://github.com/anthropics/agentic-engineering)) will automatically use Mengdie if available.
+Once registered, Claude Code can call `mengdie_search` / `mengdie_ingest` / `mengdie_invalidate` in any conversation. AI tools that support MCP (like the [AE plugin](https://github.com/xmkevinchen/agentic-engineering)) will automatically use Mengdie if available.
 
 ### CLI
 
@@ -76,7 +76,7 @@ mengdie search "auth middleware" --global    # search across all projects
 mengdie search "API timeout" --min-score 0.5
 
 # Batch import existing documents
-mengdie import --dir ./docs/discussions/
+mengdie import --dir /path/to/markdown-notes/
 
 # Run Dreaming (promote frequently-recalled memories to long-term)
 mengdie dream
@@ -136,7 +136,7 @@ Mengdie is a standalone MCP server. Any tool that speaks MCP can use it.
 
 ### AE Plugin (Agentic Engineering)
 
-If you use the [AE plugin](https://github.com/anthropics/agentic-engineering) for Claude Code:
+If you use the [AE plugin](https://github.com/xmkevinchen/agentic-engineering) for Claude Code:
 - `ae:analyze` searches Mengdie for prior research before analysis
 - `ae:discuss` / `ae:plan` / `ae:review` / `ae:retrospect` — integration planned
 
