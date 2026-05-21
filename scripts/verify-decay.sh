@@ -117,7 +117,7 @@ if [[ -z "$JSON_LINE" ]]; then
     # Binary emitted SOMETHING but no dreaming_pass line — format regression.
     echo "ERROR: mengdie emitted stderr but no dreaming_pass JSON line." >&2
     echo "       This is likely a schema contract regression — verify the mengdie" >&2
-    echo "       binary's output format against docs/schemas/dreaming_pass.json." >&2
+    echo "       binary's stderr against the dreaming_pass event schema." >&2
   else
     # Binary exited 0 with empty stderr — it died before emitting the event
     # (OOM, SIGPIPE during flush, disk-full, etc.). Transient, not a script bug.

@@ -2,6 +2,7 @@
 name = "mengdie"
 version = "0.0.2"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 rusqlite = { version = "0.39", features = ["bundled", "load_extension"] }
