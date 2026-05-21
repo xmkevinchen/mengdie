@@ -1,27 +1,42 @@
-//! Plan 016 Step 4 — lightweight drift guard for the SQL embedded in
-//! `docs/operations/dreaming-decay.md`. Parses the doc, extracts the SQL
-//! query from between the locked HTML-comment markers, asserts the
-//! required filter conditions are present, and runs the query against a
-//! seeded 3-row fixture DB to confirm the filter is semantically correct.
+//! Drift guard for the SQL embedded in the operator's dreaming-decay
+//! procedure doc. Parses the doc, extracts the SQL query from between
+//! the locked HTML-comment markers, asserts the required filter
+//! conditions are present, and runs the query against a seeded 3-row
+//! fixture DB to confirm the filter is semantically correct.
 //!
-//! No coupling to internal DreamingResult fields (dropped per plan 016
-//! Doodlestein regret — those field names are likely to evolve during
-//! Phase 2 work). Doc-facing only: filter substring check + fixture count.
+//! The operator doc lives in the private archive (.ae/docs/operations/);
+//! when absent (e.g. public CI clone) the tests skip silently. See
+//! `read_doc()`.
 
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use mengdie::core::db::{Db, NewMemory};
 
-const DOC_REL: &str = "docs/operations/dreaming-decay.md";
+const DOC_REL: &str = ".ae/docs/operations/dreaming-decay.md";
 const THRESHOLD_BEGIN: &str = "<!-- threshold-snippet:begin -->";
 const THRESHOLD_END: &str = "<!-- threshold-snippet:end -->";
 
 /// Read the ops doc as a string; `CARGO_MANIFEST_DIR` resolves the
 /// workspace root at compile time regardless of `cargo test` cwd.
-fn read_doc() -> String {
+///
+/// Returns `None` when the doc is absent. The doc lives in the private
+/// operator archive (.ae/docs/operations/) on the maintainer's machine,
+/// not in the public source tree; this drift-guard runs against the
+/// archive when present and silently skips elsewhere (e.g. public CI).
+fn read_doc() -> Option<String> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DOC_REL);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "skip: {} not present (private operator archive only)",
+                path.display()
+            );
+            None
+        }
+        Err(e) => panic!("read {}: {}", path.display(), e),
+    }
 }
 
 /// Extract the first ```sql fenced block between `begin` and `end` markers.
@@ -69,7 +84,7 @@ fn extract_sql_between_markers(doc: &str, begin: &str, end: &str) -> String {
 
 #[test]
 fn threshold_snippet_contains_required_filter_triple() {
-    let doc = read_doc();
+    let Some(doc) = read_doc() else { return };
     let sql = extract_sql_between_markers(&doc, THRESHOLD_BEGIN, THRESHOLD_END);
 
     // Literal-substring checks — simple and robust against whitespace /
@@ -151,7 +166,7 @@ fn threshold_snippet_counts_only_decay_eligible_rows() {
 
     // Extract the doc's threshold SQL and run it. Expected: exactly 1 row
     // (only the decay-eligible one passes all three filter conditions).
-    let doc = read_doc();
+    let Some(doc) = read_doc() else { return };
     let sql = extract_sql_between_markers(&doc, THRESHOLD_BEGIN, THRESHOLD_END);
 
     // Debug: dump all rows to see the actual state.
