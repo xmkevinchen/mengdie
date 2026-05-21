@@ -2,6 +2,8 @@
 .fastembed_cache/
 .claude/cross-family-status.json
 .claude/scheduled_tasks.lock
+.claude/agents/
+.claude/pipeline.local.yml
 .ae/
 CLAUDE.local.md
 .DS_Store
