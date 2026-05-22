@@ -1,0 +1,11 @@
+/target
+.fastembed_cache/
+.claude/cross-family-status.json
+.claude/scheduled_tasks.lock
+.claude/agents/
+.claude/pipeline.local.yml
+.claude/skills/publish/
+.ae/
+CLAUDE.local.md
+.DS_Store
+**/.DS_Store

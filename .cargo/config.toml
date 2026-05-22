@@ -1,0 +1,13 @@
+# Per-target CFLAGS (cc-rs convention): macOS host builds get the Xcode SDK
+# path injected; Linux cross-compile builds see no matching var and ignore this.
+#
+# DEBUGGING HEURISTIC: if you hit an unexplained `-isysroot` or other
+# env flag appearing in cc invocations during a Cargo build, GREP
+# `.cargo/config.toml` `[env]` FIRST. Cargo [env] injects into every
+# build-script subprocess, bypassing shell unsets and evading
+# `env | sort` debug steps. Keep CFLAGS entries below scoped per
+# target — an unscoped CFLAGS would silently leak macOS flags into
+# Linux cross-compiles.
+[env]
+CFLAGS_x86_64_apple_darwin = "-isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+CFLAGS_aarch64_apple_darwin = "-isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"

@@ -1,0 +1,13 @@
+{
+  "is_error": false,
+  "result": "Consolidated 3 memories into a single synthesis.",
+  "structured_output": {
+    "title": "JSON Schema oneOf as anti-lazy-skip lever",
+    "content": "When using LLM token-decode-constrained structured output, a top-level oneOf covering both real-output and skip shapes prevents the model from fabricating output for clusters that lack a meaningful answer. Pair the schema with prompt-engineering language that raises the skip cost (state specifically what prevents synthesis), and add a minLength constraint on the skip-shape reason field so lazy skip-with-empty-reason is structurally rejected. The schema cannot prevent semantic laziness alone; the prompt and reason length constraint act as cost amplifiers.",
+    "entities": [
+      "json-schema-oneof-with-skip-shape",
+      "lazy-skip-mitigation-pattern",
+      "structured-output-semantic-vs-structural"
+    ]
+  }
+}

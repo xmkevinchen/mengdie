@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache fastembed model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-${{ runner.os }}-all-MiniLM-L6-v2
+      - name: Test
+        run: cargo test
+
+  # Cross-target compile check. `cargo check --target` is compile-phase
+  # only (no link), so this runs without a Linux linker. Redundant on
+  # an ubuntu-latest runner where host == target, but kept as a cheap
+  # guard if the runner topology ever shifts (e.g. macos-latest is
+  # added) — would catch any unscoped `[env] CFLAGS` reintroduction in
+  # `.cargo/config.toml` leaking macOS flags to a Linux target build.
+  cross-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Cross-check (Linux target compile only)
+        run: cargo check --target x86_64-unknown-linux-gnu

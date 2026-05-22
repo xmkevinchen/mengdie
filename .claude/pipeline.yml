@@ -1,0 +1,48 @@
+# .claude/pipeline.yml — Agentic Engineering project config (public)
+#
+# Per-operator imports (project_agents, agent_libraries) live in
+# .claude/pipeline.local.yml (gitignored).
+
+# --- Test & Lint ---
+test:
+  command: "cargo test"
+  framework: "cargo"
+
+lint:
+  command: "cargo clippy"
+
+# --- Output Directories ---
+# All AE pipeline outputs land under .ae/ (gitignored) so the R&D
+# stream stays local. Historical archive of pre-public outputs lives
+# alongside at .ae/docs/.
+output:
+  discussions: ".ae/docs/discussions/"
+  plans: ".ae/docs/plans/"
+  milestones: ".ae/docs/milestones/"
+  backlog: ".ae/docs/backlog/"
+  reviews: ".ae/docs/reviews/"
+  analyses: ".ae/docs/analyses/"
+
+# --- Test Plugin ---
+test_plugin:
+  judge: codex
+
+# --- Work Execution ---
+work:
+  max_fix_loops: 3
+  auto_pass: true
+  review_mode: full
+  security_patterns:
+    - "auth/*"
+    - "security/*"
+    - "*.env"
+    - "*secret*"
+    - "*credential*"
+    - "*.pem"
+    - "*.key"
+    - "migrations/*"
+
+# --- Cross-Family Review ---
+cross_family:
+  codex: true
+  gemini: true

@@ -1,0 +1,232 @@
+use anyhow::Context;
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+
+/// Embedding behavior needed by the ingestion pipeline. Extracted as a
+/// trait so tests can substitute a mock without loading the fastembed
+/// ORT library (which SIGILLs on pre-AVX2 CPUs — see discussion 020 and
+/// plan 014). Production code uses `Embedder`, tests use `MockEmbedder`.
+///
+/// NOTE (plan 014 /ae:review — architecture-reviewer P2#2, challenger
+/// #2): the trait impl and the inherent `Embedder::embed_with_context`
+/// are identical by construction — the trait delegates to the inherent
+/// method. Do NOT add logic (caching, retries, etc.) to one side
+/// without mirroring it on the other; divergence would silently produce
+/// inconsistent behavior between test-seam callers (`&mut dyn Embed`)
+/// and direct callers (`&mut Embedder`). If that happens, either mirror
+/// or collapse the inherent method into the trait impl.
+pub trait Embed {
+    fn embed_with_context(
+        &mut self,
+        content: &str,
+        ctx: &EmbeddingContext,
+    ) -> anyhow::Result<Vec<f32>>;
+}
+
+/// Wrapper around fastembed for generating text embeddings.
+pub struct Embedder {
+    model: TextEmbedding,
+    dim: usize,
+}
+
+/// Metadata to prepend to content before embedding (from qmd learnings).
+pub struct EmbeddingContext {
+    pub knowledge_type: String,
+    pub entities: String,
+    pub project_id: String,
+    pub title: String,
+}
+
+impl Embed for Embedder {
+    fn embed_with_context(
+        &mut self,
+        content: &str,
+        ctx: &EmbeddingContext,
+    ) -> anyhow::Result<Vec<f32>> {
+        // Delegate to the inherent method below.
+        Embedder::embed_with_context(self, content, ctx)
+    }
+}
+
+impl Embedder {
+    /// Initialize the embedding model. Downloads ~90MB on first run.
+    pub fn new() -> anyhow::Result<Self> {
+        let model = TextEmbedding::try_new(
+            // false: progress output to stderr corrupts MCP stdio transport
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+        )
+        .context("failed to initialize embedding model")?;
+
+        Ok(Self { model, dim: 384 })
+    }
+
+    /// Generate an embedding for raw text.
+    ///
+    /// Asserts the output is unit-normalized (L2 norm within `1.0 ± 1e-3`)
+    /// at the embedder boundary — see F-006 review challenger #2/#3 +
+    /// cross-family Codex/Gemma. The `vector.rs::search_vector`
+    /// distance-to-similarity formula `score = 1.0 - distance / 2.0`
+    /// assumes this; if fastembed ever stops normalizing (model swap,
+    /// upstream regression), the formula silently produces out-of-range
+    /// scores. This runtime check fires in every build profile (NOT
+    /// `debug_assert!`), so the assumption is verified on every embed
+    /// call in production — not only when an operator runs the
+    /// `#[ignore]` integration test in `tests/embeddings.rs`.
+    pub fn embed_text(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let embeddings = self
+            .model
+            .embed(vec![text.to_string()], None)
+            .context("embedding generation failed")?;
+        let embedding = embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no embedding returned"))?;
+        let norm_sq: f32 = embedding.iter().map(|x| x * x).sum();
+        let norm = norm_sq.sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "fastembed must produce unit-normalized vectors (norm ≈ 1.0); \
+             got norm = {norm} (norm² = {norm_sq}). The vector.rs \
+             similarity formula `1.0 - distance / 2.0` assumes this; \
+             if fastembed has changed normalization behavior, either \
+             re-normalize at this boundary or rewrite the formula in \
+             vector.rs to match the actual output range."
+        );
+        Ok(embedding)
+    }
+
+    /// Generate an embedding with metadata-in-chunk encoding.
+    /// Prepends structured metadata to content before embedding,
+    /// improving retrieval quality without changing the query path.
+    pub fn embed_with_context(
+        &mut self,
+        content: &str,
+        ctx: &EmbeddingContext,
+    ) -> anyhow::Result<Vec<f32>> {
+        let enriched = format!(
+            "[{}] [entities: {}] [project: {}]\nTitle: {}\n---\n{}",
+            ctx.knowledge_type, ctx.entities, ctx.project_id, ctx.title, content
+        );
+        self.embed_text(&enriched)
+    }
+
+    /// Expected embedding dimension.
+    pub fn dimension(&self) -> usize {
+        self.dim
+    }
+}
+
+/// Serialize a Vec<f32> to IEEE 754 little-endian bytes for BLOB storage.
+pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Deserialize IEEE 754 little-endian BLOB back to Vec<f32>.
+/// Returns error if blob length is not divisible by 4 (corrupted data).
+pub fn blob_to_embedding(blob: &[u8]) -> anyhow::Result<Vec<f32>> {
+    anyhow::ensure!(
+        blob.len().is_multiple_of(4),
+        "invalid embedding blob: length {} not divisible by 4",
+        blob.len()
+    );
+    Ok(blob
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+/// Validate that an embedding contains only finite values (no NaN/Inf).
+pub fn validate_embedding(embedding: &[f32]) -> anyhow::Result<()> {
+    for (i, &v) in embedding.iter().enumerate() {
+        anyhow::ensure!(
+            v.is_finite(),
+            "embedding contains non-finite value at index {i}: {v}"
+        );
+    }
+    Ok(())
+}
+
+/// Cosine similarity between two vectors. Returns 0.0 for zero-length or mismatched vectors.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blob_roundtrip() {
+        let original = vec![1.0_f32, -0.5, 0.0, std::f32::consts::PI];
+        let blob = embedding_to_blob(&original);
+        assert_eq!(blob.len(), 16); // 4 floats * 4 bytes
+        let restored = blob_to_embedding(&blob).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_blob_malformed_length() {
+        let bad_blob = vec![0u8, 1, 2]; // 3 bytes, not divisible by 4
+        assert!(blob_to_embedding(&bad_blob).is_err());
+    }
+
+    #[test]
+    fn test_validate_embedding_finite() {
+        assert!(validate_embedding(&[1.0, 2.0, 3.0]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_embedding_nan() {
+        assert!(validate_embedding(&[1.0, f32::NAN, 3.0]).is_err());
+    }
+
+    #[test]
+    fn test_validate_embedding_inf() {
+        assert!(validate_embedding(&[f32::INFINITY, 0.0]).is_err());
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let v = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_opposite() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - (-1.0)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_length() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        let a = vec![0.0, 0.0];
+        let b = vec![1.0, 2.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+}

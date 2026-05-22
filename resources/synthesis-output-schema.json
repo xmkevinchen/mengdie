@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "skip":     { "type": "boolean" },
+    "reason":   { "type": "string", "minLength": 20 },
+    "title":    { "type": "string", "maxLength": 80 },
+    "content":  { "type": "string" },
+    "entities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 6
+    }
+  },
+  "required": ["skip"]
+}
