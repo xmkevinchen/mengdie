@@ -19,7 +19,7 @@ output:
   discussions: ".ae/docs/discussions/"
   plans: ".ae/docs/plans/"
   milestones: ".ae/docs/milestones/"
-  backlog: ".ae/docs/backlog/"
+  backlog: ".ae/backlog/"
   reviews: ".ae/docs/reviews/"
   analyses: ".ae/docs/analyses/"
 
