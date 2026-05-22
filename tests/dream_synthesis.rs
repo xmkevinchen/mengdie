@@ -577,3 +577,148 @@ fn get_synthesis_with_sources_returns_placeholder_for_deleted_source() {
 
     drop(tmp);
 }
+
+// ============================================================================
+// F-014 / BL-022 — AC1: synthesis rows have non-NULL embedding post-pass
+// ============================================================================
+//
+// Unit-test-style integration test for the eager-embed fix. Uses a local
+// FixedProvider stub (no live `claude` CLI required) so this runs in CI
+// without `--ignored`. The embedder is real `Embedder::new()` per the
+// codebase convention (~90MB cached fastembed model; ~100-200ms ONNX
+// load post-cache).
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use mengdie::core::llm::{LlmFuture, LlmProvider};
+
+/// Minimal LlmProvider stub that returns a fixed synthesis JSON for every
+/// call. Mirrors the pattern from `src/core/dreaming.rs::tests::FixedProvider`
+/// (cannot import from a `#[cfg(test)] mod tests` block into an integration
+/// test; intentional duplication).
+struct FixedSynthesisProvider {
+    payload: String,
+    call_count: AtomicUsize,
+}
+
+impl FixedSynthesisProvider {
+    fn new(payload: impl Into<String>) -> Self {
+        Self {
+            payload: payload.into(),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl LlmProvider for FixedSynthesisProvider {
+    fn complete<'a>(&'a self, _system: &'a str, _prompt: &'a str) -> LlmFuture<'a> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        let payload = self.payload.clone();
+        Box::pin(async move { Ok(payload) })
+    }
+    fn complete_structured<'a>(
+        &'a self,
+        system: &'a str,
+        prompt: &'a str,
+        _schema: &'a str,
+    ) -> LlmFuture<'a> {
+        self.complete(system, prompt)
+    }
+    fn model(&self) -> &str {
+        "stub-fixed-synthesis"
+    }
+}
+
+/// AC1: after `run_synthesis_pass` produces a synthesis row, that row has
+/// `embedding IS NOT NULL` and `embedding_dim = 384` (BL-022 regression
+/// guard — pre-fix the row was stored with `embedding=None`).
+#[tokio::test]
+async fn synthesis_rows_have_non_null_embedding_after_pass() {
+    let db = Db::open_in_memory().unwrap();
+
+    // Seed 3 source memories with near-identical embeddings → one tight cluster.
+    // Real embeddings (small nudge per row) so `cluster_memories` finds them
+    // at threshold 0.9.
+    let project = "ac1-proj";
+    for i in 0..3 {
+        let emb = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+        seed_memory(
+            &db,
+            project,
+            &format!("Source {i}"),
+            &format!(
+                "Source memory {i}: synthesis-eligible content for the F-014 AC1 test. \
+                 Repeated entity tags so clustering groups them at threshold."
+            ),
+            &emb,
+        );
+    }
+
+    // Stub provider returns a fixed synthesis JSON — no live LLM needed.
+    const SYNTHESIS_JSON: &str = r#"{
+        "title": "AC1 Synthesis",
+        "content": "Synthesized fact derived from 3 source memories.",
+        "entities": ["bl-022-ac1", "synthesis"],
+        "source_memory_ids": []
+    }"#;
+    let provider = FixedSynthesisProvider::new(SYNTHESIS_JSON);
+
+    let embedder = Arc::new(Mutex::new(
+        Embedder::new().expect("Embedder::new failed in AC1 test"),
+    ));
+
+    let result = run_synthesis_pass(
+        &db,
+        Some(project),
+        &provider,
+        Arc::clone(&embedder),
+        0.9,
+        3,
+        20,
+        false, // dry_run = false — must write
+    )
+    .await
+    .expect("synthesis pass should succeed");
+
+    // Defensive guard: zero syntheses_created would silently pass the SQL
+    // assertion below (no rows to check). Fail loudly if the cluster didn't
+    // produce anything — the test setup is broken in that case.
+    assert!(
+        result.syntheses_created > 0,
+        "expected at least 1 synthesis row; got 0 (clusters_processed={}, llm_errors={}, parse_errors={})",
+        result.clusters_processed,
+        result.llm_call_errors,
+        result.parse_errors
+    );
+
+    // BL-022 / AC1 core assertion: every synthesis row in this project has
+    // a non-NULL embedding of the expected dimension. Use `db.list_memories`
+    // (pub API) rather than reaching into pub(crate) `lock_conn`.
+    let all_rows = db
+        .list_memories(Some(project))
+        .expect("list_memories should succeed");
+    let synthesis_rows: Vec<&mengdie::core::db::MemoryEntry> = all_rows
+        .iter()
+        .filter(|m| m.source_type == "synthesis")
+        .collect();
+
+    assert!(
+        !synthesis_rows.is_empty(),
+        "synthesis row(s) should exist in the project after run_synthesis_pass"
+    );
+
+    for row in &synthesis_rows {
+        assert!(
+            row.embedding.is_some(),
+            "synthesis row {} has NULL embedding (BL-022 regression — F-014 fix not applied)",
+            row.id
+        );
+        assert_eq!(
+            row.embedding_dim,
+            Some(384),
+            "synthesis row {} has embedding_dim={:?}, expected Some(384) (all-MiniLM-L6-v2 dim)",
+            row.id,
+            row.embedding_dim
+        );
+    }
+}
