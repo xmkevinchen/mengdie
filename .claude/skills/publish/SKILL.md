@@ -129,15 +129,19 @@ gh release view <version> --repo xmkevinchen/mengdie \
   --json assets --jq '.assets | map(.name)'
 ```
 
-Expected assets (exact 5):
+Expected assets (exact 4):
 
 - `mengdie-<version>-linux-amd64.tar.gz`
 - `mengdie-<version>-linux-arm64.tar.gz`
-- `mengdie-<version>-darwin-amd64.tar.gz`
 - `mengdie-<version>-darwin-arm64.tar.gz`
 - `mengdie-<version>-windows-amd64.zip`
 
-If fewer than 5: dig into the failed matrix job
+(Intel macOS / `darwin-amd64` was dropped from the matrix after v0.0.2
+publish — GitHub's macos-13 hosted runner pool reliably stalls jobs in
+`queued`. Add it back when macOS Intel becomes practical or if a user
+specifically asks for that target.)
+
+If fewer than 4: dig into the failed matrix job
 (`gh run view "$RUN_ID" --repo xmkevinchen/mengdie --log-failed`).
 
 ## Rollback

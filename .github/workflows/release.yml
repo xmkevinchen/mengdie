@@ -57,10 +57,11 @@ jobs:
             os: ubuntu-24.04-arm
             archive: tar.gz
             asset_suffix: linux-arm64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.gz
-            asset_suffix: darwin-amd64
+          # Intel macOS (x86_64-apple-darwin / macos-13) dropped: GitHub's
+          # macos-13 hosted runner pool is shrinking with Apple's Intel EOL
+          # and jobs reliably stall in `queued` for hours. macOS userbase
+          # is ~90%+ Apple Silicon since 2024; macos-latest (aarch64)
+          # covers the relevant audience.
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz

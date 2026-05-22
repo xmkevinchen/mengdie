@@ -30,12 +30,17 @@ pub(crate) fn ensure_sqlite_vec_registered() {
         // shape; this transmute matches the pattern in sqlite-vec's own
         // doc-test (`sqlite-vec-0.1.9/src/lib.rs`). The full target signature
         // is the standard sqlite3 extension entry-point per sqlite3ext.h.
+        //
+        // Use `c_char` not raw `i8` — `char` is signed on x86_64 but UNSIGNED
+        // on aarch64-linux, so `i8` here triggers an E0308 type mismatch
+        // against rusqlite's ffi prototype on ARM Linux builds. The c_char
+        // alias resolves to the right primitive per target.
         unsafe {
             sqlite3_auto_extension(Some(std::mem::transmute::<
                 *const (),
                 unsafe extern "C" fn(
                     *mut rusqlite::ffi::sqlite3,
-                    *mut *mut i8,
+                    *mut *mut std::os::raw::c_char,
                     *const rusqlite::ffi::sqlite3_api_routines,
                 ) -> i32,
             >(
