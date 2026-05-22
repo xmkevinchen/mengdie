@@ -722,3 +722,125 @@ async fn synthesis_rows_have_non_null_embedding_after_pass() {
         );
     }
 }
+
+// ============================================================================
+// F-014 / BL-022 — AC4: synthesis rows participate in clustering AND are
+// discoverable via vector search post-fix. Closes the BL purpose loop.
+// ============================================================================
+
+use mengdie::core::clustering::cluster_memories;
+
+#[tokio::test]
+async fn synthesis_rows_participate_in_clustering_and_search_post_fix() {
+    let db = Db::open_in_memory().unwrap();
+    let project = "ac4-proj";
+
+    // Seed 3 source memories with near-identical embeddings → 1 cluster.
+    for i in 0..3 {
+        let emb = make_384d(&[1.0, 0.0, 0.0], 0.001 * i as f32);
+        seed_memory(
+            &db,
+            project,
+            &format!("AC4 Source {i}"),
+            &format!("AC4 source memory {i} for clustering + search test."),
+            &emb,
+        );
+    }
+
+    const AC4_SYNTHESIS_JSON: &str = r#"{
+        "title": "AC4 Synthesis",
+        "content": "AC4 synthesized fact — invariant on clustering+search discoverability.",
+        "entities": ["bl-022-ac4", "synthesis"],
+        "source_memory_ids": []
+    }"#;
+    let provider = FixedSynthesisProvider::new(AC4_SYNTHESIS_JSON);
+
+    let embedder = Arc::new(Mutex::new(
+        Embedder::new().expect("Embedder::new failed in AC4 test"),
+    ));
+
+    let result = run_synthesis_pass(
+        &db,
+        Some(project),
+        &provider,
+        Arc::clone(&embedder),
+        0.9,
+        3,
+        20,
+        false,
+    )
+    .await
+    .expect("synthesis pass should succeed");
+    assert!(
+        result.syntheses_created > 0,
+        "test setup: cluster must produce ≥1 synthesis"
+    );
+
+    // Locate the synthesis row + its embedding.
+    let synthesis_rows: Vec<_> = db
+        .list_memories(Some(project))
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.source_type == "synthesis")
+        .collect();
+    assert!(!synthesis_rows.is_empty());
+    let synthesis_row = &synthesis_rows[0];
+    let synthesis_id = synthesis_row.id.clone();
+    let synthesis_embedding_blob = synthesis_row
+        .embedding
+        .as_ref()
+        .expect("synthesis row must have non-NULL embedding post-Step-1");
+
+    // ------- AC4 assertion #1: clustering INCLUDES the synthesis row -------
+    //
+    // Pre-fix: load_embeddings (clustering.rs::load_embeddings) filters
+    // `embedding IS NOT NULL`, so synthesis rows were silently excluded.
+    // Post-fix: they have embeddings; they show up in either clusters OR
+    // residuals (both prove they cleared the filter).
+    let clustering_result = cluster_memories(&db, Some(project), 0.85, 2).unwrap();
+    let in_clusters = clustering_result
+        .clusters
+        .iter()
+        .any(|c| c.memory_ids.contains(&synthesis_id));
+    let in_residuals = clustering_result.residuals.contains(&synthesis_id);
+    assert!(
+        in_clusters || in_residuals,
+        "AC4 #1: synthesis row {synthesis_id} should appear in clusters or residuals; \
+         clusters={:?}, residuals={:?}",
+        clustering_result
+            .clusters
+            .iter()
+            .map(|c| &c.memory_ids)
+            .collect::<Vec<_>>(),
+        clustering_result.residuals
+    );
+
+    // ------- AC4 assertion #2: vector search returns the synthesis row -------
+    //
+    // Convert blob → Vec<f32> for the search query (use the same vector to
+    // get cosine distance 0 → guaranteed top rank against itself).
+    let query_embedding: Vec<f32> = synthesis_embedding_blob
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert_eq!(
+        query_embedding.len(),
+        384,
+        "embedding blob must decode to 384 floats"
+    );
+
+    let results = db
+        .memory_search("ac4 synthesis", &query_embedding, Some(project), 5)
+        .expect("memory_search should succeed");
+
+    let found = results.iter().any(|r| r.entry.id == synthesis_id);
+    assert!(
+        found,
+        "AC4 #2: synthesis row {synthesis_id} should appear in memory_search top-5; \
+         got: {:?}",
+        results
+            .iter()
+            .map(|r| (&r.entry.id, r.score))
+            .collect::<Vec<_>>()
+    );
+}
