@@ -14,6 +14,28 @@ This skill orchestrates the publish flow. Run it when a new version is ready
 to go out. Default scope: the requested version only — do not modify main
 history, do not bump version inside this skill (do that beforehand on main).
 
+## Tag philosophy
+
+**Version tags (`vX.Y.Z`) are `/publish`-only artifacts.** They are created
+on `public-main` (the release branch) at publish time and pushed to GitHub.
+They are NOT created on `main` (private dev). The Forgejo origin should
+never carry new `vX.Y.Z` tags going forward — `git fetch origin` should
+not contaminate the local tag namespace with private-side aliases.
+
+Tag namespace rule: **`vX.Y.Z` = what users see on GitHub**, full stop.
+
+One-time setup (per clone): disable tag fetch from Forgejo to prevent
+historical pre-rule tags or accidental private tags from drifting into
+the local namespace where they'd collide with publish-created tags:
+
+```bash
+git config remote.origin.tagopt --no-tags
+```
+
+(GitHub tags are always pulled explicitly via `git push github vX.Y.Z` and
+`git fetch github --tags` if you need them locally; they are never
+auto-pulled because GitHub is a push-only relationship for this repo.)
+
 ## Args
 
 - `<version>` (positional, required) — release tag, e.g. `v0.0.3`.
@@ -24,22 +46,32 @@ history, do not bump version inside this skill (do that beforehand on main).
 
 1. `git rev-parse --abbrev-ref HEAD` → `main`. If on another branch, stop.
 2. `git status --porcelain` empty. If dirty, stop.
-3. `git fetch origin github` succeeds.
-4. `git rev-list --count origin/main..main` is `0` — i.e. nothing in
-   `origin/main` not on local `main` and vice versa. If `main` is ahead of
-   `origin/main`, push first; if behind, pull. Either way: don't publish
-   stale state.
+3. `git fetch --multiple origin github` succeeds.
+   (Note the `--multiple` flag; `git fetch origin github` without it is
+   interpreted as "fetch ref `github` from `origin`", not "fetch from two
+   remotes" — that was the v0.0.2 bootstrap mistake.)
+4. `git rev-list --count origin/main..main` is `0` and
+   `git rev-list --count main..origin/main` is `0` — i.e. `main` is in
+   sync with `origin/main`. If ahead, push first; if behind, pull. Either
+   way: don't publish stale state.
 5. `Cargo.toml` `version` field equals `<version>` with the leading `v`
    stripped. If mismatched: stop with diff. The version bump is a
    normal commit on main before invoking this skill.
 6. `CHANGELOG.md` contains a heading `## <version>` or
    `## <version> — <date>`. If absent: stop. Public-facing release notes
    are required.
-7. `cargo test` passes. If failures: stop.
+7. `cargo test --all-targets` passes. **Note: `--all-targets` is required**;
+   plain `cargo test` only runs library unit tests, leaving the integration
+   suites under `tests/` unexercised — they're what catches MCP wire-format
+   and schema-migration regressions.
 8. `cargo clippy --all-targets -- -D warnings` passes.
-9. `git tag --list <version>` is empty (tag not yet created).
-10. `gh release view <version> --repo xmkevinchen/mengdie` returns
-    not-found (release not yet published).
+9. `gh release view <version> --repo xmkevinchen/mengdie` returns
+   not-found (release not yet published). This is the **authoritative**
+   "already released?" check — GitHub is the source of truth for what
+   has been published. (Local tag presence alone is not a reliable
+   signal: it could be a stale alias from a bootstrap scenario, a
+   leftover from a rolled-back release, etc. See "Bootstrap special
+   cases" below for handling tag-name collisions.)
 
 ## Squash + push + tag
 
@@ -126,6 +158,59 @@ git checkout main
 `--cleanup-tag` deletes the remote tag (which is what triggered release.yml);
 local tag is deleted separately.
 
+## Bootstrap special cases
+
+### Tag-name collision with a pre-existing Forgejo tag
+
+**Symptom**: the requested `<version>` already exists as a tag on
+Forgejo (or in the local tag namespace) pointing at a commit that is
+NOT on `public-main` — typically a private-side merge commit from
+before the dual-remote topology was set up. Pre-check 9 may pass (no
+GitHub release yet) but `git tag <version>` later fails with
+`fatal: tag already exists`.
+
+**Pattern (rename Forgejo's tag, free the namespace)**:
+
+```bash
+# Inspect what the pre-existing tag points to
+git cat-file -p <version> | head -10
+
+# Create a clearly-named historical alias at the same SHA, preserving
+# the annotated tag body so the original release notes survive
+ORIG_SHA=$(git rev-list -n 1 <version>)
+ORIG_BODY=$(git cat-file -p <version> | tail -n +6)   # skip object/type/tag/tagger/blank
+git tag -a <version>-internal "$ORIG_SHA" -m "$(printf '%s pre-public-mirror Forgejo ship (renamed from %s)\n\nOriginal tag body:\n\n%s' "$version" "$version" "$ORIG_BODY")"
+git push origin "$version"-internal
+
+# Delete the colliding tag — Forgejo first, then local
+# (DESTRUCTIVE — requires explicit operator approval)
+git push origin :refs/tags/<version>
+git tag -d <version>
+
+# Now <version> is free; resume the normal /publish flow from
+# "Squash + push + tag" step 4 onward.
+```
+
+**Why this works**: Forgejo's `<version>` tag is preserved under
+`<version>-internal` (same SHA, same annotated body, recoverable via
+`git push origin <version>-internal:refs/tags/<version>` if you ever
+need to restore it). The freed name is now available for a new
+`<version>` pointing at `public-main`'s squash commit.
+
+**This case only applies to versions tagged before the tag-philosophy
+rule was adopted** (e.g. mengdie's v0.0.1, v0.0.2). All versions
+created via this skill ship with their tags exclusively on public-main
++ GitHub, so this collision class does not recur for them.
+
+### History-import risk if you reuse a private-side tag
+
+**Do not** `git push github <existing-private-tag>` to publish a
+release — the tag points to a commit on private `main`, and pushing
+the tag transfers the underlying commit plus its entire ancestor
+chain. That would import the private R&D history into GitHub (the
+exact noise the orphan squash was designed to exclude). Always
+create the tag fresh on `public-main` after a squash-merge.
+
 ## Why this shape
 
 - **One commit per release on public-main**: the user reads GitHub history
@@ -137,6 +222,9 @@ local tag is deleted separately.
 - **Pre-checks are fail-fast and explicit**: a botched release is hard to
   retract once binaries are downloaded. Better to refuse on a stale CHANGELOG
   than to publish wrong notes.
+- **`gh release view` is the canonical "already released?" check**: more
+  reliable than local tag presence because local tags can be stale
+  aliases, half-rolled-back state, or bootstrap artifacts.
 
 ## What this skill does NOT do
 
@@ -149,3 +237,6 @@ local tag is deleted separately.
   If a NEW path needs stripping, add it to `.gitignore` (and `git rm` from
   history if it was previously tracked) — do not silently filter inside this
   skill.
+- Does not create or modify Forgejo tags — Forgejo's tag namespace is left
+  alone after the bootstrap (only `v0.0.1` + `v0.0.2-internal` should exist
+  there as historical artifacts).
