@@ -1,9 +1,12 @@
+use std::sync::{Arc, Mutex};
+
 use chrono::{DateTime, Utc};
 use rusqlite::{params, ToSql};
 
 use super::clustering::cluster_memories;
 use super::db::{parse_last_recalled, Db, NewMemory};
 use super::decay;
+use super::embeddings::{embedding_to_blob, Embedder, EmbeddingContext};
 use super::llm::LlmProvider;
 use super::synthesis::{
     build_synthesis_prompt, parse_synthesis_response, SynthesisInput, SynthesisOutcome,
@@ -397,10 +400,15 @@ impl SynthesisResult {
 /// 012 for the numerator extension, and `BL-synthesis-preload-db-miss-edge`
 /// for the remaining asymmetry (denominator counted, numerator never
 /// incremented if DB load fails — low-probability edge; not yet observed).
+// Crossed clippy's default arg limit (7) with the embedder addition. The
+// alternative — bundling threshold/min_size/max_cluster_size into a config
+// struct — is purely cosmetic and would churn 13 call-sites for no signal.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_synthesis_pass(
     db: &Db,
     project_id: Option<&str>,
     provider: &dyn LlmProvider,
+    embedder: Arc<Mutex<Embedder>>,
     threshold: f32,
     min_size: usize,
     max_cluster_size: usize,
@@ -562,6 +570,32 @@ pub async fn run_synthesis_pass(
             }
         };
 
+        // BL-022 / F-014: embed the synthesis content BEFORE insert so the row
+        // is queryable by vector search and participates in future clustering.
+        // The naive in-place embed_with_context call would (a) block the async
+        // executor on 2-10ms fastembed inference and (b) make this future !Send
+        // on multi-threaded tokio runtimes — both bad. Use the established
+        // Arc<Mutex<Embedder>> + spawn_blocking pattern from mcp_tools.rs:387,515.
+        let embedding = {
+            let embedder_handle = Arc::clone(&embedder);
+            let content = draft.content.clone();
+            let ctx = EmbeddingContext {
+                knowledge_type: "factual".to_string(),
+                entities: draft.entities.clone(),
+                project_id: proj.clone(),
+                title: draft.title.clone(),
+            };
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<f32>> {
+                let mut emb = embedder_handle
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("embedder lock poisoned: {e}"))?;
+                emb.embed_with_context(&content, &ctx)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking failed: {e}")))?
+        };
+        let embedding_dim = embedding.len() as i64;
+
         let new_mem = NewMemory {
             project_id: proj.clone(),
             source_file: format!("synthesis/{}.md", uuid::Uuid::new_v4()),
@@ -570,8 +604,8 @@ pub async fn run_synthesis_pass(
             title: draft.title,
             content: draft.content,
             entities: draft.entities,
-            embedding: None,
-            embedding_dim: None,
+            embedding: Some(embedding_to_blob(&embedding)),
+            embedding_dim: Some(embedding_dim),
             is_longterm: false, // syntheses earn long-term via dreaming, not by construction
         };
 
@@ -586,6 +620,20 @@ pub async fn run_synthesis_pass(
 mod tests {
     use super::*;
     use crate::core::db::NewMemory;
+
+    /// Embedder for the dreaming test module — synthesis pass requires an
+    /// `Arc<Mutex<Embedder>>` per F-014's BL-022 fix. We use real
+    /// `Embedder::new()` here (matches `tests/common/mod.rs::ensure_embedder_warm`
+    /// convention): the ~90MB fastembed model downloads once per cold
+    /// `~/.cache/fastembed/`, then in-memory ONNX session-load cost is
+    /// ~100-200ms per test invocation. Acceptable for synthesis-path tests
+    /// that exercise the real embed call. BL-051 will revisit when the
+    /// per-test load cost becomes painful.
+    fn test_embedder() -> Arc<Mutex<Embedder>> {
+        Arc::new(Mutex::new(
+            Embedder::new().expect("Embedder::new failed in dreaming test"),
+        ))
+    }
 
     fn test_db() -> Db {
         Db::open_in_memory().unwrap()
@@ -827,9 +875,18 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
 
         let provider = PanicProvider;
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0);
         assert_eq!(r.llm_errors(), 0);
@@ -852,9 +909,18 @@ mod tests {
         let src_ids = seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
 
         let provider = FixedProvider::new(OK_JSON);
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 1);
         assert_eq!(r.llm_errors(), 0);
@@ -906,9 +972,18 @@ mod tests {
             counter: AtomicUsize::new(0),
             ok_payload: OK_JSON.to_string(),
         };
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.clusters_processed, 2);
         assert_eq!(r.syntheses_created, 1);
         assert_eq!(r.llm_errors(), 1);
@@ -920,14 +995,32 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 0.0, 0.0]);
 
         let provider = FixedProvider::new(OK_JSON);
-        let r1 = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
-            .await
-            .unwrap();
+        let r1 = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(r1.syntheses_created, 1);
 
-        let r2 = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
-            .await
-            .unwrap();
+        let r2 = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
         // Re-run still counts the cluster as processed + "created" in-stat, but
         // the DB write is a no-op via content_hash ON CONFLICT DO UPDATE.
         assert_eq!(r2.syntheses_created, 1);
@@ -959,9 +1052,18 @@ mod tests {
         seed_tight_cluster(&db, "proj", 5, &[1.0, 0.0, 0.0]);
 
         let provider = PanicProvider; // must not be called
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 2, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            2,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0);
         assert_eq!(r.llm_errors(), 0);
@@ -979,14 +1081,32 @@ mod tests {
 
         let provider = FixedProvider::new(OK_JSON);
 
-        let r_high = run_synthesis_pass(&db, Some("proj"), &provider, 1.5, 3, 20, true)
-            .await
-            .unwrap();
+        let r_high = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            1.5,
+            3,
+            20,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(r_high.clusters_processed, 0);
 
-        let r_low = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, true)
-            .await
-            .unwrap();
+        let r_low = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(r_low.clusters_processed, 2);
     }
 
@@ -1005,9 +1125,18 @@ mod tests {
         seed_tight_cluster(&db, "proj", 2, &[1.0, 0.0, 0.0]); // pair cluster
 
         let provider = FixedProvider::new(SKIP_JSON);
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            2,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0);
         assert_eq!(r.syntheses_llm_skipped, 1);
@@ -1084,9 +1213,18 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 1.0, 0.0]);
 
         let provider = ClusterSizeAwareProvider;
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            2,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(r.clusters_processed, 4);
         assert_eq!(
@@ -1145,9 +1283,18 @@ mod tests {
         seed_tight_cluster(&db, "proj", 3, &[1.0, 1.0, 0.0]);
 
         let provider = FixedProvider::new(SKIP_JSON);
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 2, 20, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            2,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(r.clusters_processed, 4);
         assert_eq!(r.pair_clusters_processed, 2);
@@ -1179,9 +1326,18 @@ mod tests {
 
         const SKIP_PLUS_FIELDS: &str = r#"{"skip":true,"reason":"adjacent","title":"Ignored","content":"Ignored body.","entities":["x"]}"#;
         let provider = FixedProvider::new(SKIP_PLUS_FIELDS);
-        let r = run_synthesis_pass(&db, Some("proj"), &provider, 0.9, 3, 20, false)
-            .await
-            .unwrap();
+        let r = run_synthesis_pass(
+            &db,
+            Some("proj"),
+            &provider,
+            test_embedder(),
+            0.9,
+            3,
+            20,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.clusters_processed, 1);
         assert_eq!(r.syntheses_created, 0, "skip must win over title+content");
         assert_eq!(r.syntheses_llm_skipped, 1);

@@ -338,10 +338,19 @@ async fn cmd_dream(
 
     let cfg = mengdie::core::config::MengdieConfig::load_from_process_env()?;
     let provider = build_provider(&cfg.llm)?;
+    // BL-022 / F-014: load embedder for synthesis re-embed (Arc<Mutex<Embedder>>
+    // pattern matches mcp_tools.rs:17 so the &mut borrow is safe across the
+    // async loop's spawn_blocking calls).
+    eprintln!("Loading embedding model for synthesis...");
+    let embedder = std::sync::Arc::new(std::sync::Mutex::new(
+        mengdie::core::embeddings::Embedder::new()
+            .context("failed to initialize embedding model for synthesis")?,
+    ));
     let syn = run_synthesis_pass(
         db,
         project,
         provider.as_ref(),
+        std::sync::Arc::clone(&embedder),
         threshold,
         min_cluster_size,
         max_cluster_size,

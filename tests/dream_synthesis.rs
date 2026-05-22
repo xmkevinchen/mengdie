@@ -16,10 +16,12 @@
 
 use tokio::process::Command;
 
+use std::sync::{Arc, Mutex};
+
 use mengdie::core::config::{LlmConfig, MengdieConfig};
 use mengdie::core::db::{Db, NewMemory};
 use mengdie::core::dreaming::run_synthesis_pass;
-use mengdie::core::embeddings::embedding_to_blob;
+use mengdie::core::embeddings::{embedding_to_blob, Embedder};
 use mengdie::core::llm::build_provider;
 
 async fn claude_on_path() -> bool {
@@ -88,10 +90,19 @@ async fn end_to_end_dream_synthesis_writes_one_row_with_six_links() {
     let llm_cfg: LlmConfig = cfg.llm;
     let provider = build_provider(&llm_cfg).expect("provider construction should succeed");
 
+    // BL-022 / F-014: synthesis pass now requires an embedder (Arc<Mutex<Embedder>>)
+    // so it can populate synthesis rows' embedding columns. The integration test
+    // already requires real network / claude CLI, so the ~90MB fastembed model
+    // download (first run) is acceptable additional cost.
+    let embedder = Arc::new(Mutex::new(
+        Embedder::new().expect("Embedder::new failed in dream_synthesis e2e"),
+    ));
+
     let result = run_synthesis_pass(
         &db,
         Some("e2e-proj"),
         provider.as_ref(),
+        Arc::clone(&embedder),
         0.9,   // tight threshold — 6 should still cluster with small noise
         3,     // min_size
         20,    // max_cluster_size
