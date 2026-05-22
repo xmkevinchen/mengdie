@@ -164,6 +164,19 @@ enum Commands {
         /// Synthesis memory id to inspect.
         id: String,
     },
+    /// Re-embed synthesis rows stored with embedding=NULL (BL-022 / F-014
+    /// backfill). Idempotent — re-runs find 0 rows once fixed. Pre-fix,
+    /// synthesis rows were stored without an embedding and were unreachable
+    /// via vector search; this command repairs them in place.
+    ReembedSynthesis {
+        /// Limit to a single project_id; omit to scope across all projects
+        /// in the global DB.
+        #[arg(long)]
+        project: Option<String>,
+        /// Preview only — list affected synthesis row IDs without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -225,6 +238,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stats => cmd_stats(&db),
         Commands::AuditStats { format } => cmd_audit_stats(&db, format),
         Commands::SynthesisAudit { id } => cmd_synthesis_audit(&db, &id),
+        Commands::ReembedSynthesis { project, dry_run } => {
+            cmd_reembed_synthesis(&db, project.as_deref(), dry_run)
+        }
     }
 }
 
@@ -917,6 +933,38 @@ fn cmd_synthesis_audit(db: &Db, id: &str) -> anyhow::Result<()> {
             preview.replace('\n', " "),
             if truncated { " […]" } else { "" }
         );
+    }
+
+    Ok(())
+}
+
+/// BL-022 / F-014 — backfill synthesis rows that were stored with
+/// `embedding=NULL`. Thin CLI wrapper around
+/// `mengdie::core::reembed::reembed_synthesis_rows`; library function holds
+/// the logic so integration tests in `tests/` can call it directly (CLI
+/// subcommands are not importable from integration tests).
+fn cmd_reembed_synthesis(db: &Db, project: Option<&str>, dry_run: bool) -> anyhow::Result<()> {
+    use mengdie::core::embeddings::Embedder;
+    use mengdie::core::reembed::reembed_synthesis_rows;
+
+    eprintln!("Loading embedding model for backfill...");
+    let embedder = std::sync::Arc::new(std::sync::Mutex::new(
+        Embedder::new().context("failed to initialize embedding model for reembed-synthesis")?,
+    ));
+
+    let result = reembed_synthesis_rows(db, embedder, project, dry_run)?;
+
+    let n = result.affected.len();
+    if dry_run {
+        println!("Would re-embed {n} synthesis rows.");
+    } else {
+        println!("Re-embedded {n} synthesis rows.");
+    }
+    for id in &result.affected {
+        println!("  {id}");
+    }
+    if n == 0 {
+        println!("(no rows match; nothing to do)");
     }
 
     Ok(())

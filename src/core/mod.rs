@@ -13,6 +13,7 @@ pub mod mcp_tools;
 pub mod metrics;
 pub mod parser;
 pub mod project;
+pub mod reembed;
 pub mod schema;
 pub mod search;
 pub mod synthesis;
