@@ -12,16 +12,20 @@ lint:
   command: "cargo clippy"
 
 # --- Output Directories ---
-# All AE pipeline outputs land under .ae/ (gitignored) so the R&D
-# stream stays local. Historical archive of pre-public outputs lives
-# alongside at .ae/docs/.
+# AE pipeline outputs land at the canonical .ae/<topic>/ locations.
+# AE plugin skills (ae:roadmap, ae:retrospect, ae:dashboard, etc.)
+# hardcode these paths; pipeline.yml output.* must match so future
+# writes go where readers expect.
+# Free-form docs (blueprint, prd, roadmap, releases, operations,
+# schemas, specs, spikes, surveys) remain under .ae/docs/ as a general
+# documentation archive.
 output:
-  discussions: ".ae/docs/discussions/"
-  plans: ".ae/docs/plans/"
-  milestones: ".ae/docs/milestones/"
+  discussions: ".ae/discussions/"
+  plans: ".ae/plans/"
+  milestones: ".ae/milestones/"
   backlog: ".ae/backlog/"
-  reviews: ".ae/docs/reviews/"
-  analyses: ".ae/docs/analyses/"
+  reviews: ".ae/reviews/"
+  analyses: ".ae/analyses/"
 
 # --- Test Plugin ---
 test_plugin:
