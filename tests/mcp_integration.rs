@@ -252,6 +252,218 @@ async fn invalidate_prefix_collision() {
 }
 
 // =====================================================================
+// F-015 coverage: memory_invalidate project_id override
+// =====================================================================
+
+/// AC1 — Override resolves prefix-lookup in the target project (not the
+/// server's startup-cached default). Counter-assertion: same call with
+/// `project_id: None` returns the no-match error mentioning the default.
+#[tokio::test]
+async fn invalidate_with_project_id_override_resolves_in_target_project() {
+    let h = Harness::with_project_id("project-A");
+    let id_b =
+        h.db.insert_memory(sample_new_memory("project-B", "B", "Content B"))
+            .unwrap();
+    let prefix = id_b[..8].to_string();
+
+    // Override → success, resolves to the project-B fact.
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: prefix.clone(),
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: Some("project-B".to_string()),
+        })
+        .await;
+    assert!(
+        out.error.is_none(),
+        "expected override-path success, got: {:?}",
+        out.error
+    );
+    assert!(out.success);
+    assert_eq!(
+        out.entry_id, id_b,
+        "resolved to full UUID of project-B fact"
+    );
+
+    // F6 (F-015 d002): plan AC1:174 mandates "fact's valid_until is set in
+    // the DB". Fetch the row back and verify the side effect on persistent
+    // state, not just the tool output.
+    let entry_b =
+        h.db.get_memory(&id_b)
+            .expect("get_memory should succeed")
+            .expect("project-B fact should still be in DB (invalidated, not deleted)");
+    assert!(
+        entry_b.valid_until.is_some(),
+        "AC1: project-B fact's valid_until must be set in the DB after invalidation"
+    );
+
+    // Counter: same prefix with project_id: None falls back to project-A
+    // (server default) where no matching fact exists → no-match error
+    // mentioning the resolved scope.
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: prefix,
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: None,
+        })
+        .await;
+    assert!(!out.success);
+    let err = out.error.expect("expected no-match error");
+    assert!(
+        err.contains("No memory matches prefix"),
+        "error should announce no match, got: {err}"
+    );
+    assert!(
+        err.contains("in project 'project-A'"),
+        "error should mention the resolved server-default scope, got: {err}"
+    );
+}
+
+/// AC3 — `Some("")` is normalized to `None` via `.filter(|s| !s.is_empty())`.
+/// Does NOT scope the lookup to a literal empty-string project. Behaves
+/// identically to `project_id: None`.
+#[tokio::test]
+async fn invalidate_with_empty_string_project_id_falls_back_to_default() {
+    let h = Harness::new(); // default_project_id = "test-project"
+    let id =
+        h.db.insert_memory(sample_new_memory("test-project", "T", "C"))
+            .unwrap();
+    let prefix = id[..8].to_string();
+
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: prefix,
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: Some(String::new()), // empty string — must be filtered to None
+        })
+        .await;
+    assert!(
+        out.error.is_none(),
+        "Some(\"\") should fall back to default and resolve, got: {:?}",
+        out.error
+    );
+    assert!(out.success);
+    assert_eq!(out.entry_id, id);
+}
+
+/// AC4 — Cross-project complement to `invalidate_prefix_collision` (line
+/// 208 in this file): that test asserts same-project collision returns
+/// "ambiguous"; this test asserts cross-project collision is disambiguated
+/// by the override and returns success. Two facts share the 8-char prefix
+/// "deadbeef" but live in DIFFERENT projects (via the `sample_new_memory`
+/// project_id arg — NOT the harness default).
+#[tokio::test]
+async fn invalidate_prefix_unique_within_scoped_project_resolves() {
+    let h = Harness::with_project_id("project-A");
+    let id_a = "deadbeef-aaaa-4bbb-cccc-dddddddddddd".to_string();
+    let id_b = "deadbeef-bbbb-4ccc-dddd-eeeeeeeeeeee".to_string();
+    h.db.insert_memory_with_id(&id_a, sample_new_memory("project-A", "A", "Content for A"))
+        .unwrap();
+    h.db.insert_memory_with_id(&id_b, sample_new_memory("project-B", "B", "Content for B"))
+        .unwrap();
+
+    // Override scopes to project-B → resolves to id_b (success, not ambiguous).
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: "deadbeef".to_string(),
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: Some("project-B".to_string()),
+        })
+        .await;
+    assert!(
+        out.error.is_none(),
+        "project-B override should resolve to id_b, got: {:?}",
+        out.error
+    );
+    assert!(out.success);
+    assert_eq!(out.entry_id, id_b);
+
+    // F6 (F-015 d002): plan AC4 mandates DB-state verification — after
+    // project-B invalidation, fetch BOTH rows: id_b.valid_until must be set,
+    // id_a.valid_until must STILL be NULL (untouched by the scoped operation).
+    let entry_b =
+        h.db.get_memory(&id_b)
+            .expect("get_memory(id_b) should succeed")
+            .expect("id_b should still be in DB");
+    assert!(
+        entry_b.valid_until.is_some(),
+        "AC4: id_b.valid_until must be set after project-B-scoped invalidation"
+    );
+    let entry_a =
+        h.db.get_memory(&id_a)
+            .expect("get_memory(id_a) should succeed")
+            .expect("id_a should still be in DB");
+    assert!(
+        entry_a.valid_until.is_none(),
+        "AC4: id_a.valid_until must remain NULL — project-B scope must not touch project-A row"
+    );
+
+    // Inverse with project_id = Some("project-A") → resolves to id_a.
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: "deadbeef".to_string(),
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: Some("project-A".to_string()),
+        })
+        .await;
+    assert!(
+        out.error.is_none(),
+        "project-A override should resolve to id_a, got: {:?}",
+        out.error
+    );
+    assert!(out.success);
+    assert_eq!(out.entry_id, id_a);
+
+    // F6 (F-015 d002): after the second invalidation, id_a.valid_until must
+    // now be set (the project-A-scoped call's persistent effect).
+    let entry_a_after =
+        h.db.get_memory(&id_a)
+            .expect("get_memory(id_a) should succeed")
+            .expect("id_a should still be in DB");
+    assert!(
+        entry_a_after.valid_until.is_some(),
+        "AC4: id_a.valid_until must be set after the project-A-scoped invalidation"
+    );
+}
+
+/// F5 (F-015 d002): full-UUID `memory_invalidate` against a valid-format but
+/// non-existent UUID must return the "No memory found" error — exercises the
+/// `Ok(None)` branch of the `get_memory()` call added in commit 8dde9db. The
+/// `Err` branch is documented non-coverage (no fault-injection harness).
+#[tokio::test]
+async fn invalidate_full_uuid_not_found_returns_error() {
+    let h = Harness::new();
+    // No memory inserted. Pass a valid-format UUID v4 string that doesn't
+    // exist in the DB.
+    let nonexistent = "cafef00d-1234-4567-89ab-cdef01234567".to_string();
+    assert_eq!(nonexistent.len(), 36);
+
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: nonexistent.clone(),
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: None,
+        })
+        .await;
+    assert!(!out.success);
+    let err = out.error.expect("expected not-found error");
+    assert!(
+        err.contains("No memory found with id"),
+        "error should announce missing entry, got: {err}"
+    );
+    assert!(
+        err.contains(&nonexistent),
+        "error should quote the unfound id, got: {err}"
+    );
+}
+
+// =====================================================================
 // F-010 retroactive coverage: memory_get prefix dispatch paths
 // =====================================================================
 
