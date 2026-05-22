@@ -146,6 +146,9 @@ pub struct InvalidateParams {
     pub reason: String,
     /// Optional ID of the memory that supersedes this one.
     pub superseded_by: Option<String>,
+    /// Override project_id (default: inferred from cwd at server startup).
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 // -- Tool output types --
@@ -909,12 +912,20 @@ impl MengdieServer {
                 )),
             });
         } else {
-            // Fixup (review): scope prefix lookup to the server's default
-            // project_id (matches plan Step 3 pseudocode `Some(&project_id)`).
-            // Unscoped lookup caused false-positive collisions in multi-project
-            // DBs when a prefix unique within the current project shared its
-            // first 8 chars with an entry in a different project.
-            let scope = self.default_project_id.as_str();
+            // F-015: caller-authority precedence — params.project_id
+            // (non-empty) wins over the server's startup-cached default for
+            // prefix-scope. The filter() normalizes Some("") → fallback
+            // (stale-template safety). Divergence from the 6 other tools'
+            // Some("")-passes-through behavior is an intentional partial
+            // fix scoped by d001 conclusion; the other 6 retain pre-existing
+            // behavior, filed as follow-up BL. Full-UUID branch above is
+            // unscoped by design — UUIDs are globally unique, so
+            // project-scoping is semantically unnecessary there.
+            let scope = params
+                .project_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&self.default_project_id);
             match self.db.find_by_id_prefix(&params.entry_id, Some(scope)) {
                 Ok(matches) if matches.len() == 1 => matches.into_iter().next().unwrap(),
                 Ok(matches) if matches.is_empty() => {

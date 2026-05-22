@@ -111,6 +111,7 @@ async fn invalidate_full_uuid_success() {
             entry_id: id.clone(),
             reason: "test".to_string(),
             superseded_by: None,
+            project_id: None,
         })
         .await;
     assert!(
@@ -135,6 +136,7 @@ async fn invalidate_unique_prefix_success() {
             entry_id: prefix.clone(),
             reason: "test".to_string(),
             superseded_by: None,
+            project_id: None,
         })
         .await;
     assert!(
@@ -160,6 +162,7 @@ async fn invalidate_prefix_too_short() {
             entry_id: "abc".to_string(), // 3 chars — below 8-char minimum
             reason: "test".to_string(),
             superseded_by: None,
+            project_id: None,
         })
         .await;
     assert!(!out.success);
@@ -186,6 +189,7 @@ async fn invalidate_prefix_no_match() {
             entry_id: "zzzzzzzz".to_string(),
             reason: "test".to_string(),
             superseded_by: None,
+            project_id: None,
         })
         .await;
     assert!(!out.success);
@@ -226,6 +230,7 @@ async fn invalidate_prefix_collision() {
             entry_id: "deadbeef".to_string(), // 8 chars, shared prefix
             reason: "test".to_string(),
             superseded_by: None,
+            project_id: None,
         })
         .await;
     assert!(!out.success);
