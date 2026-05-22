@@ -46,7 +46,7 @@ fn reembed_backfill_repairs_3_rows_then_is_idempotent() {
     ));
 
     // First invocation: dry-run preview.
-    let preview = reembed_synthesis_rows(&db, Arc::clone(&embedder), Some(project), true)
+    let preview = reembed_synthesis_rows(&db, Some(Arc::clone(&embedder)), Some(project), true)
         .expect("dry-run should succeed");
     assert!(preview.dry_run);
     assert_eq!(preview.affected.len(), 3);
@@ -68,7 +68,7 @@ fn reembed_backfill_repairs_3_rows_then_is_idempotent() {
     }
 
     // Second invocation: real backfill.
-    let real = reembed_synthesis_rows(&db, Arc::clone(&embedder), Some(project), false)
+    let real = reembed_synthesis_rows(&db, Some(Arc::clone(&embedder)), Some(project), false)
         .expect("backfill should succeed");
     assert!(!real.dry_run);
     assert_eq!(real.affected.len(), 3);
@@ -95,7 +95,7 @@ fn reembed_backfill_repairs_3_rows_then_is_idempotent() {
     }
 
     // Third invocation: idempotency. Re-running finds 0 NULL rows.
-    let idempotent = reembed_synthesis_rows(&db, Arc::clone(&embedder), Some(project), false)
+    let idempotent = reembed_synthesis_rows(&db, Some(Arc::clone(&embedder)), Some(project), false)
         .expect("second backfill (idempotent) should succeed");
     assert!(
         idempotent.affected.is_empty(),
@@ -118,10 +118,11 @@ fn reembed_backfill_scope_filter_respects_project() {
     ));
 
     // Project-A scope finds exactly 2.
-    let a = reembed_synthesis_rows(&db, Arc::clone(&embedder), Some("project-A"), true).unwrap();
+    let a =
+        reembed_synthesis_rows(&db, Some(Arc::clone(&embedder)), Some("project-A"), true).unwrap();
     assert_eq!(a.affected.len(), 2);
 
     // Global scope (None) finds all 3.
-    let all = reembed_synthesis_rows(&db, Arc::clone(&embedder), None, true).unwrap();
+    let all = reembed_synthesis_rows(&db, Some(Arc::clone(&embedder)), None, true).unwrap();
     assert_eq!(all.affected.len(), 3);
 }

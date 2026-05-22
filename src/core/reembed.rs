@@ -38,16 +38,22 @@ pub struct ReembedResult {
 /// optionally scoped to a single project.
 ///
 /// - `dry_run = true`: collect affected IDs and return; no `UPDATE`s.
-/// - `dry_run = false`: lock the embedder per row, call
+///   `embedder` may be `None` (no fastembed init needed for preview).
+/// - `dry_run = false`: requires `Some(embedder)`. Locks per row, calls
 ///   `embed_with_context`, then `db.store_embedding(id, embedding, dim)`.
+///   Returns `Err` if `embedder` is `None` (caller bug).
 ///
 /// Embedding `EmbeddingContext` is constructed per row using its stored
 /// `title`, `entities`, `project_id`, and the fixed `knowledge_type =
 /// "factual"` (matching `run_synthesis_pass`'s eager-embed path post-F-014
 /// so backfilled rows rank identically to freshly-synthesized ones).
+///
+/// The optional embedder parameter (F-014 review fixup, Codex P2): lets
+/// callers skip the ~100-200ms ONNX session-load + potential 90MB
+/// fastembed cold download when only the preview is needed.
 pub fn reembed_synthesis_rows(
     db: &Db,
-    embedder: Arc<Mutex<Embedder>>,
+    embedder: Option<Arc<Mutex<Embedder>>>,
     project: Option<&str>,
     dry_run: bool,
 ) -> anyhow::Result<ReembedResult> {
@@ -116,6 +122,11 @@ pub fn reembed_synthesis_rows(
             dry_run: true,
         });
     }
+
+    // Live mode requires an embedder. Caller bug if None.
+    let embedder = embedder.ok_or_else(|| {
+        anyhow::anyhow!("reembed_synthesis_rows requires Some(embedder) when dry_run=false")
+    })?;
 
     for (id, project_id, title, entities, content) in rows {
         let ctx = EmbeddingContext {

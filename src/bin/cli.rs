@@ -947,10 +947,18 @@ fn cmd_reembed_synthesis(db: &Db, project: Option<&str>, dry_run: bool) -> anyho
     use mengdie::core::embeddings::Embedder;
     use mengdie::core::reembed::reembed_synthesis_rows;
 
-    eprintln!("Loading embedding model for backfill...");
-    let embedder = std::sync::Arc::new(std::sync::Mutex::new(
-        Embedder::new().context("failed to initialize embedding model for reembed-synthesis")?,
-    ));
+    // F-014 review fixup (Codex P2): only load the embedder when actually
+    // needed — `--dry-run` preview doesn't embed, so skip ONNX session-load
+    // + cold model download.
+    let embedder = if dry_run {
+        None
+    } else {
+        eprintln!("Loading embedding model for backfill...");
+        Some(std::sync::Arc::new(std::sync::Mutex::new(
+            Embedder::new()
+                .context("failed to initialize embedding model for reembed-synthesis")?,
+        )))
+    };
 
     let result = reembed_synthesis_rows(db, embedder, project, dry_run)?;
 
