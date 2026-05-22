@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
 
+# GITHUB_TOKEN needs contents:write to create releases and upload assets;
+# the default permission is read-only.
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 

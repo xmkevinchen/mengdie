@@ -202,6 +202,29 @@ rule was adopted** (e.g. mengdie's v0.0.1, v0.0.2). All versions
 created via this skill ship with their tags exclusively on public-main
 + GitHub, so this collision class does not recur for them.
 
+### GITHUB_TOKEN permission for release.yml
+
+The `release.yml` workflow uses `gh release create` + `gh release upload`.
+Both require `contents: write` on the workflow's `GITHUB_TOKEN`; the
+default token permission is read-only. Failure mode is:
+
+```
+HTTP 403: Resource not accessible by integration
+  https://api.github.com/repos/<owner>/<repo>/releases
+```
+
+The fix is a workflow-level `permissions:` block in `.github/workflows/release.yml`:
+
+```yaml
+permissions:
+  contents: write
+```
+
+This was missing on the v0.0.2 bootstrap publish; the failure mode is
+caught by pre-check 7 (cargo test) only AFTER tag push, so it's a
+runtime failure on first deploy of any repo with this workflow. Verify
+the block is present before invoking `/publish` on a fresh GitHub repo.
+
 ### History-import risk if you reuse a private-side tag
 
 **Do not** `git push github <existing-private-tag>` to publish a
