@@ -412,6 +412,12 @@ impl Db {
     }
 
     /// Mark a memory as invalid (set valid_until, optionally superseded_by and invalidation_reason).
+    //
+    // SAFETY (F-015 d002): no project_id predicate by design — current sole
+    // production caller is `mcp_tools.rs:1009` with the MCP-layer cross-project
+    // guard added in commit 8dde9db. Future non-`#[cfg(test)]` caller OR
+    // signature change should re-evaluate this asymmetry; see F-015 d002
+    // conclusion §Row 1.
     pub fn invalidate_memory(
         &self,
         id: &str,

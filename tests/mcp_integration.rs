@@ -463,6 +463,54 @@ async fn invalidate_full_uuid_not_found_returns_error() {
     );
 }
 
+/// F-015 follow-up (BL-054 closed inline): full-UUID memory_invalidate
+/// now enforces a cross-project guard, mirroring memory_get's pattern.
+/// Without an explicit project_id override, invalidating a memory whose
+/// project_id differs from the resolved scope is blocked with a
+/// cross-project error. With override, the call succeeds.
+#[tokio::test]
+async fn invalidate_full_uuid_blocked_cross_project() {
+    let h = Harness::with_project_id("project-A");
+    // Insert in project-B (NOT the harness default).
+    let id_b =
+        h.db.insert_memory(sample_new_memory("project-B", "B", "Content B"))
+            .unwrap();
+    assert_eq!(id_b.len(), 36);
+
+    // No override → scope resolves to "project-A"; fact is in "project-B" → blocked.
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: id_b.clone(),
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: None,
+        })
+        .await;
+    assert!(!out.success, "expected cross-project block, got success");
+    let err = out.error.expect("expected cross-project error");
+    assert!(
+        err.contains("belongs to project 'project-B'") && err.contains("not 'project-A'"),
+        "error should mention both projects, got: {err}"
+    );
+
+    // With explicit project_id override → succeeds.
+    let out = h
+        .invalidate(InvalidateParams {
+            entry_id: id_b.clone(),
+            reason: "test".to_string(),
+            superseded_by: None,
+            project_id: Some("project-B".to_string()),
+        })
+        .await;
+    assert!(
+        out.error.is_none(),
+        "project-B override should permit invalidation, got: {:?}",
+        out.error
+    );
+    assert!(out.success);
+    assert_eq!(out.entry_id, id_b);
+}
+
 // =====================================================================
 // F-010 retroactive coverage: memory_get prefix dispatch paths
 // =====================================================================

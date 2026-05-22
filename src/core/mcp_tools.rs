@@ -891,6 +891,18 @@ impl MengdieServer {
     ) -> Json<InvalidateOutput> {
         let superseded_by = params.superseded_by.clone();
 
+        // F-015: caller-authority precedence — params.project_id (non-empty)
+        // wins over the server's startup-cached default. The filter()
+        // normalizes Some("") → fallback (stale-template safety). Divergence
+        // from the 6 other tools' Some("")-passes-through behavior is an
+        // intentional partial fix scoped by d001 conclusion; the other 6
+        // retain pre-existing behavior, filed as follow-up BL.
+        let scope = params
+            .project_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.default_project_id);
+
         // F-009 step 3: resolve UUID prefix when caller passes < 36 chars.
         // Full-UUID input (36 chars) takes the fast path with no prefix
         // lookup; pre-F-009 callers are unaffected.
@@ -899,8 +911,63 @@ impl MengdieServer {
         // silently match thousands of UUIDs and surface as a misleading
         // "collision" error. Boundary check belongs here (MCP layer); db
         // layer remains permissive for future callers with different rules.
+        //
+        // F-015 BL-054 safety measure (closed inline; see F-015 d002 conclusion):
+        // full-UUID branch gets the same cross-project guard pattern as
+        // memory_get (mcp_tools.rs:654-665). This is a tactical safety measure
+        // against silent cross-project invalidation by UUID — NOT a new
+        // architectural principle that "destructive ops require stricter
+        // validation than reads." The prefix-path already restricts
+        // find_by_id_prefix to Some(scope), so it doesn't need a separate
+        // guard.
         let resolved_id = if params.entry_id.len() == 36 {
-            params.entry_id.clone()
+            let id = params.entry_id.clone();
+            match self.db.get_memory(&id) {
+                Ok(Some(entry)) => {
+                    if entry.project_id != scope {
+                        // F-015 F3 (d002): differentiate caller-passed-wrong-override
+                        // from caller-missing-override; "pass project_id explicitly"
+                        // misleads when caller already passed it.
+                        let override_passed =
+                            params.project_id.as_deref().is_some_and(|s| !s.is_empty());
+                        let error_msg = if override_passed {
+                            format!(
+                                "Memory '{}' belongs to project '{}', not '{}'; project_id override was supplied but does not match — pass project_id='{}' to target the memory's actual project",
+                                entry.id, entry.project_id, scope, entry.project_id
+                            )
+                        } else {
+                            format!(
+                                "Memory '{}' belongs to project '{}', not '{}'; pass project_id explicitly to invalidate cross-project",
+                                entry.id, entry.project_id, scope
+                            )
+                        };
+                        return Json(InvalidateOutput {
+                            success: false,
+                            entry_id: id,
+                            superseded_by: None,
+                            error: Some(error_msg),
+                        });
+                    }
+                    id
+                }
+                Ok(None) => {
+                    return Json(InvalidateOutput {
+                        success: false,
+                        entry_id: id.clone(),
+                        superseded_by: None,
+                        error: Some(format!("No memory found with id '{id}'")),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "get_memory failed in memory_invalidate");
+                    return Json(InvalidateOutput {
+                        success: false,
+                        entry_id: id,
+                        superseded_by: None,
+                        error: Some(format!("DB error during full-UUID lookup: {e}")),
+                    });
+                }
+            }
         } else if params.entry_id.len() < 8 {
             return Json(InvalidateOutput {
                 success: false,
@@ -912,20 +979,6 @@ impl MengdieServer {
                 )),
             });
         } else {
-            // F-015: caller-authority precedence — params.project_id
-            // (non-empty) wins over the server's startup-cached default for
-            // prefix-scope. The filter() normalizes Some("") → fallback
-            // (stale-template safety). Divergence from the 6 other tools'
-            // Some("")-passes-through behavior is an intentional partial
-            // fix scoped by d001 conclusion; the other 6 retain pre-existing
-            // behavior, filed as follow-up BL. Full-UUID branch above is
-            // unscoped by design — UUIDs are globally unique, so
-            // project-scoping is semantically unnecessary there.
-            let scope = params
-                .project_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&self.default_project_id);
             match self.db.find_by_id_prefix(&params.entry_id, Some(scope)) {
                 Ok(matches) if matches.len() == 1 => matches.into_iter().next().unwrap(),
                 Ok(matches) if matches.is_empty() => {
