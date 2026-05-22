@@ -79,6 +79,13 @@ Extract `<theme>` = first line under the `## <version>` heading in
 `CHANGELOG.md` (typically `**Theme**: ...`).
 
 ```bash
+# Fail-fast: any step's non-zero exit aborts the whole sequence. Without
+# `set -e`, a mid-sequence failure (e.g. a merge conflict at step 4)
+# leaves later steps marching past it — that's exactly how the v0.0.2
+# re-deploy ended up tagging the wrong commit. See "Nuke-and-redo
+# recovery" below for the cleanup pattern.
+set -e
+
 # 1. (re)Sync private side — already covered in pre-check 4, but recover
 #    if it changed between check and execute
 git push origin main
@@ -98,8 +105,11 @@ git commit -m "Release <version> — <theme>"
 # 6. Push public-main → github main
 git push github public-main:main
 
-# 7. Tag the release on public-main (NOT on private main)
-git tag -a <version> -m "<version>"
+# 7. Tag the release on public-main (NOT on private main). The annotated
+#    body carries the theme so `git show <version>` (and the GitHub
+#    release notes derived from it) surface what shipped, not just a
+#    bare version number.
+git tag -a <version> -m "<version> — <theme>"
 
 # 8. Push the tag — triggers .github/workflows/release.yml multi-platform
 #    build + asset upload

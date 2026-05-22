@@ -33,15 +33,37 @@ jobs:
     needs: [test]
     steps:
       - uses: actions/checkout@v4
-      - name: Create empty release (idempotent)
+      - name: Create release with notes from CHANGELOG (idempotent)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG=${GITHUB_REF#refs/tags/}
+
+          # Extract the CHANGELOG section for this tag. Matches
+          # `## v0.0.X` heading prefix (with or without `— <date>`
+          # trailer) and captures the body up to the next `## ` heading.
+          awk -v ver="${TAG}" '
+            $0 ~ "^## "ver"( |$|—)" { in_section=1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+
+          # Fallback if extraction yielded nothing (no section for this
+          # tag — should be impossible after /publish skill pre-check 6,
+          # but defensive for direct tag pushes).
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "WARNING: no CHANGELOG section found for ${TAG}; using minimal notes" >&2
+            echo "See CHANGELOG.md for the full ${TAG} change list." > /tmp/release-notes.md
+          fi
+
+          echo "===== release notes for ${TAG} ====="
+          cat /tmp/release-notes.md
+          echo "====================================="
+
           gh release view "${TAG}" >/dev/null 2>&1 || \
             gh release create "${TAG}" \
               --title "${TAG}" \
-              --notes "See CHANGELOG.md for the full ${TAG} change list."
+              --notes-file /tmp/release-notes.md
 
   build:
     needs: [create-release]
