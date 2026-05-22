@@ -4,6 +4,7 @@
 .claude/scheduled_tasks.lock
 .claude/agents/
 .claude/pipeline.local.yml
+.claude/skills/
 .ae/
 CLAUDE.local.md
 .DS_Store
