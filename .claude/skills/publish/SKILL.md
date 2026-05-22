@@ -162,6 +162,67 @@ git checkout main
 `--cleanup-tag` deletes the remote tag (which is what triggered release.yml);
 local tag is deleted separately.
 
+### Nuke-and-redo recovery
+
+When `public-main` ends up in a stuck or wrong state (cherry-pick conflict
+left mid-merge, force-push silently no-op'd because local HEAD didn't
+actually advance, tag pointing at the wrong commit because of a script
+mishap), **do not try to surgically fix `public-main`**. By construction
+`public-main` is just a squash mirror of `main` plus a tag — it contains
+zero unrecoverable state. Nuke it and rebuild:
+
+```bash
+# 1. Make sure main has every fix you want to publish, committed and
+#    pushed to origin. (The fix on main is the source of truth.)
+git checkout main
+git push origin main
+
+# 2. Delete the local public-main branch outright
+git branch -D public-main
+
+# 3. Recreate as a fresh orphan from main HEAD (working tree + index
+#    populated automatically; no cherry-pick / merge / conflict path)
+git checkout --orphan public-main
+git commit -m "Initial public release — mengdie <version>"
+
+# 4. Force-push the rebuilt orphan to GitHub
+git push github public-main:main --force-with-lease
+
+# 5. If a wrong-commit tag was already pushed, delete it cleanly first
+#    (these can run in any order with step 4)
+gh release delete <version> --repo xmkevinchen/mengdie --yes --cleanup-tag
+git tag -d <version>
+
+# 6. Retag on the new public-main HEAD
+git tag -a <version> public-main -m "<version> — <theme>"
+git push github <version>
+
+# 7. Return to private main
+git checkout main
+```
+
+**Why this is safe**: every byte on `public-main` is derived from
+`main`'s current tree by the squash rule; there is no information on
+`public-main` that isn't reproducible from `main`. Burning it down and
+re-creating from main is therefore semantically identical to a "clean
+publish from scratch" — strictly less risky than partial-state surgery.
+
+**When to reach for nuke-and-redo instead of surgical rollback**:
+- Any time you've been in `cherry-pick`, `merge`, or `rebase` on
+  `public-main` and aren't 100% sure of the resulting state.
+- After a `git push --force-with-lease` that printed
+  `Everything up-to-date` when you expected to push new content (silent
+  no-op: local HEAD didn't actually move forward).
+- After a tag push where you later realize the tag points at the wrong
+  commit.
+
+**Operational tip**: when running this skill's destructive sequences,
+chain commands with `&&` (or `set -e` at script top) so a single
+failure aborts the whole sequence. Unconditional newline-separated
+commands will keep marching past a `cherry-pick` conflict and leave a
+half-applied state — the exact failure mode that produced the v0.0.2
+re-deploy mishap.
+
 ## Bootstrap special cases
 
 ### Tag-name collision with a pre-existing Forgejo tag
