@@ -235,15 +235,15 @@ Indices (all derived from `memory_entries`):
 
 7 tools, all accepting an optional `project_id: Option<String>` caller override.
 
-| Tool | Role |
-|---|---|
-| `memory_search` | Hybrid FTS5 + vector search, RRF-merged, scope-filtered. Primary retrieval surface. |
-| `memory_ingest` | Parse + embed + store; runs contradiction check; supports atomic supersession via `resolves` array. Primary write surface for AI tools. |
-| `memory_invalidate` | Mark `valid_until` on a memory by full UUID or 8+ char prefix; full-UUID branch has a cross-project guard (I5). |
-| `memory_get` | Fetch a full `MemoryEntry` by ID; bumps `recall_count` for relevance scoring. |
-| `memory_status` | DB health snapshot — row counts, last ingest time, persistent metrics, audit pipeline view. |
-| `memory_lint` | Three deterministic checks: orphan GC (dangling FKs), unresolved contradictions, embedding drift. Detection only — never mutates. |
-| `memory_entity_facts` | Query facts tagged with a specific entity name; uses the materialized `entities` index. |
+| Tool | Role | Spec |
+|---|---|---|
+| `memory_search` | Hybrid FTS5 + vector search, RRF-merged, scope-filtered. Primary retrieval surface. | [memory_search.md](specs/memory_search.md) |
+| `memory_ingest` | Parse + embed + store; runs contradiction check; supports atomic supersession via `resolves` array. Primary write surface for AI tools. | [memory_ingest.md](specs/memory_ingest.md) |
+| `memory_invalidate` | Mark `valid_until` on a memory by full UUID or 8+ char prefix; full-UUID branch has a cross-project guard (I5). | [memory_invalidate.md](specs/memory_invalidate.md) |
+| `memory_get` | Fetch a full `MemoryEntry` by ID; bumps `recall_count` for relevance scoring. | [memory_get.md](specs/memory_get.md) |
+| `memory_status` | DB health snapshot — row counts, last ingest time, persistent metrics, audit pipeline view. | [memory_status.md](specs/memory_status.md) |
+| `memory_lint` | Three deterministic checks: orphan GC (dangling FKs), unresolved contradictions, embedding drift. Detection only — never mutates. | [memory_lint.md](specs/memory_lint.md) |
+| `memory_entity_facts` | Query facts tagged with a specific entity name; uses the materialized `entities` index. | [memory_entity_facts.md](specs/memory_entity_facts.md) |
 
 **Depends on**: `Db` (all tools), `Embedder` (search + ingest), `LlmProvider` (none directly — only `synthesis`).
 **Depended on by**: host AI tools (over MCP); no in-process callers.
@@ -413,6 +413,6 @@ Concrete known limitations and design trade-offs. Each entry includes the proble
 
 - **Public source of truth** for MCP tool behavior: `src/core/mcp_tools.rs`
 - **Storage schema**: `src/core/schema.rs` + `src/core/db.rs` (`MemoryEntry` struct + migration history)
-- **Per-tool MCP specs**: `docs/specs/` (3 of 7 tools currently spec'd; the other 4 are described above + canonical in source)
+- **Per-tool MCP specs**: [docs/specs/](specs/) — all 7 tools spec'd: [memory_search](specs/memory_search.md), [memory_ingest](specs/memory_ingest.md), [memory_invalidate](specs/memory_invalidate.md), [memory_get](specs/memory_get.md), [memory_status](specs/memory_status.md), [memory_lint](specs/memory_lint.md), [memory_entity_facts](specs/memory_entity_facts.md)
 - **Contributor conventions**: [CLAUDE.md](../CLAUDE.md)
 - **Release deltas**: [CHANGELOG](../CHANGELOG.md)
