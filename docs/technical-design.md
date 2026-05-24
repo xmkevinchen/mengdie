@@ -1,7 +1,7 @@
 # Mengdie — Technical Design Document
 
 **Status**: living document
-**Last updated**: 2026-05-23 (post-F-015 ship)
+**Last updated**: 2026-05-23
 **Audience**: contributors + AI agents reading mengdie's source. For end-user "how to install + use" → see [README](../README.md). For shipped-version changelog → see [CHANGELOG](../CHANGELOG.md).
 
 ---
@@ -34,7 +34,7 @@ The single-operator scope is load-bearing: many design simplifications (no auth,
 
 Without persistent memory across AI sessions:
 
-- Every session re-discovers prior context — high re-work cost (`/ae:analyze` keeps re-researching the same files; `/ae:discuss` repeats positions agents already settled).
+- Every session re-discovers prior context — high re-work cost (research workflows keep re-reading the same files; multi-agent discussions repeat positions already settled).
 - LLM context windows force a choice: dump everything (signal-to-noise collapse) or dump nothing (start cold).
 - Decisions reverse silently because the prior decision wasn't visible at decision time.
 
@@ -55,7 +55,7 @@ These are load-bearing across the codebase. Reasoning that violates one of these
 4. **Non-silent feedback**. Every injection block shows what was pulled with provenance (source file, knowledge type, valid_from). No silent context injection.
 5. **Global storage, per-project default search**. One SQLite DB at `~/.mengdie/db.sqlite`; queries default to current project's `project_id` scope; explicit `scope: "global"` for cross-project search. Avoids migration cost when adding cross-project later.
 6. **No AI judgment for cold start**. Existing notes are batch-imported directly without LLM filtering — error amplification at the seeding step is the worst place to introduce it.
-7. **Entity-tag + temporal validity**. Decisions have entities (lowercase comma-separated tags, materialized into `entities` table since F-007); contradictions are detected via directed entity-tag overlap; supersession is recorded with `valid_until` + `superseded_by`. Handles decision evolution, not just instantaneous contradiction.
+7. **Entity-tag + temporal validity**. Decisions have entities (lowercase comma-separated tags, materialized into a normalized `entities` table since v0.0.2); contradictions are detected via directed entity-tag overlap; supersession is recorded with `valid_until` + `superseded_by`. Handles decision evolution, not just instantaneous contradiction.
 8. **Agent-centric tech stack**. Code is written by AI agents; optimize for compiler guardrails (Rust strictest), single binary (no runtime install dance), sub-1s warm startup (MCP stdio path; first-run cost is ~10s for the one-time fastembed model download — see §2.9).
 
 ### 1.5 Out of scope (explicit)
@@ -65,21 +65,21 @@ These are load-bearing across the codebase. Reasoning that violates one of these
   - Add per-row RBAC or per-tenant DB partitioning (single shared `db.sqlite` won't work cross-tenant)
   - Resolve MCP server lifecycle: one `mengdie-mcp` per tenant vs shared with tenant routing
 - Generic vector database (sqlite-vec is implementation detail; mengdie's value is the loop, not the storage layer)
-- Real-time streaming / pub-sub (`/ae:dashboard` polls; no WebSocket or SSE)
+- Real-time streaming / pub-sub (consumers poll; no WebSocket or SSE)
 - Web UI or visualization (`mengdie audit-stats` CLI + LLM-generated summaries are the inspection surface)
 - Plugin auto-install or marketplace integration (mengdie ships as a single binary; users install + register manually)
 
 ---
 
-## Part 2 — Technical Implementation (current state as of F-015)
+## Part 2 — Technical Implementation (current state)
 
 ### 2.1 Tech stack
 
 | Layer | Choice | Version | Rationale |
 |---|---|---|---|
-| Language | Rust | 1.79+ | Strictest compiler guardrail for agent-written code; single binary; sub-5ms startup |
+| Language | Rust | 1.79+ | Strictest compiler guardrail for agent-written code; single binary; sub-1s warm startup |
 | Storage | SQLite via `rusqlite` | features = ["bundled", "load_extension"] | FTS5 included via bundled SQLite; extension API for sqlite-vec |
-| Vector search | `sqlite-vec` v0.1.9 | `vec0` virtual table | Replaces in-house `vector.rs` brute-force as of F-006 |
+| Vector search | `sqlite-vec` v0.1.9 | `vec0` virtual table | Replaces in-house `vector.rs` brute-force since v0.0.1 |
 | MCP SDK | `rmcp` v1.3 | features = ["server", "macros", "transport-io"] | Official Rust MCP SDK; stdio transport |
 | Async | `tokio` | full features | MCP server is async; spawn_blocking wraps sync fastembed |
 | Embeddings | `fastembed` v5 | local ONNX, all-MiniLM-L6-v2, 384d | ~90MB model, 2-10ms inference, no Node.js dependency |
@@ -87,8 +87,8 @@ These are load-bearing across the codebase. Reasoning that violates one of these
 | CLI | `clap` v4 | derive | Standard derive macros |
 
 Cargo.toml net delta:
-- During v0.0.1 development: **+1 line** (`sqlite-vec = "0.1.9"` added in F-006, shipped 2026-05-09 — part of v0.0.1 tag `463c2f4`)
-- v0.0.1 ship → current: **0 lines** (v0.0.2's 8-feature batch + F-014 + F-015 added zero new crates; all functionality rides existing transports)
+- During v0.0.1 development: **+1 line** (`sqlite-vec = "0.1.9"` adopted shortly before v0.0.1 tag `463c2f4` shipped on 2026-05-09)
+- v0.0.1 ship → current: **0 lines** (v0.0.2 and post-v0.0.2 work added zero new crates; all functionality rides existing transports)
 
 ### 2.2 Architecture
 
@@ -96,7 +96,7 @@ Cargo.toml net delta:
 
 - `mengdie-mcp` is a stdio MCP server. The host AI tool (Claude Code, codex, etc.) spawns it as a subprocess and communicates via JSON-RPC over stdin/stdout.
 - Globally installed at `~/.cargo/bin/mengdie-mcp`; registered ONCE in `~/.claude/settings.json` `mcpServers` block, with no per-workspace `cwd` override.
-- **Key consequence** (F-015 motivation): the same `mengdie-mcp` process persists across user project switches within the same Claude Code window. `project_id` inferred from cwd at startup is therefore the SERVER's cwd at the moment of launch — typically the FIRST project the user opens, not necessarily the current one.
+- **Key consequence**: the same `mengdie-mcp` process persists across user project switches within the same Claude Code window. `project_id` inferred from cwd at startup is therefore the SERVER's cwd at the moment of launch — typically the FIRST project the user opens, not necessarily the current one. This is why each MCP tool accepts an optional caller-supplied `project_id` override (see §2.5).
 
 **Storage**:
 
@@ -110,8 +110,8 @@ Cargo.toml net delta:
   1. `.mengdie.toml` `project.name` field (if file exists + value non-empty)
   2. Git remote URL hash (`format!("proj_{:016x}", ...)`)
   3. Canonical path hash (fallback)
-- All three paths produce non-empty strings; **inferred `project_id` cannot be `""` in normal usage** (F-015 d002 council empirically verified for the `infer_project_id()` chain in `src/core/project.rs`). **Caveat**: a caller can still pass `Some("")` to MCP tools via the `project_id` override field; only `memory_invalidate` filters it (post-F-015), the other 6 tools pass `Some("")` through to scope queries. This input-normalization asymmetry is BL-055 (see §3.3).
-- Default search scope is the resolved `project_id`; explicit `scope: "global"` for cross-project; explicit `project_id: Some("other-project")` override per-call (added across all 7 tools incrementally through F-015)
+- All three paths produce non-empty strings; **inferred `project_id` cannot be `""` in normal usage** (verified by inspection of `infer_project_id()` in `src/core/project.rs`). **Caveat**: a caller can still pass `Some("")` to MCP tools via the `project_id` override field; only `memory_invalidate` filters it (post-v0.0.2), the other 6 tools pass `Some("")` through to scope queries. This input-normalization asymmetry is tracked as a deferred follow-up (see §3.3).
+- Default search scope is the resolved `project_id`; explicit `scope: "global"` for cross-project; explicit `project_id: Some("other-project")` override per-call (incrementally added across all 7 tools through v0.0.3-unreleased)
 
 ### 2.3 Module layout
 
@@ -122,7 +122,7 @@ src/
     schema.rs            # Table definitions, FTS5 setup, version migrations (currently user_version = 8)
     project.rs           # project_id inference from git remote
     embeddings.rs        # fastembed-rs integration
-    vector.rs            # sqlite-vec adapter (post-F-006: thin wrapper)
+    vector.rs            # sqlite-vec adapter (thin wrapper since v0.0.1)
     search.rs            # Hybrid FTS5 + vector + RRF merge, score normalization, audited orchestrator
     parser.rs            # YAML frontmatter extraction, entity extraction
     watcher.rs           # notify-based file watcher
@@ -132,7 +132,7 @@ src/
     decay.rs             # Exponential-decay re-rank for stale memories
     clustering.rs        # Seed-neighborhood cosine clustering (feeds dreaming)
     synthesis.rs         # Prompt builder + structured-output handling
-    reembed.rs           # F-014: backfill embeddings for pre-F-014 synthesis rows (mengdie reembed-synthesis CLI)
+    reembed.rs           # backfill embeddings for legacy synthesis rows (mengdie reembed-synthesis CLI; post-v0.0.2)
     lint.rs              # memory_lint health checks
     llm.rs               # LlmProvider trait + ClaudeCliProvider subprocess impl
     config.rs            # MengdieConfig TOML loader
@@ -142,7 +142,7 @@ src/
     mcp_server.rs        # stdio MCP entry point (mengdie-mcp)
     cli.rs               # CLI entry point (mengdie ...)
   lib.rs
-tests/                   # Integration + e2e suites (369 tests as of F-015)
+tests/                   # Integration + e2e suites (369 tests as of 2026-05-23)
 resources/
   com.mengdie.dream.plist             # macOS launchd template for daily Dreaming
   synthesis-output-schema.json        # claude-CLI --json-schema payload contract
@@ -163,7 +163,7 @@ pub struct MemoryEntry {
     pub knowledge_type: String,           // factual | decisional | experiential
     pub title: String,
     pub content: String,
-    pub entities: String,                 // comma-separated lowercased tags; materialized into entities table since F-007
+    pub entities: String,                 // comma-separated lowercased tags; also materialized into normalized entities table since v0.0.2
     pub valid_from: String,
     pub valid_until: Option<String>,      // Set when superseded or explicitly invalidated
     pub superseded_by: Option<String>,    // memory_entries.id of replacement
@@ -180,10 +180,10 @@ pub struct MemoryEntry {
 **SQLite schema** (current: `user_version = 8`):
 
 - `memory_entries` — core table (one row per `MemoryEntry`)
-- `entities` (since F-007) + `fact_entity` link table (FK to `memory_entries.id` + `entities.id`) — replaces LIKE-scan over `entities` TEXT column for contradiction queries
+- `entities` (added v0.0.2) + `fact_entity` link table (FK to `memory_entries.id` + `entities.id`) — replaces LIKE-scan over `entities` TEXT column for contradiction queries
 - `memory_entries_fts` — FTS5 virtual table indexing `title + content + entities`
-- `vec_memories` — sqlite-vec `vec0` virtual table for ANN queries (since F-006; replaces 264-LoC vector.rs brute-force)
-- `memory_search_audit` (since F-002) + `audit_returned_facts` link table — every `memory_search` call logs query + scope + took_ms + per-call returned fact IDs
+- `vec_memories` — sqlite-vec `vec0` virtual table for ANN queries (added v0.0.1; replaces 264-LoC vector.rs brute-force)
+- `memory_search_audit` (added v0.0.1) + `audit_returned_facts` link table — every `memory_search` call logs query + scope + took_ms + per-call returned fact IDs
 - `metrics` — persistent counters (`search_count`, `ingest_count`, etc.)
 
 Schema migrations are idempotent and gated by `user_version` PRAGMA. v0.0.1 shipped with `user_version = 7`; v0.0.2 entity-graph migration bumped to `user_version = 8`.
@@ -192,29 +192,27 @@ Schema migrations are idempotent and gated by `user_version` PRAGMA. v0.0.1 ship
 
 All tools accept an optional `project_id: Option<String>` override (caller-authority precedence) and respect the server's startup-cached `default_project_id` as fallback.
 
-| Tool | Added | Purpose | Spec |
-|---|---|---|---|
-| `memory_search` | v0.0.1 | Hybrid FTS5 + vector + RRF; `limit`, `min_score`, `scope` (current/global) | [memory_search.md](../.ae/docs/specs/memory_search.md) |
-| `memory_ingest` | v0.0.1 | Parse + embed + store; contradiction check; `resolves` for atomic supersession | [memory_ingest.md](../.ae/docs/specs/memory_ingest.md) |
-| `memory_invalidate` | v0.0.1 (+ F-015 `project_id` override + F-015 d002 cross-project guard) | Mark `valid_until`; full-UUID + 8+ char prefix supported; full-UUID branch has cross-project guard mirroring `memory_get` (added in commit `e8122a9` during F-015's "BL-054 inline-clear" — see jargon note below) | [memory_invalidate.md](../.ae/docs/specs/memory_invalidate.md) |
-| `memory_get` | v0.0.2 (F-010) | Fetch full `MemoryEntry` by full UUID or 8+ char prefix; bumps `recall_count` | spec TBD |
-| `memory_status` | v0.0.2 (F-011) | DB health snapshot: row counts, last-ingest timestamp, persistent metrics, audit pipeline view | spec TBD |
-| `memory_lint` | v0.0.2 (F-008) | Three deterministic checks: orphan GC (dangling FK), unresolved contradictions, embedding drift | spec TBD |
-| `memory_entity_facts` | v0.0.2 (F-007) | Facts tagged with a given entity name; uses materialized `entities` table | spec TBD |
+| Tool | Added | Purpose |
+|---|---|---|
+| `memory_search` | v0.0.1 | Hybrid FTS5 + vector + RRF; `limit`, `min_score`, `scope` (current/global) |
+| `memory_ingest` | v0.0.1 | Parse + embed + store; contradiction check; `resolves` for atomic supersession |
+| `memory_invalidate` | v0.0.1 (+ post-v0.0.2: `project_id` override field + cross-project guard on full-UUID branch, both added in commit `e8122a9`) | Mark `valid_until`; full-UUID + 8+ char prefix supported; full-UUID branch's cross-project guard mirrors `memory_get`'s pattern — prevents accidental cross-project invalidation when an operator passes a UUID belonging to a different project |
+| `memory_get` | v0.0.2 | Fetch full `MemoryEntry` by full UUID or 8+ char prefix; bumps `recall_count` |
+| `memory_status` | v0.0.2 | DB health snapshot: row counts, last-ingest timestamp, persistent metrics, audit pipeline view |
+| `memory_lint` | v0.0.2 | Three deterministic checks: orphan GC (dangling FK), unresolved contradictions, embedding drift |
+| `memory_entity_facts` | v0.0.2 | Facts tagged with a given entity name; uses materialized `entities` table |
 
-**`project_id` resolution chain** (canonical pattern; 7-tool consistency goal in BL-055):
+**`project_id` resolution chain** (canonical pattern; 7-tool consistency is a deferred follow-up — see §3.3):
 
 ```rust
-// memory_invalidate (post-F-015 d002): caller-authority + empty-string normalization
+// memory_invalidate (post-v0.0.2): caller-authority + empty-string normalization
 let scope = params.project_id
     .as_deref()
     .filter(|s| !s.is_empty())
     .unwrap_or(&self.default_project_id);
 ```
 
-Currently `memory_invalidate` is the only tool with the `.filter(|s| !s.is_empty())` normalization; the other 6 retain pre-existing `Some("")` passes-through. BL-055 will unify; trigger is code-artifact-anchored per Plan 019 R3.
-
-**Jargon note: "BL-054 inline-clear"** — during F-015's `/ae:work` accumulated-checkpoint phase, a finding (full-UUID `memory_invalidate` cross-project bypass) was originally filed as BL-054 backlog item, then operator-overridden to fix inline in commit `8dde9db` (post-rebase: absorbed into `e8122a9`). The BL-054 file was deleted at fix time, so **no BL-054 file exists** in `.ae/backlog/unscheduled/` — the term refers to the F-015 d002 disposition record, not a discoverable BL document. See F-015 d002 conclusion §Row 1 + F-015 review §"Applied inline (5 fixes + 1 code comment)".
+Currently `memory_invalidate` is the only tool with the `.filter(|s| !s.is_empty())` normalization; the other 6 retain pre-existing `Some("")` passes-through. A deferred follow-up will unify the pattern across all 7 tools (trigger: next touch of any non-invalidate tool's `project_id` resolution site, OR operator-observed `project_id = ""` row in DB).
 
 ### 2.6 CLI surface
 
@@ -222,7 +220,7 @@ Currently `memory_invalidate` is the only tool with the `.filter(|s| !s.is_empty
 
 ```
 mengdie-mcp                        # stdio MCP server entry point (main runtime)
-mengdie audit-stats [--since 7d]   # F-005: audit pipeline observability
+mengdie audit-stats [--since 7d]   # audit pipeline observability
 mengdie dream                      # daily promotion + LLM synthesis pass
 mengdie import <dir>               # cold-start: batch-ingest markdown without LLM judgment
 mengdie search <query>             # CLI mirror of memory_search (for ops)
@@ -230,10 +228,10 @@ mengdie list [filters]             # browse memories with simple filtering
 mengdie rename <old> <new>         # rename project_id across memory_entries (one-way-door operational command — use carefully)
 mengdie stats                      # high-level corpus stats (row counts, recall distribution)
 mengdie synthesis-audit            # inspect synthesis rows + their source links
-mengdie reembed-synthesis          # F-014: backfill embeddings for pre-F-014 synthesis rows
+mengdie reembed-synthesis          # backfill embeddings for legacy synthesis rows (post-v0.0.2)
 ```
 
-See [mengdie-cli.md](../.ae/docs/specs/mengdie-cli.md) for full CLI reference.
+Run `mengdie --help` for current flags + subcommand details.
 
 ### 2.7 Filesystem layout
 
@@ -262,17 +260,17 @@ These are enforced by code or documented contracts. Violations are bugs.
 | I1 | All stdout is MCP transport; logging via `tracing` → stderr only | All `tracing::info!` / `tracing::error!` calls use stderr; `println!` is banned |
 | I2 | fastembed inference is sync/blocking — wrap in `tokio::task::spawn_blocking` | `mcp_tools::ingest`, `mcp_tools::search` |
 | I3 | DB connection: `Arc<Mutex<Connection>>` shared across handlers | Constructor at `MengdieServer::new`; all access via lock |
-| I4 | `project_id` derivation: git-remote-derived; never empty in normal usage | `src/core/project.rs` `infer_project_id()` — verified F-015 d002 |
-| I5 | Cross-project guards at MCP layer for read+destructive ops: `memory_get` (approx lines 657-675 from tool entry at line 563), `memory_invalidate` (added in commit `e8122a9` during F-015's d002 "BL-054 inline-clear" disposition — landed today on `main`) | `src/core/mcp_tools.rs` |
+| I4 | `project_id` derivation: git-remote-derived; never empty in normal usage | `src/core/project.rs` `infer_project_id()` — verified by direct inspection |
+| I5 | Cross-project guards at MCP layer for read+destructive ops: `memory_get` (approx lines 657-675 from tool entry at line 563), `memory_invalidate` (added in commit `e8122a9`, landed on `main` 2026-05-23) | `src/core/mcp_tools.rs` |
 | I6 | DB-layer destructive ops are NOT project-scoped at SQL level — **load-bearing only under single-operator scope** (§1.5). `Db::invalidate_memory` SQL has no `project_id` predicate; intentional asymmetry under v0.x; defense-in-depth lives at MCP layer. See SAFETY comment at `src/core/db.rs:415`. If multi-operator pursued (v1.x+), this MUST be upgraded — see §1.5 prerequisites | `src/core/db.rs:415` (SAFETY comment) + §1.5 multi-op prerequisite |
 | I7 | Schema migrations are idempotent + `user_version` PRAGMA gated | `src/core/schema.rs` |
-| I8 | All committed artifacts (code, comments, docs, commit messages) are in English | CLAUDE.local.md language conventions |
+| I8 | All committed artifacts (code, comments, docs, commit messages) are in English | project convention; see [CLAUDE.md](../CLAUDE.md) |
 
 ### 2.9 Operational notes
 
 - **First-run cost**: ~10s (fastembed model download). Subsequent starts < 1s.
 - **DB migration**: idempotent on every startup; `user_version` PRAGMA bump only when migration completed successfully.
-- **Cross-family review**: codex (OpenAI) + gemini (Google) MCPs invoked from `.ae/pipeline.yml` `cross_family` config. AE plugin's `codex-proxy` / `gemini-proxy` agents handle the MCP plumbing.
+- **Cross-family review tooling**: dev workflow uses codex (OpenAI) + gemini (Google) MCP servers in addition to the host AI tool — multiple model families review the same change for orthogonal blind spots. Mengdie's source repo is agnostic to this; it's a contributor-workflow concern, not a runtime dependency.
 - **Dreaming pass**: daily via launchd on macOS (template at `resources/com.mengdie.dream.plist`); cron equivalent on Linux. **Output classification per filter module** (clarifies the §1.1 spiral-upward claim):
   - `dreaming.rs`: produces NEW `MemoryEntry` rows of `source_type = synthesis` (LLM-clustered + consolidated content), embedded + indexed identically to ingested rows; ALSO mutates `is_longterm` + `recall_count` on inputs. **This is the synthesis arm of the spiral.**
   - `clustering.rs`: intermediate only — seed-neighborhood cosine clusters feed `dreaming.rs`; no DB writes.
@@ -283,7 +281,7 @@ These are enforced by code or documented contracts. Violations are bugs.
 
 - **Concurrent `mengdie-mcp` instances** — if the operator opens two projects in Claude Code in parallel windows, BOTH spawn `mengdie-mcp` and compete for `~/.mengdie/db.sqlite` via the rusqlite mutex. Second instance can block or error with SQLITE_BUSY. Diagnosis: `tracing` logs on stderr show `database is locked`. Workaround: close the second window or use a separate SQLite via env override (`MENGDIE_DB_PATH` if implemented; not currently supported — file a BL if hit).
 - **fastembed cache corruption** — interrupted model download (network drop, process crash during cold-start ~10s window) can leave a corrupt ONNX file in `~/.cache/fastembed/`. Symptom: `Embedder::new()` errors at startup OR returns silent zero-vectors. Recovery: `rm -rf ~/.cache/fastembed/` and let the next startup re-download.
-- **MCP tool wire compatibility** — mengdie ships additive-only tool schema changes: new tools are added at server side; existing tools have new `Option<T>` fields gated with `#[serde(default)]` (e.g., F-015's `InvalidateParams.project_id`). Pre-update clients (e.g., a Claude Code window started before `mengdie-mcp` upgrade) that omit new optional fields work unchanged. **Not supported**: removing or renaming a tool / changing a required field's type. Stale clients calling a removed tool receive an rmcp "unknown tool" error; restart the host AI tool to re-load the tool schema.
+- **MCP tool wire compatibility** — mengdie ships additive-only tool schema changes: new tools are added at server side; existing tools have new `Option<T>` fields gated with `#[serde(default)]` (e.g., post-v0.0.2 `InvalidateParams.project_id`). Pre-update clients (e.g., a Claude Code window started before `mengdie-mcp` upgrade) that omit new optional fields work unchanged. **Not supported**: removing or renaming a tool / changing a required field's type. Stale clients calling a removed tool receive an rmcp "unknown tool" error; restart the host AI tool to re-load the tool schema.
 
 ---
 
@@ -293,44 +291,33 @@ These are enforced by code or documented contracts. Violations are bugs.
 
 | Version | Tag | Shipped | Theme |
 |---|---|---|---|
-| v0.0.1 | `463c2f4` | 2026-05-10 | Minimum-viable AE-brain; OSS adoption thesis (sqlite-vec + 6 tools internally built) |
-| v0.0.2 | `152ba97` | 2026-05-19 | Entity-graph upgrade (`user_version 7 → 8`) + 4 new MCP tools (memory_get/status/lint/entity_facts) + retroactive test harness |
-| post-v0.0.2 | unreleased | 2026-05-22 → | F-014 synthesis embedding fix + reembed CLI; F-015 InvalidateParams project_id override + BL-054 cross-project guard inline-clear. Tag pending. |
+| v0.0.1 | `463c2f4` | 2026-05-10 | Minimum-viable knowledge-memory MCP server: 3 tools (`memory_search`, `memory_ingest`, `memory_invalidate`), sqlite-vec adoption, persisted audit pipeline, daily Dreaming pass |
+| v0.0.2 | `152ba97` | 2026-05-19 | Entity-graph upgrade (schema `user_version 7 → 8`) + 4 new MCP tools (`memory_get`, `memory_status`, `memory_lint`, `memory_entity_facts`) + retroactive test harness |
+| v0.0.3 | unreleased | 2026-05-22 → 2026-05-23 | Synthesis-row embedding fix (+ `reembed-synthesis` CLI); `InvalidateParams.project_id` override field; cross-project guard on full-UUID `memory_invalidate`. Tag pending. |
 
-- v0.0.1 release notes: [.ae/docs/releases/v0.0.1.md](../.ae/docs/releases/v0.0.1.md)
-- v0.0.2 release notes: [.ae/docs/releases/v0.0.2.md](../.ae/docs/releases/v0.0.2.md)
-- Git history: post-v0.0.2 = 3 commits on `main` since `e91d4b3` (F-014 ship)
+See [CHANGELOG](../CHANGELOG.md) for shipped-release entries.
 
 ### 3.2 Cross-references
 
-- **Aspirational system blueprint** (forward-looking; some sections outdated post-v0.0.2): [.ae/docs/blueprint.md](../.ae/docs/blueprint.md)
-- **v0.0.1 as-shipped technical reference** (frozen at v0.0.1; this doc supersedes for current state): [.ae/docs/v0.0.1-tech.md](../.ae/docs/v0.0.1-tech.md)
-- **AE plugin integration PRD**: [.ae/docs/prd-ae-integration.md](../.ae/docs/prd-ae-integration.md)
-- **Per-tool MCP specs**: [.ae/docs/specs/](../.ae/docs/specs/) — 3 of 7 tools documented (memory_search, memory_ingest, memory_invalidate); memory_get / memory_status / memory_lint / memory_entity_facts pending (their behavior is canonical in source code + per-feature plan files at `.ae/features/done/F-NNN-*/plan.md`).
-- **Roadmap**: [.ae/docs/roadmap.md](../.ae/docs/roadmap.md)
-- **Spike outcomes**: [.ae/docs/spikes/](../.ae/docs/spikes/) — sqlite-vec compat, rig::Extractor subprocess, etc.
-- **Surveys**: [.ae/docs/surveys/](../.ae/docs/surveys/) — 2026-05 OSS coding tooling survey
+- **End-user install + usage** → [README](../README.md)
+- **Per-release notes** → [CHANGELOG](../CHANGELOG.md)
+- **Contributor conventions** (Rust style, testing patterns, commit hygiene, doc language) → [CLAUDE.md](../CLAUDE.md)
+
+Per-tool MCP specs and the operator's internal design archive live under `.ae/docs/` (gitignored — local to the maintainer's working copy, not shipped to public). The canonical source-of-truth for current MCP tool behavior is `src/core/mcp_tools.rs` itself.
 
 ### 3.3 Open questions & deferred work
 
-Active follow-ups tracked in `.ae/backlog/unscheduled/`:
+Tracked outside this doc; brief snapshot as of 2026-05-23:
 
-- **BL-051** — `test-utils` feature gate for library publish (trigger: mengdie published as crate OR per-test fastembed load becomes painful)
-- **BL-052** — batch review deferred findings from F-011 + F-008 (5 items; trigger: next touch of memory_status / memory_lint internals)
-- **BL-053** — F-014 review deferred findings (9 items; trigger: next touch of synthesis path)
-- **BL-055** — MCP cross-tool `project_id` input validation + normalization across 7 tools. **Resolution direction** (pinned per F-015 d002 council): extend `memory_invalidate`'s `.filter(|s| !s.is_empty())` pattern (or a shared helper, e.g., `fn resolve_project_scope(...)`) to all 7 tools — treat empty/whitespace `Some("")` / `Some("   ")` as **silent no-op fallback to default**, matching the F-015 invalidate behavior. NOT a reject-with-error path. Severity: P2 (correctness gap — item c memory_ingest seeds `project_id=""` rows via the cited gap). Trigger: next touch of any of 6 non-invalidate tools' `project_id` resolution sites OR operator-observed `project_id = ""` row in DB.
-- **F-015 d001 deferral**: item (d) `peer.list_roots()` runtime-refresh spike (trigger: post-probe finding satisfies, follow-up non-blocking probe captures usable roots URI shape)
-- **F-015 d001 deferral**: item (c) `resolved_project_id` echo on tool responses (trigger: F-012 AC3 ships in agentic-engineering + AE-side instrumentation lands)
-
-Methodology questions surfaced from `/ae:retrospect`:
-
-- **T-shirt sizing recalibration**: 12 of 14 sized features shipped under estimate; L = 1d-2d elapsed (vs estimated ~1w). Either sizing pessimism or AI-assisted dev compresses elapsed time below human baselines. May warrant dropping size axis or recalibrating.
-- **17-finding review flood**: F-015's `/ae:review` surfaced 17 findings → triggered `/ae:discuss` d002 meta-discussion on disposition methodology. Council ratified **INTRODUCE vs SURFACE heuristic** (fix what diff introduced; defer what review surfaced) as the disposition pattern; this is unwritten methodology gold and may warrant explicit doc in [the AE plugin's /ae:review skill](https://github.com/xmkevinchen/agentic-engineering).
+- **MCP cross-tool `project_id` input normalization** (P2 correctness gap) — extend `memory_invalidate`'s `.filter(|s| !s.is_empty())` pattern to the other 6 tools as a shared helper. **Direction is silent no-op fallback to default**, NOT reject-with-error. Trigger: next touch of any non-invalidate tool's `project_id` resolution site, OR observed `project_id = ""` row in DB. Item (c) — `memory_ingest(Some(""))` can currently seed `project_id=""` rows because `unwrap_or_else` doesn't fire on `Some` — is the load-bearing reason this is P2 rather than P3.
+- **Server-side `roots/list` runtime-refresh spike** — gated on a non-blocking probe of the host MCP client's `roots` capability returning a usable URI shape. Out of scope for v0.x; companion caller-authority pattern (per-call `project_id` override across all 7 tools) is the v0.x stand-in.
+- **`resolved_project_id` echo on tool responses** — gated on a real consumer of the echoed field landing in calling clients (no AI workflow currently inspects it; LSP-style echo without an immediate consumer is observability cost without observability value).
+- **Schema migration for multi-operator** — see §1.5 prerequisites. Hard-gated on multi-operator scope being explicitly opened in a v1.x+ design pass.
 
 ### 3.4 Reading order for newcomers
 
 1. Skim [README](../README.md) for elevator pitch + install instructions
 2. Read Part 1 of this doc for goal + design principles
 3. Skim Part 2 sections 2.1–2.5 for the current implementation surface
-4. For deeper data model: read [v0.0.1-tech.md](../.ae/docs/v0.0.1-tech.md) sections 4-6 (still authoritative on the v0.0.1 baseline) + this doc's 2.4 + 2.5 for post-v0.0.2 deltas
-5. For AI-agent contributors: read [CLAUDE.md](../CLAUDE.md) project conventions
+4. For deeper data model: read `src/core/db.rs` (`MemoryEntry` struct) + `src/core/schema.rs` (table layout + migration history) directly — they are the canonical source
+5. For AI-agent contributors: read [CLAUDE.md](../CLAUDE.md) for project conventions (Rust style, testing patterns, commit hygiene, doc language)
