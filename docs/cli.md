@@ -8,6 +8,13 @@ audience: [operator]
 
 # spec: `mengdie` CLI
 
+Mengdie is an MCP server and CLI for AI-native knowledge memory — it
+captures structured-markdown artifacts produced by AI development
+workflows, lets agents query them back via MCP tools, and runs a daily
+filtering pass that promotes frequently-recalled facts and consolidates
+related ones via LLM synthesis. See
+[`docs/technical-design.md`](technical-design.md) for the architecture.
+
 The `mengdie` binary is the operator-facing CLI for direct database management,
 batch import, and the Dreaming pipeline. The MCP server (`mengdie-mcp` separate
 binary) is the agent-facing entry point and is specified separately under

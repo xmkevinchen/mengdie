@@ -5,6 +5,15 @@ long-term memories during `mengdie dream`. For the CLI surface, see
 [`docs/cli.md`](../cli.md). For the higher-level pipeline view, see
 [`docs/technical-design.md`](../technical-design.md).
 
+**Context**: Dreaming is Mengdie's periodic filtering pass — it promotes
+frequently-recalled memories into a long-term tier and consolidates related
+clusters via LLM synthesis. Decay is the counter-force: every long-term
+memory accrues a time-decayed effective score, and once that score falls
+below the floor (currently 0.20) the memory is demoted out of the long-term
+tier on the next `mengdie dream` run. The procedure below is how an
+operator avoids surprise demotions on the first run against a populated
+corpus and how to recover when a demotion turns out to be premature.
+
 ## Quick reference
 
 | Concept | Value |

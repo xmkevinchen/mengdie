@@ -29,93 +29,68 @@ The post-research injection point (not pre-research) is deliberate: it
 avoids anchoring bias. Agents form independent positions first, then see
 what was decided before, then synthesize with full awareness of both.
 
-## What
+## Integration points
 
-Two changes to the AE plugin (`agentic-engineering/plugins/ae/`):
+The AE plugin (`agentic-engineering/plugins/ae/`) integrates with Mengdie
+in three places — one read path and two write paths. All three are
+SKILL.md prose with no AE-side code dependency on Mengdie; the contract
+is the MCP tool surface.
 
-### Change 1: `ae:analyze` SKILL.md — Post-Research Injection
+### Read path: prior-context lookup before synthesis
 
-**File**: `plugins/ae/skills/analyze/SKILL.md`
+**Where**: `plugins/ae/skills/analyze/SKILL.md` → `### Prior context (Mengdie integration)`
 
-**Where**: After the research phase (agents have gathered findings), before
-synthesis begins. Add a new step between existing steps.
+After research agents have reported their findings to the team lead and
+before the lead writes `analysis.md`, the lead calls `memory_search` with
+the feature title as the query and renders results under a
+`## Prior Art from Project Knowledge Base` heading with provenance
+(`title`, `source_file`, `knowledge_type`, `valid_from`, `snippet`).
 
-**What to add** (approximately 3-5 lines in the SKILL.md):
+Failure modes are tolerated silently:
 
-```markdown
-### Step 3.5: Prior Context (from Mengdie)
+- Tool unavailable, zero results, or a thrown error → emit
+  `Prior context: unavailable (tool not registered / no relevant results)`
+  and proceed without prior context.
+- Results with a non-null `degraded` field (e.g., embedder unavailable
+  → FTS-only fallback) → annotate the block as `(partial — [reason])`.
 
-Before synthesizing, search Mengdie for prior decisions on this topic:
-- Call `memory_search` MCP tool with the research topic as query
-- If results found, present as "Round 0: Prior Decisions" block with provenance:
-  - Source file, knowledge type, entities, when it was decided
-- Agents synthesize with explicit awareness of prior decisions
-- Note whether current evidence confirms, updates, or contradicts prior decisions
-```
+Prior context is **background only** — it does not constrain the current
+evidence the agents gathered. Post-research placement (not pre-research)
+avoids anchoring bias: agents form independent positions first, then see
+what was decided before, then synthesize.
 
-**Behavior**:
+### Write path 1: knowledge capture after analysis
 
-- If the Mengdie MCP server is not registered → skip silently (no error).
-  Implementation: wrap the `memory_search` call in try/catch; if the tool
-  is not found (MCP error -32601 "method not found" or tool not listed),
-  continue without injecting prior context.
-- If `memory_search` returns empty → skip (no prior context).
-- If results found → display with provenance; agents explicitly address
-  alignment/contradiction in their synthesis.
+**Where**: `plugins/ae/skills/analyze/SKILL.md` → `### Knowledge capture (Mengdie)`
 
-### Change 2: AE Conclusion Template — `entities` Frontmatter Field
+After `analysis.md` is written and before the team closes, the lead
+ingests up to 3 atomic facts via `memory_ingest`. Each fact is sourced
+from one key finding in the analysis's `## Findings` section, with
+`source_type: conclusion`, `knowledge_type: factual`, and `entities`
+derived from the specific finding (e.g., `fts5-idf-contamination`) —
+not from broad frontmatter tags. Findings that restate prior context
+surfaced in the read path are skipped to avoid double-counting.
 
-**File**: the `conclusion.md` template used by `ae:discuss` (in
-`plugins/ae/skills/discuss/SKILL.md` or a referenced template file).
+### Write path 2: knowledge capture after each shipped step
 
-**What to add**: one field to the conclusion frontmatter:
+**Where**: `plugins/ae/skills/work/SKILL.md` → `### Knowledge capture (Mengdie)`
 
-```yaml
----
-id: "NNN"
-title: "..."
-concluded: YYYY-MM-DD
-plan: ""
-entities: []    # ← NEW: extracted entity tags for Mengdie ingestion
----
-```
+After `/ae:work` commits a step, the same shared Knowledge Capture
+Protocol fires — up to 3 atomic items, with `conflicts` returned by
+`memory_ingest` resolved via `memory_invalidate` when an evolution
+candidate is detected.
 
-**Why**: Mengdie's ingestion pipeline extracts entities from the `entities`
-field in frontmatter. Without it, ingested conclusions have empty entity
-lists, which degrades contradiction detection (no entity overlap → no
-conflicts detected, no `memory_entity_facts` hits).
+### Entities populated at conclusion time
 
-**Who populates it**: the `ae:discuss` skill's conclusion-generation step.
-The team lead extracts key entities from the Decision Summary table's
-Topic column and includes them in the frontmatter (e.g., if Decision
-Summary has topics "Auth middleware", "Session storage" →
-`entities: [auth, middleware, session, storage]`).
+**Where**: `plugins/ae/skills/discuss/SKILL.md` (conclusion-generation step)
 
-## How (for the AE plugin maintainer)
-
-### Change 1 implementation
-
-1. Open `plugins/ae/skills/analyze/SKILL.md`.
-2. Find the step where research is complete and synthesis begins.
-3. Insert Step 3.5 between them (exact text above).
-4. The `memory_search` tool is an MCP tool — it's available to any agent
-   whose host AI tool session has the Mengdie MCP server registered. No
-   AE code change is needed beyond the SKILL.md instruction.
-
-### Change 2 implementation
-
-1. Find the `conclusion.md` template/instructions in `ae:discuss` SKILL.md.
-2. Add `entities: []` to the frontmatter template.
-3. Add the instruction for the team lead to populate entities from
-   Decision Summary topics.
-
-### Verification
-
-- After Change 1: run `/ae:analyze` on a topic where Mengdie has prior
-  decisions. Verify "Round 0: Prior Decisions" appears in the output with
-  provenance.
-- After Change 2: run `/ae:discuss` to conclusion. Verify the
-  `conclusion.md` has a populated `entities: [...]` in its frontmatter.
+When `/ae:discuss` writes `conclusion.md`, the lead extracts entity tags
+from the Decision Summary table's Topic column and writes them to the
+frontmatter's `entities` field, derived from each specific decision
+rather than from the broad conclusion frontmatter. This is what makes
+the ingested conclusion show up in `memory_entity_facts` lookups and
+participate in contradiction detection (entity-overlap is the directed
+comparison signal).
 
 ## Setup
 
