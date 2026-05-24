@@ -10,6 +10,92 @@ this project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## v0.0.3 — 2026-05-24
+
+**Theme**: lifts previously internal design and operator references
+into a public `docs/` tree — top-level architecture overview, per-tool
+MCP (Model Context Protocol) specs, CLI reference, decay-pass operator
+runbook, and AE-plugin integration guide — so first-time readers can
+land on the repo without spelunking. Also: synthesis rows are now
+embedded at creation time (closing a long-standing surface where
+Dreaming-generated rows were unreachable via vector search), and the
+`memory_invalidate` MCP tool gains a `project_id` override so
+long-lived MCP clients can scope invalidations across project
+switches.
+
+### Added
+
+- **`mengdie reembed-synthesis` CLI subcommand.** Backfills embeddings
+  for synthesis rows whose `embedding` is `NULL` (legacy data from
+  pre-fix corpora). `--dry-run` skips the embedder load entirely for
+  fast preview. `--project <ID>` scopes the backfill to one project;
+  omit to scan all projects in the global DB. Idempotent — re-runs
+  find zero rows once fixed.
+- **`memory_invalidate` `project_id` override.** New optional
+  `project_id: String?` parameter on the MCP tool lets callers scope
+  an invalidation to a specific project, overriding the server's
+  startup-cached `default_project_id`. Useful when one long-lived
+  `mengdie-mcp` instance persists across project switches in the
+  host AI tool. **Restart required**: server instances started against
+  a prior version will not expose the new parameter to clients until
+  the upgraded binary is re-launched.
+
+### Changed
+
+- **Synthesis rows are now embedded at creation time.** The Dreaming
+  synthesis pass takes an `Arc<Mutex<Embedder>>` and writes
+  `embedding` + `embedding_dim` in the same transaction as the row,
+  closing the surface where synthesis rows landed with
+  `embedding = NULL` and were unreachable via vector search.
+- **`memory_invalidate` cross-project guard on full-UUID branch.**
+  When a caller passes a 36-char UUID that belongs to a different
+  project than the resolved scope, the call now returns a structured
+  error instead of silently invalidating across projects. Mirrors the
+  guard already present on `memory_get`. To opt out, pass `project_id`
+  explicitly set to the target memory's actual project.
+
+### Docs
+
+The largest visible delta for new readers — five new top-level
+documents under `docs/`. Previously these references were only
+distributed alongside the source tree as internal working drafts; a
+new contributor or operator landing on the repo could not see them.
+
+- **`docs/technical-design.md`** — top-level design overview. Four
+  sections (Vision / Architecture / Components & Relations / Known
+  Problems) with six Mermaid diagrams (spiral loop, system view,
+  storage ER, ingestion pipeline, retrieval pipeline, Dreaming pass).
+- **`docs/specs/`** — per-tool MCP specs (one file each for
+  `memory_search`, `memory_ingest`, `memory_invalidate`, `memory_get`,
+  `memory_status`, `memory_lint`, `memory_entity_facts`). Frontmatter
+  / Signature / Params / Returns / Errors / Examples / Notes template.
+- **`docs/cli.md`** — operator-facing CLI reference for the `mengdie`
+  binary (all subcommands, flags, exit codes, error conditions).
+- **`docs/operations/dreaming-decay.md`** — operator runbook for the
+  decay pass: required first-run procedure, rollback SQL for
+  falsely-demoted memories, metric interpretation guide.
+- **`docs/ae-integration.md`** — how the AE plugin
+  (`agentic-engineering`) integrates with Mengdie via MCP tools;
+  describes the actual integration points already shipped in the AE
+  skill set.
+
+### Internal
+
+- Dreaming synthesis call sites refactored to thread the shared
+  `Arc<Mutex<Embedder>>` through the synthesis pipeline; CLI surface
+  shared between `mengdie dream --synthesize` and the new
+  `mengdie reembed-synthesis` backfill path.
+- MCP integration test coverage extended with cross-project guard
+  cases on `memory_invalidate` (full-UUID, prefix, blocked vs.
+  allowed, override semantics).
+
+### Cargo
+
+- Net delta: **0 new crates**. All new functionality rides existing
+  transports.
+
+---
+
 ## v0.0.2 — 2026-05-19
 
 **Theme**: entity-graph upgrade + 4 new MCP tools + retroactive test
