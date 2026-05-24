@@ -46,11 +46,11 @@ Run the Dreaming pipeline (promotion + optional decay + optional LLM synthesis).
 | Flag | Type | Default | Semantics |
 |---|---|---|---|
 | `--min-recall <N>` | i64 | `dreaming::DEFAULT_MIN_RECALL` (currently 3) | Minimum `recall_count` for promotion |
-| `--min-relevance <F>` | f64 | `dreaming::DEFAULT_MIN_RELEVANCE` (currently 0.5) | Minimum `avg_relevance` for promotion |
-| `--window-days <N>` | i64 | `dreaming::DEFAULT_WINDOW_DAYS` (currently 30) | `last_recalled` recency window |
+| `--min-relevance <F>` | f64 | `dreaming::DEFAULT_MIN_RELEVANCE` (currently 0.45) | Minimum `avg_relevance` for promotion |
+| `--window-days <N>` | i64 | `dreaming::DEFAULT_WINDOW_DAYS` (currently 14) | `last_recalled` recency window |
 | `--synthesize` | flag | off | Run LLM synthesis after promotion (opt-in: makes network calls + writes synthesis rows) |
 | `--threshold <F>` | f32 | `clustering::DEFAULT_THRESHOLD` (0.75) | Cosine clustering threshold |
-| `--min-cluster-size <N>` | usize | `clustering::DEFAULT_MIN_SIZE` (3) | Minimum cluster size for synthesis |
+| `--min-cluster-size <N>` | usize | `clustering::DEFAULT_MIN_SIZE` (currently 2) | Minimum cluster size for synthesis |
 | `--max-cluster-size <N>` | usize | `20` | Cluster truncation cap (bounds LLM token budget) |
 | `--dry-run` | flag | off | Show synthesis prompts without LLM calls or DB writes. **Requires `--synthesize`**. |
 | `--decay-dry-run` | flag | off | Dry-run the exponential decay pass: report would-demote list without clearing `is_longterm`. Incompatible with `--synthesize --dry-run`. |
@@ -109,7 +109,6 @@ recall stats. Useful for spotting under-recalled facts or pipeline drift.
 
 | Flag | Type | Default | Semantics |
 |---|---|---|---|
-| `--global` | flag | off | Show audit data across all projects |
 | `--format <FMT>` | string | `"table"` | Output format: `table` or `json` |
 
 ### `synthesis-audit <id>`
@@ -128,6 +127,7 @@ older synthesis rows created before embedding-on-write landed).
 
 | Flag | Type | Default | Semantics |
 |---|---|---|---|
+| `--project <ID>` | string | (all projects) | Limit backfill to a single `project_id`; omit to scan all projects in the global DB |
 | `--dry-run` | flag | off | Report rows that WOULD be re-embedded without performing inference or DB writes. Skips embedder load for fast preview. |
 
 ## Returns (exit codes + stdout)

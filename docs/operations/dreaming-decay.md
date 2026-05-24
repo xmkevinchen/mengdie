@@ -44,7 +44,7 @@ MUST:
    It queries the **decay-eligible** long-term count (the three primary
    predicates — `is_longterm = 1 AND valid_until IS NULL AND last_recalled
    IS NOT NULL` — match the decay pass's static filter at
-   `src/core/dreaming.rs:163-167`; the pass additionally appends an
+   `src/core/dreaming.rs:167-171`; the pass additionally appends an
    optional project-scope predicate when `mengdie dream --project <id>` is
    used, which the default-scope operator procedure does not invoke).
    Rows with NULL `last_recalled` are permanently immune to demotion and
@@ -53,7 +53,7 @@ MUST:
    <!-- threshold-snippet:begin -->
    ```sql
    -- Decay-eligible long-term count (denominator for the 10% threshold).
-   -- Filter mirrors src/core/dreaming.rs:163-167.
+   -- Filter mirrors src/core/dreaming.rs:167-171.
    SELECT COUNT(*) FROM memory_entries
      WHERE is_longterm = 1
        AND valid_until IS NULL
@@ -102,8 +102,7 @@ list as a just-recalled piece of context; a future threshold-alarm fires
 on a spike during a known-burst recall pattern.
 
 **Required input**: the `breaches` array from the structured-JSON stderr
-line of the offending pass (see `docs/schemas/dreaming_pass.json` for
-the current JSON contract). Capture the JSON line at run time (redirect
+line of the offending pass. Capture the JSON line at run time (redirect
 stderr to a file or copy from the terminal scrollback) — without it,
 exact row-level rollback is constrained.
 
