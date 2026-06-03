@@ -1,0 +1,52 @@
+# .claude/pipeline.yml — Agentic Engineering project config (public)
+#
+# Per-operator imports (project_agents, agent_libraries) live in
+# .claude/pipeline.local.yml (gitignored).
+
+# --- Test & Lint ---
+test:
+  command: "cargo test"
+  framework: "cargo"
+
+lint:
+  command: "cargo clippy"
+
+# --- Output Directories ---
+# AE pipeline outputs land at the canonical .ae/<topic>/ locations.
+# AE plugin skills (ae:roadmap, ae:retrospect, ae:dashboard, etc.)
+# hardcode these paths; pipeline.yml output.* must match so future
+# writes go where readers expect.
+# Free-form docs (blueprint, prd, roadmap, releases, operations,
+# schemas, specs, spikes, surveys) remain under .ae/docs/ as a general
+# documentation archive.
+output:
+  discussions: ".ae/discussions/"
+  plans: ".ae/plans/"
+  milestones: ".ae/milestones/"
+  backlog: ".ae/backlog/"
+  reviews: ".ae/reviews/"
+  analyses: ".ae/analyses/"
+
+# --- Test Plugin ---
+test_plugin:
+  judge: codex
+
+# --- Work Execution ---
+work:
+  max_fix_loops: 3
+  auto_pass: true
+  review_mode: full
+  security_patterns:
+    - "auth/*"
+    - "security/*"
+    - "*.env"
+    - "*secret*"
+    - "*credential*"
+    - "*.pem"
+    - "*.key"
+    - "migrations/*"
+
+# --- Cross-Family Review ---
+cross_family:
+  codex: true
+  gemini: true

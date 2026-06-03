@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# GITHUB_TOKEN needs contents:write to create releases and upload assets;
+# the default permission is read-only.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache fastembed model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-${{ runner.os }}-all-MiniLM-L6-v2
+      - name: Test
+        run: cargo test
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release with notes from CHANGELOG (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+
+          # Extract the CHANGELOG section for this tag. Matches
+          # `## v0.0.X` heading prefix (with or without `— <date>`
+          # trailer) and captures the body up to the next `## ` heading.
+          awk -v ver="${TAG}" '
+            $0 ~ "^## "ver"( |$|—)" { in_section=1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+
+          # Fallback if extraction yielded nothing (no section for this
+          # tag — should be impossible after /publish skill pre-check 6,
+          # but defensive for direct tag pushes).
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "WARNING: no CHANGELOG section found for ${TAG}; using minimal notes" >&2
+            echo "See CHANGELOG.md for the full ${TAG} change list." > /tmp/release-notes.md
+          fi
+
+          echo "===== release notes for ${TAG} ====="
+          cat /tmp/release-notes.md
+          echo "====================================="
+
+          gh release view "${TAG}" >/dev/null 2>&1 || \
+            gh release create "${TAG}" \
+              --title "${TAG}" \
+              --notes-file /tmp/release-notes.md
+
+  build:
+    needs: [create-release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            asset_suffix: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            asset_suffix: linux-arm64
+          # Intel macOS (x86_64-apple-darwin / macos-13) dropped: GitHub's
+          # macos-13 hosted runner pool is shrinking with Apple's Intel EOL
+          # and jobs reliably stall in `queued` for hours. macOS userbase
+          # is ~90%+ Apple Silicon since 2024; macos-latest (aarch64)
+          # covers the relevant audience.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            asset_suffix: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            asset_suffix: windows-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          STAGE="mengdie-${TAG}-${{ matrix.asset_suffix }}"
+          mkdir -p "dist/${STAGE}"
+          cp "target/${{ matrix.target }}/release/mengdie" "dist/${STAGE}/"
+          cp "target/${{ matrix.target }}/release/mengdie-mcp" "dist/${STAGE}/"
+          cp README.md CHANGELOG.md LICENSE "dist/${STAGE}/" 2>/dev/null || true
+          cd dist
+          tar -czf "${STAGE}.tar.gz" "${STAGE}"
+          ls -lh "${STAGE}.tar.gz"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $TAG = "${env:GITHUB_REF}".Replace("refs/tags/", "")
+          $STAGE = "mengdie-$TAG-${{ matrix.asset_suffix }}"
+          New-Item -ItemType Directory -Force -Path "dist/$STAGE" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/mengdie.exe"     "dist/$STAGE/"
+          Copy-Item "target/${{ matrix.target }}/release/mengdie-mcp.exe" "dist/$STAGE/"
+          Copy-Item README.md, CHANGELOG.md, LICENSE "dist/$STAGE/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "dist/$STAGE" -DestinationPath "dist/$STAGE.zip"
+          Get-Item "dist/$STAGE.zip"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          STAGE="mengdie-${TAG}-${{ matrix.asset_suffix }}"
+          gh release upload "${TAG}" "dist/${STAGE}.${{ matrix.archive }}" --clobber

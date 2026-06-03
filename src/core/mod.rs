@@ -1,0 +1,21 @@
+pub mod clustering;
+pub mod config;
+pub mod contradiction;
+pub mod db;
+pub mod decay;
+pub mod dreaming;
+
+pub mod embeddings;
+pub mod ingest;
+pub mod lint;
+pub mod llm;
+pub mod mcp_tools;
+pub mod metrics;
+pub mod parser;
+pub mod project;
+pub mod reembed;
+pub mod schema;
+pub mod search;
+pub mod synthesis;
+pub mod vector;
+pub mod watcher;

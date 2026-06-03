@@ -1,0 +1,8 @@
+{
+  "is_error": false,
+  "result": "Cluster lacks a coherent thread; declined to synthesize.",
+  "structured_output": {
+    "skip": true,
+    "reason": "The three memories share vocabulary about timeouts but address unrelated subsystems (HTTP client, sqlite WAL, embedding cache); no shared decision or design choice connects them."
+  }
+}
